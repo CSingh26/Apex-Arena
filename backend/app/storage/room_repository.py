@@ -128,6 +128,21 @@ class SqlRaceRoomRepository:
                 else None
             )
 
+    async def get_room_by_session(self, session_key: str) -> RaceRoom | None:
+        statement = (
+            select(RaceRoomRecord)
+            .where(RaceRoomRecord.session_key == session_key)
+            .order_by(RaceRoomRecord.is_featured.desc())
+            .limit(1)
+        )
+        async with self.database.session_factory() as session:
+            record = (await session.execute(statement)).scalar_one_or_none()
+            return (
+                RaceRoom.model_validate(record, from_attributes=True)
+                if record is not None
+                else None
+            )
+
     async def get_agents(self, room_id: UUID) -> list[AgentProfile]:
         statement = (
             select(AgentProfileRecord)
