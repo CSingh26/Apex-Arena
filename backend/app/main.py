@@ -20,6 +20,8 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
         configure_logging(settings)
         application.state.services = AppServices(settings)
+        if settings.openf1_live_auto_connect:
+            await application.state.services.openf1_live.connect()
         try:
             yield
         finally:
@@ -28,15 +30,15 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
     application = FastAPI(
         title="Apex Arena API",
         version="0.1.0",
-        description="Day 1 live-data foundation for the 2026 season.",
+        description="Day 2 unified live and replay race engine for the 2026 season.",
         lifespan=lifespan,
     )
     application.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins,
         allow_credentials=False,
-        allow_methods=["GET"],
-        allow_headers=["Accept", "Content-Type"],
+        allow_methods=["GET", "POST"],
+        allow_headers=["Accept", "Content-Type", "X-Internal-API-Key"],
     )
     application.include_router(router)
     return application

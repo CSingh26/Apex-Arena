@@ -174,6 +174,15 @@ class SqlNormalizedEventRepository:
         async with self.database.session_factory() as session:
             return int((await session.execute(statement)).scalar_one_or_none() or 0)
 
+    async def latest_session_key(self) -> str | None:
+        statement = (
+            select(NormalizedRaceEventRecord.session_key)
+            .order_by(NormalizedRaceEventRecord.processed_at.desc())
+            .limit(1)
+        )
+        async with self.database.session_factory() as session:
+            return (await session.execute(statement)).scalar_one_or_none()
+
     async def count(self, session_key: str | None = None) -> int:
         statement = select(func.count(NormalizedRaceEventRecord.id))
         if session_key is not None:

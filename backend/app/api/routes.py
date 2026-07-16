@@ -2,21 +2,27 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import logging
 from datetime import UTC, datetime
 from typing import Annotated
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 
 from app.api.schemas import (
     AppHealth,
     ComponentHealth,
     DebugConfigResponse,
+    EngineStatusResponse,
     HealthResponse,
+    HistoricalIngestionRequest,
+    HistoricalIngestionResponse,
     LiveStatusResponse,
     OpenF1StatusResponse,
     SeasonCalendarSummary,
+    SessionEventsResponse,
+    SessionStateResponse,
 )
 from app.domain.models import MeetingLifecycleStatus
 from app.providers.jolpica import JolpicaPayloadError
@@ -96,6 +102,127 @@ async def openf1_status(services: Services) -> OpenF1StatusResponse:
 @router.get("/api/v1/live/status", response_model=LiveStatusResponse)
 async def live_status(services: Services) -> LiveStatusResponse:
     return LiveStatusResponse(**services.openf1_live.status())
+
+
+@router.get("/api/v1/engine/status", response_model=EngineStatusResponse)
+async def engine_status(services: Services) -> EngineStatusResponse:
+    current_session_key = (
+        services.openf1_live.current_session_key
+        or await services.normalized_event_repository.latest_session_key()
+    )
+    (
+        database_result,
+        redis_result,
+        raw_count,
+        normalized_count,
+        snapshot_count,
+        latest_ingestion,
+    ) = await asyncio.gather(
+        services.database.health_check(),
+        services.redis.health_check(),
+        services.raw_event_repository.count(current_session_key),
+        services.normalized_event_repository.count(current_session_key),
+        services.snapshot_repository.count(current_session_key),
+        services.ingestion_runs.latest(),
+    )
+    latest_sequence = (
+        await services.normalized_event_repository.max_sequence(current_session_key)
+        if current_session_key
+        else 0
+    )
+    database_ok, database_detail = database_result
+    redis_ok, redis_detail = redis_result
+    live = LiveStatusResponse(**services.openf1_live.status())
+    return EngineStatusResponse(
+        status="ready" if database_ok and redis_ok else "degraded",
+        generated_at=datetime.now(UTC),
+        database=ComponentHealth(
+            status="healthy" if database_ok else "degraded", detail=database_detail
+        ),
+        redis=ComponentHealth(
+            status="healthy" if redis_ok else "degraded", detail=redis_detail
+        ),
+        current_session_key=current_session_key,
+        raw_event_count=raw_count,
+        normalized_event_count=normalized_count,
+        snapshot_count=snapshot_count,
+        latest_sequence_number=latest_sequence,
+        ordering_buffer_pending=services.ordering_buffer.pending(current_session_key),
+        historical_ingestion_enabled=services.settings.historical_ingestion_enabled,
+        debug_ingestion_enabled=services.settings.debug_ingestion_enabled,
+        live=live,
+        latest_ingestion=latest_ingestion,
+    )
+
+
+@router.get(
+    "/api/v1/sessions/{session_key}/events",
+    response_model=SessionEventsResponse,
+)
+async def session_events(
+    session_key: str,
+    services: Services,
+    after_sequence_number: int = Query(default=0, ge=0),
+    limit: int = Query(default=100, ge=1, le=1000),
+) -> SessionEventsResponse:
+    events = await services.normalized_event_repository.list_for_session(
+        session_key,
+        after_sequence=after_sequence_number,
+        limit=limit,
+    )
+    return SessionEventsResponse(
+        session_key=session_key,
+        after_sequence_number=after_sequence_number,
+        count=len(events),
+        events=events,
+    )
+
+
+@router.get(
+    "/api/v1/sessions/{session_key}/state",
+    response_model=SessionStateResponse,
+)
+async def session_state(session_key: str, services: Services) -> SessionStateResponse:
+    return SessionStateResponse(state=await services.race_state.get_state(session_key))
+
+
+@router.post(
+    "/api/v1/debug/ingest-historical-session",
+    response_model=HistoricalIngestionResponse,
+)
+async def ingest_historical_session(
+    payload: HistoricalIngestionRequest,
+    services: Services,
+    internal_api_key: Annotated[str | None, Header(alias="X-Internal-API-Key")] = None,
+) -> HistoricalIngestionResponse:
+    settings = services.settings
+    if not settings.debug_ingestion_enabled or not settings.historical_ingestion_enabled:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Ingestion is disabled")
+    configured_key = settings.internal_api_key
+    if configured_key is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Internal ingestion is not configured",
+        )
+    if internal_api_key is None or not hmac.compare_digest(
+        internal_api_key,
+        configured_key.get_secret_value(),
+    ):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid internal key")
+    try:
+        result = await services.historical.ingest_session(payload.session_key, payload.endpoints)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    except httpx.HTTPError as exc:
+        logger.warning("Historical OpenF1 provider unavailable: %s", type(exc).__name__)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="The historical provider is temporarily unavailable",
+        ) from exc
+    return HistoricalIngestionResponse.model_validate(result.model_dump())
 
 
 @router.get("/api/v1/season/{year}", response_model=SeasonCalendarSummary)

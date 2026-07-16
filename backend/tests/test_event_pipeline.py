@@ -66,6 +66,10 @@ class NormalizedRepository:
             default=0,
         )
 
+    async def latest_session_key(self) -> str | None:
+        events = sorted(self.events.values(), key=lambda event: event.processed_at)
+        return events[-1].session_key if events else None
+
     async def count(self, session_key: str | None = None) -> int:
         if session_key is None:
             return len(self.events)
