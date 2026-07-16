@@ -6,6 +6,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { getEngineStatus, getMessageEvidence, getRaceRoom, getRoomMessages, roomStreamUrl, startRoomReplay, updateRoomPlayback } from "@/lib/api";
 import type { AgentProfile, EngineStatus, MessageEvidence, MessageTopic, RaceRoomDetailResponse, RoomMessage, RoomPlayback } from "@/lib/types";
+import { mergeRoomMessages } from "@/lib/room-state";
 
 const TOPICS: MessageTopic[] = ["strategy", "pace", "racecraft", "incident", "pit_stop", "tyres", "championship", "summary"];
 const initials = (name: string) => name.split(" ").map((part) => part[0]).join("");
@@ -37,8 +38,7 @@ export function RoomExperience({ slug }: { slug: string }) {
   const [lap, setLap] = useState(""); const [connected, setConnected] = useState(false); const [error, setError] = useState<string | null>(null);
 
   const mergeMessages = useCallback((incoming: RoomMessage[]) => setMessages((current) => {
-    const indexed = new Map(current.map((message) => [message.id, message])); incoming.forEach((message) => indexed.set(message.id, message));
-    return [...indexed.values()].sort((a, b) => a.sequence - b.sequence);
+    return mergeRoomMessages(current, incoming);
   }), []);
   useEffect(() => { const controller = new AbortController(); Promise.all([getRaceRoom(slug, controller.signal), getRoomMessages(slug, "limit=250", controller.signal), getEngineStatus(controller.signal)]).then(([room, feed, status]) => { setDetail(room); setPlayback(room.playback); mergeMessages(feed.messages); setEngine(status); }).catch((reason: Error) => { if (reason.name !== "AbortError") setError("This room is not available right now."); }); return () => controller.abort(); }, [slug, mergeMessages]);
   useEffect(() => { if (!detail) return; const source = new EventSource(roomStreamUrl(slug)); source.addEventListener("open", () => setConnected(true)); source.addEventListener("error", () => setConnected(false)); source.addEventListener("room_message", (event) => mergeMessages([JSON.parse((event as MessageEvent).data) as RoomMessage])); source.addEventListener("playback_state", (event) => setPlayback(JSON.parse((event as MessageEvent).data) as RoomPlayback)); return () => source.close(); }, [detail, slug, mergeMessages]);
