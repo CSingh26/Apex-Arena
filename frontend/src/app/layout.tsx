@@ -4,8 +4,8 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Apex Arena — 2026 Race Control",
-  description: "Live-data foundation for the Apex Arena 2026 Formula racing fan simulation.",
+  title: "Apex Arena — Race Rooms",
+  description: "Grounded AI race analysis from five distinct voices, live and on replay.",
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
