@@ -61,7 +61,7 @@ async def health(services: Services) -> HealthResponse:
         live_detail = "Live mode is disabled"
     elif settings.openf1_credentials_present:
         live_status = "ready"
-        live_detail = "Credentials present; MQTT transport scaffolded"
+        live_detail = "Credentials present; TLS MQTT client is available"
     else:
         live_status = "degraded"
         live_detail = "Credentials missing; historical REST remains available"
@@ -87,7 +87,7 @@ async def health(services: Services) -> HealthResponse:
         jolpica=ComponentHealth(status="configured", detail="2026 calendar provider configured"),
         ai=ComponentHealth(
             status="enabled" if settings.ai_enabled and not settings.ai_kill_switch else "disabled",
-            detail="Day 1 exposes configuration only; AI reactions are not running",
+            detail="Day 2 exposes configuration only; AI reactions are not running",
         ),
     )
 

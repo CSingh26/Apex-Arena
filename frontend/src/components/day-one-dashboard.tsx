@@ -3,11 +3,22 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 
-import { API_URL, getHealth, getSeason } from "@/lib/api";
+import {
+  API_URL,
+  getEngineStatus,
+  getHealth,
+  getSeason,
+  getSessionEvents,
+  getSessionState,
+  sessionStreamUrl,
+} from "@/lib/api";
 import type {
   ComponentStatus,
+  EngineStatus,
   HealthResponse,
+  NormalizedRaceEvent,
   RaceMeeting,
+  RaceState,
   SeasonCalendarSummary,
 } from "@/lib/types";
 
@@ -33,9 +44,10 @@ const spaTimeFormatter = new Intl.DateTimeFormat("en-GB", {
 });
 
 function toneFor(status: string): "good" | "warn" | "neutral" | "loading" {
-  if (["healthy", "configured", "ready", "enabled", "live"].includes(status)) return "good";
-  if (["degraded", "unavailable", "error"].includes(status)) return "warn";
-  if (status === "checking") return "loading";
+  const normalized = status.toLowerCase();
+  if (["healthy", "configured", "ready", "enabled", "live", "connected", "open", "completed"].includes(normalized)) return "good";
+  if (["degraded", "unavailable", "error", "missing_credentials"].includes(normalized)) return "warn";
+  if (["checking", "connecting", "reconnecting"].includes(normalized)) return "loading";
   return "neutral";
 }
 
@@ -101,8 +113,8 @@ function TargetRace({ race, loading }: { race?: RaceMeeting; loading: boolean })
             Belgian Grand Prix
           </h2>
           <p className="mt-5 max-w-2xl text-sm leading-6 text-slate-400">
-            The Day 1 pipeline is pointed at Spa. Historical rooms stay replayable while this
-            weekend becomes Apex Arena&apos;s first live connection target.
+            The unified race engine is pointed at Spa. Historical sessions stay replayable while
+            this weekend becomes Apex Arena&apos;s first live connection target.
           </p>
         </div>
         <div className="min-w-56 border-l border-white/10 pl-6 lg:pb-1">
@@ -171,17 +183,176 @@ function RaceGroup({ title, races }: { title: string; races: RaceMeeting[] }) {
   );
 }
 
-export function DayOneDashboard() {
+type EnginePanelProps = {
+  engine?: EngineStatus;
+  engineError: boolean;
+  selectedSession: string;
+  sessionDraft: string;
+  setSessionDraft: (value: string) => void;
+  selectSession: () => void;
+  events: NormalizedRaceEvent[];
+  raceState?: RaceState;
+  streamState: string;
+};
+
+function EnginePanel({
+  engine,
+  engineError,
+  selectedSession,
+  sessionDraft,
+  setSessionDraft,
+  selectSession,
+  events,
+  raceState,
+  streamState,
+}: EnginePanelProps) {
+  const drivers = Object.entries(raceState?.drivers ?? {}).sort(
+    ([, left], [, right]) => (left.position ?? 99) - (right.position ?? 99),
+  );
+  const mode = raceState?.is_replay ? "Replay" : engine?.live.connection_state === "CONNECTED" ? "Live" : "Standby";
+
+  return (
+    <section aria-labelledby="engine-heading" className="mb-20 rounded-3xl border border-white/8 bg-[#0a0d12]/90 p-6 sm:p-9">
+      <div className="grid gap-8 border-b border-white/8 pb-8 lg:grid-cols-[1fr_auto] lg:items-end">
+        <div>
+          <p className="section-kicker">Unified race engine</p>
+          <div className="mt-3 flex flex-wrap items-center gap-3">
+            <h2 id="engine-heading" className="text-3xl font-black tracking-[-0.035em] text-white">
+              Race signal
+            </h2>
+            <span className={`rounded-full border px-2.5 py-1 font-mono text-[0.62rem] font-bold uppercase tracking-[0.16em] ${mode === "Live" ? "border-emerald-300/25 bg-emerald-300/10 text-emerald-200" : "border-sky-300/20 bg-sky-300/8 text-sky-200"}`}>
+              {mode}
+            </span>
+          </div>
+          <p className="mt-3 max-w-2xl text-sm leading-6 text-slate-500">
+            Live MQTT and historical OpenF1 records share one idempotent, ordered state pipeline.
+          </p>
+        </div>
+        <form
+          className="flex max-w-md gap-2"
+          onSubmit={(event) => {
+            event.preventDefault();
+            selectSession();
+          }}
+        >
+          <label className="sr-only" htmlFor="session-key">OpenF1 session key</label>
+          <input
+            id="session-key"
+            value={sessionDraft}
+            onChange={(event) => setSessionDraft(event.target.value)}
+            placeholder="OpenF1 session key"
+            className="min-w-0 flex-1 rounded-xl border border-white/10 bg-black/20 px-4 py-2.5 font-mono text-xs text-slate-200 outline-none transition placeholder:text-slate-700 focus:border-red-300/40"
+          />
+          <button type="submit" className="rounded-xl border border-white/10 px-4 py-2 text-[0.64rem] font-bold uppercase tracking-[0.14em] text-slate-300 transition hover:border-white/25 hover:text-white">
+            Connect
+          </button>
+        </form>
+      </div>
+
+      {engineError ? (
+        <div className="mt-6 rounded-xl border border-amber-300/20 bg-amber-200/[0.04] p-4 text-sm text-amber-100">
+          Engine telemetry is unavailable. The season dashboard remains in degraded mode.
+        </div>
+      ) : null}
+
+      <div className="grid gap-3 py-7 sm:grid-cols-2 lg:grid-cols-6">
+        {[
+          ["Raw", engine?.raw_event_count],
+          ["Normalized", engine?.normalized_event_count],
+          ["Sequence", engine?.latest_sequence_number],
+          ["Snapshots", engine?.snapshot_count],
+          ["Buffer", engine?.ordering_buffer_pending],
+          ["Stream", streamState.replaceAll("_", " ")],
+        ].map(([label, value]) => (
+          <div key={String(label)} className="rounded-xl border border-white/[0.065] bg-white/[0.025] p-4">
+            <p className="font-mono text-lg font-bold capitalize text-slate-100">{value ?? "—"}</p>
+            <p className="mt-1 text-[0.6rem] font-semibold uppercase tracking-[0.16em] text-slate-600">{label}</p>
+          </div>
+        ))}
+      </div>
+
+      {engine?.live.degraded_reason ? (
+        <p className="mb-7 rounded-xl border border-amber-300/20 bg-amber-200/[0.04] px-4 py-3 text-xs text-amber-100">
+          Live feed degraded: {engine.live.degraded_reason}. Historical replay remains available.
+        </p>
+      ) : null}
+
+      <div className="grid gap-8 xl:grid-cols-[1.15fr_0.85fr]">
+        <div>
+          <div className="mb-4 flex items-center justify-between gap-4">
+            <h3 className="text-xs font-bold uppercase tracking-[0.2em] text-slate-400">Latest events</h3>
+            <span className="font-mono text-[0.65rem] text-slate-600">{selectedSession || "NO SESSION"}</span>
+          </div>
+          <ol className="divide-y divide-white/[0.06] border-y border-white/[0.06]">
+            {events.length ? events.slice(0, 10).map((event) => (
+              <li key={event.id} className="grid grid-cols-[3.3rem_1fr_auto] items-center gap-3 py-3">
+                <span className="font-mono text-[0.65rem] text-slate-600">#{event.sequence_number}</span>
+                <div>
+                  <p className="text-xs font-semibold text-slate-300">{event.event_type.replaceAll("_", " ")}</p>
+                  <p className="mt-1 font-mono text-[0.6rem] text-slate-650">
+                    {event.driver_numbers.length ? `DRIVER ${event.driver_numbers.join(", ")}` : "SESSION"}
+                    {event.lap_number ? ` · LAP ${event.lap_number}` : ""}
+                  </p>
+                </div>
+                <span className="text-[0.58rem] font-bold uppercase tracking-[0.12em] text-slate-600">{event.is_replay ? "Replay" : "Live"}</span>
+              </li>
+            )) : (
+              <li className="py-12 text-center text-xs text-slate-600">Select a session to inspect its event stream.</li>
+            )}
+          </ol>
+        </div>
+
+        <div>
+          <div className="mb-4 flex items-center justify-between gap-4">
+            <h3 className="text-xs font-bold uppercase tracking-[0.2em] text-slate-400">Current state</h3>
+            <span className="font-mono text-[0.65rem] uppercase text-slate-600">{raceState?.status ?? "unknown"}</span>
+          </div>
+          <div className="rounded-2xl border border-white/[0.07] bg-black/15 p-5">
+            <div className="grid grid-cols-3 gap-4 border-b border-white/[0.06] pb-5">
+              <div><p className="font-mono text-xl font-bold text-white">{raceState?.current_lap ?? "—"}</p><p className="mt-1 text-[0.58rem] uppercase tracking-[0.14em] text-slate-600">Lap</p></div>
+              <div><p className="font-mono text-xl font-bold text-white">{raceState?.sequence_number ?? "—"}</p><p className="mt-1 text-[0.58rem] uppercase tracking-[0.14em] text-slate-600">Sequence</p></div>
+              <div><p className="font-mono text-xl font-bold text-white">{drivers.length || "—"}</p><p className="mt-1 text-[0.58rem] uppercase tracking-[0.14em] text-slate-600">Drivers</p></div>
+            </div>
+            <ol className="mt-4 space-y-2">
+              {drivers.slice(0, 6).map(([number, driver]) => (
+                <li key={number} className="grid grid-cols-[2rem_1fr_auto] items-center gap-3 text-xs">
+                  <span className="font-mono font-bold text-slate-300">{driver.position ?? "—"}</span>
+                  <span className="text-slate-500">Driver {number}</span>
+                  <span className="font-mono text-[0.65rem] text-slate-600">{driver.gap_to_leader ?? driver.interval ?? "—"}</span>
+                </li>
+              ))}
+              {!drivers.length ? <li className="py-7 text-center text-xs text-slate-600">No state samples yet.</li> : null}
+            </ol>
+          </div>
+          <p className="mt-3 font-mono text-[0.62rem] leading-5 text-slate-700">
+            {raceState?.last_updated_at ? `UPDATED ${new Date(raceState.last_updated_at).toLocaleTimeString()}` : "AWAITING STATE"}
+            {engine?.latest_ingestion ? ` · INGESTION ${engine.latest_ingestion.status.toUpperCase()}` : ` · HISTORICAL ${engine?.historical_ingestion_enabled ? "ENABLED" : "DISABLED"}`}
+          </p>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+export function ApexArenaDashboard() {
   const [health, setHealth] = useState<HealthResponse>();
   const [season, setSeason] = useState<SeasonCalendarSummary>();
+  const [engine, setEngine] = useState<EngineStatus>();
   const [healthError, setHealthError] = useState(false);
   const [seasonError, setSeasonError] = useState(false);
+  const [engineError, setEngineError] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [sessionDraft, setSessionDraft] = useState("");
+  const [selectedSession, setSelectedSession] = useState("");
+  const [events, setEvents] = useState<NormalizedRaceEvent[]>([]);
+  const [raceState, setRaceState] = useState<RaceState>();
+  const [streamState, setStreamState] = useState("idle");
 
   const loadData = useCallback(async () => {
-    const [healthResult, seasonResult] = await Promise.allSettled([
+    const [healthResult, seasonResult, engineResult] = await Promise.allSettled([
       getHealth(),
       getSeason(),
+      getEngineStatus(),
     ]);
 
     if (healthResult.status === "fulfilled") {
@@ -197,6 +368,17 @@ export function DayOneDashboard() {
     } else {
       setSeasonError(true);
     }
+    if (engineResult.status === "fulfilled") {
+      setEngine(engineResult.value);
+      setEngineError(false);
+      if (engineResult.value.current_session_key) {
+        setSelectedSession((current) => current || engineResult.value.current_session_key || "");
+        setSessionDraft((current) => current || engineResult.value.current_session_key || "");
+        setStreamState((current) => current === "idle" ? "connecting" : current);
+      }
+    } else {
+      setEngineError(true);
+    }
     setLoading(false);
   }, []);
 
@@ -205,7 +387,8 @@ export function DayOneDashboard() {
     void Promise.allSettled([
       getHealth(controller.signal),
       getSeason(controller.signal),
-    ]).then(([healthResult, seasonResult]) => {
+      getEngineStatus(controller.signal),
+    ]).then(([healthResult, seasonResult, engineResult]) => {
       if (controller.signal.aborted) return;
       if (healthResult.status === "fulfilled") {
         setHealth(healthResult.value);
@@ -219,10 +402,65 @@ export function DayOneDashboard() {
       } else {
         setSeasonError(true);
       }
+      if (engineResult.status === "fulfilled") {
+        setEngine(engineResult.value);
+        setEngineError(false);
+        if (engineResult.value.current_session_key) {
+          setSelectedSession((current) => current || engineResult.value.current_session_key || "");
+          setSessionDraft((current) => current || engineResult.value.current_session_key || "");
+          setStreamState((current) => current === "idle" ? "connecting" : current);
+        }
+      } else {
+        setEngineError(true);
+      }
       setLoading(false);
     });
     return () => controller.abort();
   }, []);
+
+  useEffect(() => {
+    if (!selectedSession) return;
+
+    const controller = new AbortController();
+    let source: EventSource | undefined;
+    let cancelled = false;
+    void Promise.all([
+      getSessionEvents(selectedSession, controller.signal),
+      getSessionState(selectedSession, controller.signal),
+    ]).then(([eventResponse, stateResponse]) => {
+      if (cancelled) return;
+      const initialEvents = [...eventResponse.events].reverse();
+      setEvents(initialEvents.slice(0, 20));
+      setRaceState(stateResponse.state);
+      const lastSequence = eventResponse.events.at(-1)?.sequence_number ?? 0;
+      source = new EventSource(sessionStreamUrl(selectedSession, lastSequence));
+      source.onopen = () => setStreamState("open");
+      source.onerror = () => setStreamState("reconnecting");
+      source.addEventListener("event", (message) => {
+        const next = JSON.parse((message as MessageEvent<string>).data) as NormalizedRaceEvent;
+        setEvents((current) => [next, ...current.filter((item) => item.id !== next.id)].slice(0, 20));
+      });
+      source.addEventListener("state", (message) => {
+        setRaceState(JSON.parse((message as MessageEvent<string>).data) as RaceState);
+      });
+      source.addEventListener("connection_status", (message) => {
+        const live = JSON.parse((message as MessageEvent<string>).data) as EngineStatus["live"];
+        setEngine((current) => current ? { ...current, live: { ...current.live, ...live } } : current);
+      });
+      source.addEventListener("stream_status", () => setStreamState("degraded"));
+    }).catch((error: unknown) => {
+      if (!controller.signal.aborted) {
+        console.warn("Race session data unavailable", error instanceof Error ? error.name : "Error");
+        setStreamState("degraded");
+      }
+    });
+
+    return () => {
+      cancelled = true;
+      controller.abort();
+      source?.close();
+    };
+  }, [selectedSession]);
 
   const cards = useMemo<DashboardStatus[]>(() => {
     const fallback = loading ? "checking" : "unavailable";
@@ -232,6 +470,11 @@ export function DayOneDashboard() {
         status: health?.status ?? fallback,
         detail: healthError ? `No response from ${API_URL}` : "FastAPI control plane is responding.",
       },
+      {
+        label: "Race engine",
+        status: engine?.status ?? fallback,
+        detail: engineError ? "Engine telemetry is unavailable." : "Unified live and replay pipeline.",
+      },
       compactStatus("PostgreSQL", health?.database, fallback),
       compactStatus("Redis", health?.redis, fallback),
       compactStatus("OpenF1 REST", health?.openf1_rest, fallback),
@@ -239,7 +482,7 @@ export function DayOneDashboard() {
       compactStatus("Jolpica", health?.jolpica, fallback),
       compactStatus("AI systems", health?.ai, fallback),
     ];
-  }, [health, healthError, loading]);
+  }, [engine?.status, engineError, health, healthError, loading]);
 
   const targetRace = season?.races.find((race) => race.is_target);
   const completed = season?.races.filter((race) => race.status === "completed") ?? [];
@@ -257,7 +500,7 @@ export function DayOneDashboard() {
           </a>
           <div className="flex items-center gap-3">
             <span className="hidden font-mono text-[0.62rem] uppercase tracking-[0.17em] text-slate-600 sm:inline">
-              2026 season · Day 01
+              2026 season · Day 02
             </span>
             <button
               type="button"
@@ -276,7 +519,7 @@ export function DayOneDashboard() {
         <div id="top" className="grid gap-12 pb-16 pt-16 lg:grid-cols-[1fr_auto] lg:items-end">
           <div>
             <p className="mb-5 font-mono text-[0.68rem] font-bold uppercase tracking-[0.25em] text-red-300">
-              Live-data foundation / Connected to the race
+              Unified race engine / Understand and stream the race
             </p>
             <h1 className="max-w-5xl text-5xl font-black leading-[0.96] tracking-[-0.055em] text-white sm:text-7xl lg:text-[6.4rem]">
               Race control,
@@ -285,8 +528,8 @@ export function DayOneDashboard() {
             </h1>
           </div>
           <div className="max-w-sm border-l border-red-400/30 pl-5 text-sm leading-6 text-slate-500">
-            A public, 2026-only Formula racing simulation foundation. Today: providers, state,
-            storage, and operational truth.
+            A public, 2026-only Formula racing simulation foundation. Live and replay data now
+            converge into one observable race state.
           </div>
         </div>
 
@@ -295,7 +538,7 @@ export function DayOneDashboard() {
             <div>
               <p className="section-kicker">System telemetry</p>
               <h2 id="systems-heading" className="mt-2 text-2xl font-bold tracking-tight text-white">
-                Foundation status
+                Engine foundation status
               </h2>
             </div>
             <p className="hidden font-mono text-[0.65rem] text-slate-600 sm:block">
@@ -308,6 +551,25 @@ export function DayOneDashboard() {
             {cards.map((item) => <StatusCard key={item.label} item={item} />)}
           </div>
         </section>
+
+        <EnginePanel
+          engine={engine}
+          engineError={engineError}
+          selectedSession={selectedSession}
+          sessionDraft={sessionDraft}
+          setSessionDraft={setSessionDraft}
+          selectSession={() => {
+            const nextSession = sessionDraft.trim();
+            if (!nextSession) return;
+            setEvents([]);
+            setRaceState(undefined);
+            setStreamState("connecting");
+            setSelectedSession(nextSession);
+          }}
+          events={events}
+          raceState={raceState}
+          streamState={streamState}
+        />
 
         <section aria-labelledby="target-heading" className="mb-20">
           <p className="section-kicker mb-5" id="target-heading">
