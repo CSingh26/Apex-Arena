@@ -14,6 +14,7 @@ from sqlalchemy import (
     ForeignKey,
     Integer,
     String,
+    Text,
     UniqueConstraint,
     func,
 )
@@ -198,3 +199,122 @@ class IngestionRunRecord(Base):
     raw_inserted: Mapped[int] = mapped_column(Integer, default=0)
     duplicates: Mapped[int] = mapped_column(Integer, default=0)
     normalized_inserted: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class AgentProfileRecord(Base, TimestampMixin):
+    __tablename__ = "agent_profiles"
+
+    id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    name: Mapped[str] = mapped_column(String(100))
+    role: Mapped[str] = mapped_column(String(120))
+    description: Mapped[str] = mapped_column(Text)
+    avatar_key: Mapped[str] = mapped_column(String(20))
+    specialties: Mapped[list[str]] = mapped_column(JSON_TYPE, default=list)
+    personality: Mapped[list[str]] = mapped_column(JSON_TYPE, default=list)
+    style_rules: Mapped[list[str]] = mapped_column(JSON_TYPE, default=list)
+    speaking_style: Mapped[str] = mapped_column(Text)
+    supported_topics: Mapped[list[str]] = mapped_column(JSON_TYPE, default=list)
+    accent: Mapped[str] = mapped_column(String(30))
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    sort_order: Mapped[int] = mapped_column(Integer)
+
+
+class RaceRoomRecord(Base, TimestampMixin):
+    __tablename__ = "race_rooms"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    slug: Mapped[str] = mapped_column(String(180), unique=True, index=True)
+    session_key: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
+    season: Mapped[int] = mapped_column(Integer, index=True)
+    round_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    race_name: Mapped[str] = mapped_column(String(180))
+    official_name: Mapped[str] = mapped_column(String(180))
+    circuit_name: Mapped[str] = mapped_column(String(180))
+    country: Mapped[str] = mapped_column(String(100))
+    session_type: Mapped[str] = mapped_column(String(60), default="Race")
+    scheduled_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    actual_start: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    status: Mapped[str] = mapped_column(String(30), index=True)
+    mode: Mapped[str] = mapped_column(String(30), index=True)
+    current_lap: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    total_laps: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source_availability: Mapped[str] = mapped_column(String(40))
+    message_count: Mapped[int] = mapped_column(Integer, default=0)
+    agent_count: Mapped[int] = mapped_column(Integer, default=0)
+    last_event_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    is_featured: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_development: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class RaceRoomAgentRecord(Base):
+    __tablename__ = "race_room_agents"
+    __table_args__ = (UniqueConstraint("room_id", "agent_id", name="uq_room_agent"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    room_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("race_rooms.id"), index=True)
+    agent_id: Mapped[str] = mapped_column(ForeignKey("agent_profiles.id"), index=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    joined_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    left_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    sort_order: Mapped[int] = mapped_column(Integer)
+
+
+class RoomMessageRecord(Base):
+    __tablename__ = "room_messages"
+    __table_args__ = (
+        UniqueConstraint("room_id", "sequence", name="uq_room_message_sequence"),
+        UniqueConstraint("room_id", "trigger_event_id", "agent_id", name="uq_room_trigger_agent"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    room_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("race_rooms.id"), index=True)
+    agent_id: Mapped[str] = mapped_column(ForeignKey("agent_profiles.id"), index=True)
+    sequence: Mapped[int] = mapped_column(Integer)
+    lap_number: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    session_time: Mapped[float | None] = mapped_column(Float, nullable=True)
+    wall_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    topic: Mapped[str] = mapped_column(String(40), index=True)
+    message_type: Mapped[str] = mapped_column(String(40))
+    content: Mapped[str] = mapped_column(Text)
+    confidence: Mapped[str] = mapped_column(String(20))
+    evidence_status: Mapped[str] = mapped_column(String(30))
+    reply_to_message_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("room_messages.id"), nullable=True
+    )
+    trigger_event_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("normalized_race_events.id"), nullable=True, index=True
+    )
+    trigger_snapshot_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("race_state_snapshots.id"), nullable=True
+    )
+    generated_by: Mapped[str] = mapped_column(String(40))
+    model_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    prompt_version: Mapped[str] = mapped_column(String(40))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class MessageEvidenceRecord(Base):
+    __tablename__ = "message_evidence"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    message_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("room_messages.id"), index=True)
+    evidence_type: Mapped[str] = mapped_column(String(40))
+    source_provider: Mapped[str] = mapped_column(String(40))
+    source_reference: Mapped[str] = mapped_column(String(180))
+    metric_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    metric_value: Mapped[str | None] = mapped_column(String(180), nullable=True)
+    unit: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    context: Mapped[dict[str, Any]] = mapped_column(JSON_TYPE, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class RoomPlaybackStateRecord(Base):
+    __tablename__ = "room_playback_states"
+
+    room_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("race_rooms.id"), primary_key=True)
+    current_sequence: Mapped[int] = mapped_column(Integer, default=0)
+    playback_speed: Mapped[float] = mapped_column(Float, default=1.0)
+    is_paused: Mapped[bool] = mapped_column(Boolean, default=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
