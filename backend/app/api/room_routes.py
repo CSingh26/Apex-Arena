@@ -6,6 +6,7 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
+from fastapi.responses import StreamingResponse
 
 from app.api.room_schemas import (
     MessageEvidenceResponse,
@@ -16,6 +17,7 @@ from app.api.room_schemas import (
     RoomGenerationResponse,
     RoomMessagesResponse,
 )
+from app.api.room_streaming import race_room_stream
 from app.domain.rooms import MessageTopic, RoomStatus, SourceAvailability
 from app.services.container import AppServices
 
@@ -159,7 +161,27 @@ async def change_playback(
             )
         )
     playback = await services.room_repository.update_playback(room.id, **values)
+    await services.event_bus.publish_room_state(str(room.id), playback.model_dump(mode="json"))
     return ReplayResponse(room=room, playback=playback)
+
+
+@router.get("/{room_slug}/stream")
+async def stream_race_room(
+    room_slug: str,
+    request: Request,
+    services: Services,
+    after_sequence: int = Query(default=0, ge=0),
+) -> StreamingResponse:
+    room = await require_room(room_slug, services)
+    return StreamingResponse(
+        race_room_stream(request, services, room.id, after_sequence),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.post("/{room_slug}/generate", response_model=RoomGenerationResponse)

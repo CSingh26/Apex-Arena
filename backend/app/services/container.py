@@ -58,6 +58,7 @@ class AppServices:
         self.room_discussion = RaceRoomDiscussionEngine(
             self.room_repository,
             DiscussionTriggerEvaluator(),
+            publisher=self.event_bus.publish_room_message,
         )
         self.processor = RaceEventProcessor(
             raw_events=self.raw_events,

@@ -10,6 +10,7 @@ from typing import Any
 from redis.asyncio import Redis
 
 from app.domain.models import NormalizedRaceEvent
+from app.domain.rooms import RoomMessage
 from app.services.race_state import RaceState, RaceStateEngine
 
 logger = logging.getLogger(__name__)
@@ -73,6 +74,37 @@ class EventBus:
             maxlen=200,
         )
 
+    async def publish_room_message(self, message: RoomMessage) -> str:
+        return await self._publish(
+            self.room_stream(str(message.room_id)),
+            {
+                "kind": "room_message",
+                "sequence_number": str(message.sequence),
+                "data": message.model_dump_json(),
+            },
+            maxlen=5000,
+        )
+
+    async def publish_room_state(self, room_id: str, state: dict[str, Any]) -> str:
+        return await self._publish(
+            self.room_stream(room_id),
+            {"kind": "playback_state", "data": json.dumps(state, default=str)},
+            maxlen=5000,
+        )
+
+    async def read_room_stream(
+        self,
+        room_id: str,
+        after_id: str,
+        *,
+        count: int = 100,
+        block_ms: int = 10000,
+    ) -> list[dict[str, Any]]:
+        response = await self.redis.xread(
+            {self.room_stream(room_id): after_id}, count=count, block=block_ms
+        )
+        return self._decode_streams(response)
+
     async def read_events(
         self, session_key: str, after_id: str = "0-0", count: int = 100
     ) -> list[dict[str, Any]]:
@@ -107,6 +139,10 @@ class EventBus:
     @classmethod
     def state_stream(cls, session_key: str) -> str:
         return f"apex:state:{cls._safe_key(session_key)}"
+
+    @classmethod
+    def room_stream(cls, room_id: str) -> str:
+        return f"apex:rooms:{cls._safe_key(room_id)}"
 
     async def _publish(self, stream: str, values: dict[str, str], maxlen: int) -> str:
         try:
