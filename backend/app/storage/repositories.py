@@ -1,13 +1,16 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 from __future__ import annotations
 
-from uuid import UUID
+from datetime import UTC, datetime
+from typing import Any
+from uuid import UUID, uuid4
 
 from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert
 
 from app.domain.models import NormalizedRaceEvent, RaceStateSnapshot
-from app.services.event_pipeline import NormalizedPersistResult
+from app.services.event_pipeline import NormalizedPersistResult, PipelineResult
+from app.services.historical import IngestionRunSummary
 from app.services.race_state import SnapshotPersistResult
 from app.services.raw_events import (
     RawEventCreate,
@@ -15,10 +18,83 @@ from app.services.raw_events import (
 )
 from app.storage.database import Database
 from app.storage.models import (
+    IngestionRunRecord,
     NormalizedRaceEventRecord,
     RaceStateSnapshotRecord,
     RawProviderEventRecord,
 )
+
+
+class SqlIngestionRunRepository:
+    def __init__(self, database: Database) -> None:
+        self.database = database
+
+    async def start(
+        self, *, provider: str, session_key: str, metadata: dict[str, Any]
+    ) -> UUID:
+        run_id = uuid4()
+        async with self.database.session_factory() as session:
+            session.add(
+                IngestionRunRecord(
+                    id=run_id,
+                    provider=provider,
+                    session_key=session_key,
+                    status="running",
+                    run_metadata=metadata,
+                )
+            )
+            await session.commit()
+        return run_id
+
+    async def finish(
+        self,
+        run_id: UUID,
+        *,
+        status: str,
+        result: PipelineResult,
+        last_event_at: datetime | None,
+        last_error: str | None = None,
+    ) -> None:
+        async with self.database.session_factory() as session:
+            await session.execute(
+                update(IngestionRunRecord)
+                .where(IngestionRunRecord.id == run_id)
+                .values(
+                    status=status,
+                    ended_at=datetime.now(UTC),
+                    last_event_at=last_event_at,
+                    last_error=last_error,
+                    raw_inserted=result.raw_inserted,
+                    duplicates=result.raw_duplicates + result.normalized_duplicates,
+                    normalized_inserted=result.normalized_inserted,
+                )
+            )
+            await session.commit()
+
+    async def latest(self) -> IngestionRunSummary | None:
+        statement = (
+            select(IngestionRunRecord)
+            .order_by(IngestionRunRecord.started_at.desc())
+            .limit(1)
+        )
+        async with self.database.session_factory() as session:
+            record = (await session.execute(statement)).scalar_one_or_none()
+            if record is None:
+                return None
+            return IngestionRunSummary(
+                id=record.id,
+                provider=record.provider,
+                session_key=record.session_key,
+                status=record.status,
+                started_at=record.started_at,
+                ended_at=record.ended_at,
+                last_event_at=record.last_event_at,
+                last_error=record.last_error,
+                metadata=record.run_metadata,
+                raw_inserted=record.raw_inserted,
+                duplicates=record.duplicates,
+                normalized_inserted=record.normalized_inserted,
+            )
 
 
 class SqlRawEventRepository:
