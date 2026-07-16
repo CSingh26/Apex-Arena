@@ -6,11 +6,10 @@ Apex Arena is a public Formula racing fan-simulation platform. Version 0.1 is in
 limited to the 2026 season: completed weekends become replay/archive candidates, and the Belgian
 Grand Prix at Spa-Francorchamps is the first live target.
 
-This repository contains the Day 2 unified race engine: live MQTT and historical REST records enter
-the same idempotent processing pipeline, produce normalized session events and race state, persist
-to PostgreSQL, publish through Redis Streams, and reach the dashboard over Server-Sent Events. It
-does **not** yet contain AI fan reactions, user accounts or agents, vector memory, Monte Carlo
-models, or replay-speed controls.
+The product centers on **Race Rooms**: persistent, event-grounded conversations between five
+distinct analysis agents. Live MQTT and historical REST records enter one idempotent race engine;
+significant normalized events become compact discussion chains that reach browsers over resilient
+Server-Sent Events. A deterministic generator remains available when no LLM is configured.
 
 ## Repository layout
 
@@ -41,8 +40,40 @@ models, or replay-speed controls.
 - Deterministic race-state reduction with periodic PostgreSQL snapshots.
 - Redis Streams for normalized events, state updates, and live connection status.
 - Reconnect-safe SSE with persisted missed-event recovery and heartbeats.
-- A Day 2 dashboard showing engine counts, session events, current state, stream health, the 2026
-  calendar, and the Belgian Grand Prix target.
+- A responsive Race Rooms index and individual conversation view with evidence, filters, lap seek,
+  replay controls, light/dark presentation, and collapsible operational diagnostics.
+
+## Race Rooms architecture
+
+```text
+OpenF1/Jolpica -> normalized event -> significance + cooldown/dedup
+                                         |
+                                         v
+                         grounded primary -> optional reply -> Nova summary
+                                         |
+                    PostgreSQL messages + evidence + playback
+                                         |
+                              Redis Stream -> recovery-safe SSE -> room timeline
+```
+
+The catalog derives public 2026 race metadata from Jolpica. Completed races without detailed
+telemetry remain visible with an honest results-only notice; the local fixture room is always
+marked **Development room · simulated/test data**.
+
+### Agent roster
+
+| Agent | Role | Primary lens |
+| --- | --- | --- |
+| Mira Vale | Strategist | Pit windows, tyres, neutralisations |
+| Theo Voss | Telemetry analyst | Pace, intervals, measured trends |
+| Lena Cross | Racecraft analyst | Position changes, incidents, overtakes |
+| Arjun Reyes | Historian | Session context and championship framing |
+| Nova | Host | Opens, moderates, qualifies, and summarizes |
+
+Profiles are typed in `backend/app/services/room_agents.py` and seeded idempotently. Add an agent by
+defining a complete `AgentProfile`, adding it to `DEFAULT_ROOM_AGENTS`, and creating a migration if
+its persistent shape requires new fields. Every claim must cite normalized evidence or explicitly
+state that the required detail is unavailable.
 
 ## Unified race engine
 
@@ -153,6 +184,8 @@ Optional race-engine configuration:
 - `EVENT_ORDERING_BUFFER_MS`, `EVENT_DEDUP_TTL_SECONDS`, and
   `RACE_STATE_SNAPSHOT_EVERY_N_EVENTS` tune the processing pipeline.
 - `SSE_HEARTBEAT_SECONDS` and `ENGINE_RECENT_EVENTS_LIMIT` tune client recovery and streaming.
+- `ROOM_TOPIC_COOLDOWN_SECONDS` limits repetitive topic reactions and
+  `ROOM_STREAM_BACKLOG_LIMIT` caps persisted SSE recovery per connection.
 - `HISTORICAL_INGESTION_ENABLED` and `DEBUG_INGESTION_ENABLED` gate replay ingestion.
 - `INTERNAL_API_KEY` is required by the mutating historical-ingestion endpoint.
 - `OPENAI_API_KEY`: no Day 2 code calls OpenAI. `AI_ENABLED` reports intended configuration only.
@@ -199,6 +232,14 @@ internal key is configured.
 | `GET /api/v1/sessions/{session_key}/events` | Persisted normalized session events after a sequence |
 | `GET /api/v1/sessions/{session_key}/state` | Current in-memory or latest snapshotted race state |
 | `GET /api/v1/stream/sessions/{session_key}` | SSE event, state, and live-status stream with recovery |
+| `GET /api/v1/race-rooms` | Paginated room catalog with season, status, and search filters |
+| `GET /api/v1/race-rooms/{slug}` | Room metadata, agent roster, playback, and data notice |
+| `GET /api/v1/race-rooms/{slug}/messages` | Cursor/filter based persistent discussion history |
+| `GET /api/v1/race-rooms/{slug}/messages/{id}/evidence` | Traceable source evidence for one message |
+| `GET /api/v1/race-rooms/{slug}/stream` | Missed-message recovery followed by live room SSE |
+| `POST /api/v1/race-rooms/{slug}/replay` | Restart an available public replay |
+| `POST /api/v1/race-rooms/{slug}/playback` | Pause, resume, speed, sequence, or lap seek |
+| `POST /api/v1/race-rooms/{slug}/generate` | Internal-key-protected discussion generation |
 | `POST /api/v1/debug/ingest-historical-session` | Internal-key-protected historical ingestion trigger |
 | `GET /api/v1/debug/config` | Non-secret runtime metadata and feature flags |
 
@@ -215,6 +256,7 @@ alembic check
 cd ../frontend
 npm run lint
 npm run typecheck
+npm test
 npm run build
 npm audit
 
@@ -259,12 +301,14 @@ ports to the containers' standard ports; application code needs no changes.
   internal Day 2 tool, not a public job queue.
 - SSE is the only client streaming transport today. Live MQTT depends on valid OpenF1 subscription
   credentials and is deliberately disabled by default.
+- Past rooms can only discuss telemetry that has actually been ingested; results-only rooms do not
+  invent lap, tyre, radio, or classification detail.
+- Playback state is persistent and shared per room, rather than private to each viewer.
 
-## Day 3 direction
+## Next direction
 
-Day 3 should add meaningful derived race events, a durable replay scheduler with pause/speed/seek,
-database-backed sequence allocation and state rehydration, then place fan-reaction work behind the
-now-observable race engine. User auth, deployment, and broad product polish remain separate work.
+Move sequence allocation and playback scheduling to distributed workers before horizontal scale,
+then add authenticated viewer preferences without weakening public read access or evidence rules.
 
 ## License
 

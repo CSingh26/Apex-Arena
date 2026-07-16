@@ -7,6 +7,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { getEngineStatus, getMessageEvidence, getRaceRoom, getRoomMessages, roomStreamUrl, startRoomReplay, updateRoomPlayback } from "@/lib/api";
 import type { AgentProfile, EngineStatus, MessageEvidence, MessageTopic, RaceRoomDetailResponse, RoomMessage, RoomPlayback } from "@/lib/types";
 import { mergeRoomMessages } from "@/lib/room-state";
+import { ThemeToggle } from "@/components/race-rooms/theme-toggle";
 
 const TOPICS: MessageTopic[] = ["strategy", "pace", "racecraft", "incident", "pit_stop", "tyres", "championship", "summary"];
 const initials = (name: string) => name.split(" ").map((part) => part[0]).join("");
@@ -48,7 +49,7 @@ export function RoomExperience({ slug }: { slug: string }) {
   if (!detail || !playback) return <main className="room-page"><div className="room-state" role="status">Joining the room…</div></main>;
   const { room, agents } = detail;
   return <main className="room-page track-grid">
-    <nav className="room-topbar"><Link href="/race-rooms">← All rooms</Link><span className={`connection ${connected ? "connection--live" : ""}`}>{connected ? "Live stream" : "Reconnecting"}</span></nav>
+    <nav className="room-topbar"><Link href="/race-rooms">← All rooms</Link><span className={`connection ${connected ? "connection--live" : ""}`}>{connected ? "Live stream" : "Reconnecting"}</span><ThemeToggle /></nav>
     <header className="room-header"><div><p className="section-kicker">{room.season} · Round {room.round_number ?? "—"} · {room.mode}</p><h1>{room.race_name}</h1><p>{room.circuit_name} · {room.country}</p>{room.is_development && <strong className="dev-label">Development room · simulated/test data</strong>}</div><div className="lap-display"><span>Lap</span><b>{room.current_lap ?? "—"}</b><small>/ {room.total_laps ?? "—"}</small></div></header>
     <div className="room-layout"><aside className="agent-panel"><p className="section-kicker">In this room</p>{agents.map((agent) => <button key={agent.id} onClick={() => setAgentFilter(agentFilter === agent.id ? "all" : agent.id)} className={agentFilter === agent.id ? "selected" : ""}><span className="agent-avatar">{initials(agent.name)}</span><span><b>{agent.name}</b><small>{agent.role}</small></span></button>)}<Diagnostics status={engine} detail={detail} /></aside>
       <section className="conversation"><div className="playback"><button onClick={() => playback.is_paused ? control({ action: "resume" }) : control({ action: "pause" })}>{playback.is_paused ? "▶ Play" : "Ⅱ Pause"}</button><select aria-label="Playback speed" value={playback.playback_speed} onChange={(event) => control({ action: "speed", playback_speed: Number(event.target.value) })}><option value="0.5">0.5×</option><option value="1">1×</option><option value="2">2×</option><option value="4">4×</option></select><button onClick={async () => setPlayback((await startRoomReplay(slug)).playback)}>Restart replay</button><span>Sequence {playback.current_sequence}</span></div>

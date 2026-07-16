@@ -6,6 +6,7 @@ import { useEffect, useMemo, useState } from "react";
 
 import { getRaceRooms } from "@/lib/api";
 import type { RaceRoom } from "@/lib/types";
+import { ThemeToggle } from "@/components/race-rooms/theme-toggle";
 
 function RoomCard({ room, featured = false }: { room: RaceRoom; featured?: boolean }) {
   const date = new Intl.DateTimeFormat(undefined, { day: "numeric", month: "short", year: "numeric" }).format(new Date(room.scheduled_start));
@@ -45,7 +46,7 @@ export function RaceRoomsIndex() {
   const archive = filtered.filter((room) => room.id !== featured?.id && !recent.includes(room));
 
   return <main className="rooms-shell track-grid">
-    <nav className="rooms-nav"><Link href="/" className="rooms-brand"><i className="brand-mark" /> APEX ARENA</Link><span>2026 · RACE ROOMS</span></nav>
+    <nav className="rooms-nav"><Link href="/" className="rooms-brand"><i className="brand-mark" /> APEX ARENA</Link><span>2026 · RACE ROOMS</span><ThemeToggle /></nav>
     <header className="rooms-hero"><p className="section-kicker">Five minds. One race.</p><h1>The paddock conversation,<br /><em>while it matters.</em></h1><p>Strategy, telemetry, racecraft and history—grounded in the race events underneath every call.</p></header>
     <section className="room-controls" aria-label="Filter race rooms"><label><span>Search</span><input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Race, circuit or country" /></label><label><span>Status</span><select value={status} onChange={(e) => setStatus(e.target.value)}><option value="all">All rooms</option><option value="ready">Ready</option><option value="replaying">Replaying</option><option value="completed">Completed</option><option value="unavailable">Unavailable</option></select></label></section>
     {loading && <div className="room-state" role="status">Opening the Race Rooms…</div>}

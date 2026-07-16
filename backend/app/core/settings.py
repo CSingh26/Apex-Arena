@@ -87,6 +87,8 @@ class Settings(BaseSettings):
     sse_heartbeat_seconds: int = Field(default=15, ge=1, le=120)
     race_state_snapshot_every_n_events: int = Field(default=10, ge=1, le=1000)
     engine_recent_events_limit: int = Field(default=100, ge=1, le=1000)
+    room_topic_cooldown_seconds: int = Field(default=20, ge=0, le=600)
+    room_stream_backlog_limit: int = Field(default=250, ge=1, le=1000)
     historical_ingestion_enabled: bool = True
     historical_ingestion_max_records_per_endpoint: int = Field(default=5000, ge=1, le=50000)
     debug_ingestion_enabled: bool = True
@@ -240,6 +242,7 @@ class Settings(BaseSettings):
             "live_mode_enabled": self.live_mode_enabled,
             "openf1_credentials_present": self.openf1_credentials_present,
             "ai_enabled": self.ai_enabled and not self.ai_kill_switch,
+            "room_topic_cooldown_seconds": self.room_topic_cooldown_seconds,
         }
 
 

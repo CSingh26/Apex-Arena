@@ -44,7 +44,7 @@ class SqlRaceRoomRepository:
             await session.commit()
 
     async def upsert_room(self, room: RaceRoom, agent_ids: list[str]) -> RaceRoom:
-        values = room.model_dump(exclude={"created_at", "updated_at"}, mode="json")
+        values = room.model_dump(exclude={"created_at", "updated_at"})
         values["status"] = room.status.value
         values["mode"] = room.mode.value
         values["source_availability"] = room.source_availability.value
@@ -167,7 +167,7 @@ class SqlRaceRoomRepository:
     async def insert_message(
         self, message: RoomMessage, evidence: list[MessageEvidence]
     ) -> tuple[RoomMessage, bool]:
-        values = message.model_dump(mode="json")
+        values = message.model_dump()
         for key in ("topic", "message_type", "confidence", "evidence_status"):
             values[key] = getattr(message, key).value
         statement = (
@@ -181,9 +181,7 @@ class SqlRaceRoomRepository:
             if inserted_id is None:
                 return message, False
             for item in evidence:
-                item_values = item.model_copy(update={"message_id": inserted_id}).model_dump(
-                    mode="json"
-                )
+                item_values = item.model_copy(update={"message_id": inserted_id}).model_dump()
                 if item_values.get("metric_value") is not None:
                     item_values["metric_value"] = str(item_values["metric_value"])
                 session.add(MessageEvidenceRecord(**item_values))

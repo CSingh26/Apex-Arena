@@ -57,7 +57,7 @@ class AppServices:
         self.rooms = RaceRoomService(self.room_repository, self.season, settings.season_year)
         self.room_discussion = RaceRoomDiscussionEngine(
             self.room_repository,
-            DiscussionTriggerEvaluator(),
+            DiscussionTriggerEvaluator(settings.room_topic_cooldown_seconds),
             publisher=self.event_bus.publish_room_message,
         )
         self.processor = RaceEventProcessor(

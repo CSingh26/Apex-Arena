@@ -24,7 +24,7 @@ async def race_room_stream(
     messages = await services.room_repository.list_messages(
         room_id,
         after_sequence=cursor,
-        limit=services.settings.engine_recent_events_limit,
+        limit=services.settings.room_stream_backlog_limit,
     )
     for message in messages:
         cursor = max(cursor, message.sequence)
