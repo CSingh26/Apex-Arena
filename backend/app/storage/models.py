@@ -17,9 +17,12 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.storage.database import Base
+
+JSON_TYPE = JSON().with_variant(JSONB, "postgresql")
 
 
 class TimestampMixin:
@@ -106,42 +109,92 @@ class RoomRecord(Base, TimestampMixin):
 class RawProviderEventRecord(Base):
     __tablename__ = "raw_provider_events"
     __table_args__ = (
-        UniqueConstraint("provider", "provider_event_id", name="uq_raw_provider_event"),
+        UniqueConstraint("deterministic_hash", name="uq_raw_provider_event_hash"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     provider: Mapped[str] = mapped_column(String(30), index=True)
     provider_event_id: Mapped[str | None] = mapped_column(String(160), nullable=True, index=True)
-    topic: Mapped[str] = mapped_column(String(120), index=True)
-    payload: Mapped[dict[str, Any]] = mapped_column(JSON)
+    provider_endpoint: Mapped[str] = mapped_column(String(120), index=True)
+    deterministic_hash: Mapped[str] = mapped_column(String(64), index=True)
+    session_key: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
+    session_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("sessions.id"), nullable=True)
+    event_time: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
     received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    raw_payload: Mapped[dict[str, Any]] = mapped_column(JSON_TYPE)
+    payload_hash: Mapped[str] = mapped_column(String(64), index=True)
+    processing_status: Mapped[str] = mapped_column(String(30), default="pending", index=True)
 
 
 class NormalizedRaceEventRecord(Base):
     __tablename__ = "normalized_race_events"
+    __table_args__ = (
+        UniqueConstraint("dedup_key", name="uq_normalized_event_dedup_key"),
+        UniqueConstraint(
+            "session_key", "sequence_number", name="uq_normalized_event_session_sequence"
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
-    meeting_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("race_meetings.id"), index=True)
+    meeting_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("race_meetings.id"), nullable=True, index=True
+    )
     session_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("sessions.id"), nullable=True)
-    event_type: Mapped[str] = mapped_column(String(40), index=True)
-    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
-    driver_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("drivers.id"), nullable=True)
-    importance: Mapped[float] = mapped_column(Float, default=0.5)
-    payload: Mapped[dict[str, Any]] = mapped_column(JSON)
-    source_event_id: Mapped[uuid.UUID | None] = mapped_column(
+    session_key: Mapped[str] = mapped_column(String(80), index=True)
+    source: Mapped[str] = mapped_column(String(30), index=True)
+    raw_event_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("raw_provider_events.id"), nullable=True
     )
+    event_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    processed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    sequence_number: Mapped[int] = mapped_column(Integer)
+    event_type: Mapped[str] = mapped_column(String(40), index=True)
+    driver_numbers: Mapped[list[int]] = mapped_column(JSON_TYPE, default=list)
+    lap_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    importance: Mapped[float | None] = mapped_column(Float, nullable=True)
+    confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON_TYPE)
+    dedup_key: Mapped[str] = mapped_column(String(64), index=True)
+    is_replay: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 class RaceStateSnapshotRecord(Base):
     __tablename__ = "race_state_snapshots"
     __table_args__ = (
-        UniqueConstraint("session_id", "sequence", name="uq_snapshot_session_sequence"),
+        UniqueConstraint("session_key", "sequence_number", name="uq_snapshot_session_sequence"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
-    meeting_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("race_meetings.id"), index=True)
+    meeting_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("race_meetings.id"), nullable=True, index=True
+    )
     session_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("sessions.id"), nullable=True)
-    sequence: Mapped[int] = mapped_column(Integer)
-    captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
-    state: Mapped[dict[str, Any]] = mapped_column(JSON)
+    session_key: Mapped[str] = mapped_column(String(80), index=True)
+    snapshot_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    sequence_number: Mapped[int] = mapped_column(Integer)
+    current_lap: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    session_status: Mapped[str] = mapped_column(String(40), default="unknown")
+    state: Mapped[dict[str, Any]] = mapped_column(JSON_TYPE)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class IngestionRunRecord(Base):
+    __tablename__ = "ingestion_runs"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    provider: Mapped[str] = mapped_column(String(30), index=True)
+    session_key: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
+    status: Mapped[str] = mapped_column(String(30), index=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_event_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    run_metadata: Mapped[dict[str, Any]] = mapped_column("metadata", JSON_TYPE, default=dict)
+    raw_inserted: Mapped[int] = mapped_column(Integer, default=0)
+    duplicates: Mapped[int] = mapped_column(Integer, default=0)
+    normalized_inserted: Mapped[int] = mapped_column(Integer, default=0)

@@ -4,7 +4,12 @@ from __future__ import annotations
 import asyncio
 
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 from sqlalchemy.orm import DeclarativeBase
 
 
@@ -18,6 +23,11 @@ class Database:
             database_url,
             pool_pre_ping=True,
             pool_recycle=300,
+        )
+        self.session_factory = async_sessionmaker(
+            self.engine,
+            class_=AsyncSession,
+            expire_on_commit=False,
         )
 
     async def health_check(self, timeout_seconds: float = 2.0) -> tuple[bool, str]:
