@@ -77,10 +77,10 @@ are retained as JSONB for traceability and are never written to application logs
 
 2. Replace both `change-me` values with the same local PostgreSQL password. Never commit `.env`.
 
-3. Start PostgreSQL and Redis:
+3. Start only PostgreSQL and Redis for manual development:
 
    ```bash
-   docker compose up -d --wait
+   docker compose up -d --wait postgres redis
    ```
 
 4. Install and migrate the backend:
@@ -104,6 +104,26 @@ are retained as JSONB for traceability and are never written to application logs
 
 6. Open [http://localhost:3000](http://localhost:3000). API docs are available at
    [http://localhost:8000/docs](http://localhost:8000/docs).
+
+### Full Docker stack
+
+To build and run the frontend, backend, PostgreSQL, and Redis entirely in Docker:
+
+```bash
+docker compose up -d --build --wait
+```
+
+Compose runs database migrations before starting the API. The published application ports come
+from `FRONTEND_PORT` and `BACKEND_PORT`; their browser-facing URLs must match `FRONTEND_URL`,
+`BACKEND_URL`, `NEXT_PUBLIC_APP_URL`, `NEXT_PUBLIC_API_URL`, and `CORS_ALLOWED_ORIGINS`.
+
+Inspect or stop the stack with:
+
+```bash
+docker compose ps
+docker compose logs -f backend frontend
+docker compose down
+```
 
 The Next.js config reads only `NEXT_PUBLIC_APP_NAME`, `NEXT_PUBLIC_APP_URL`, and
 `NEXT_PUBLIC_API_URL` from the root `.env`. Backend secrets are not copied into browser code.
