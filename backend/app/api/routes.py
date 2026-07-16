@@ -9,6 +9,7 @@ from typing import Annotated
 
 import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
+from fastapi.responses import StreamingResponse
 
 from app.api.schemas import (
     AppHealth,
@@ -24,6 +25,7 @@ from app.api.schemas import (
     SessionEventsResponse,
     SessionStateResponse,
 )
+from app.api.streaming import session_event_stream
 from app.domain.models import MeetingLifecycleStatus
 from app.providers.jolpica import JolpicaPayloadError
 from app.services.container import AppServices
@@ -184,6 +186,24 @@ async def session_events(
 )
 async def session_state(session_key: str, services: Services) -> SessionStateResponse:
     return SessionStateResponse(state=await services.race_state.get_state(session_key))
+
+
+@router.get("/api/v1/stream/sessions/{session_key}")
+async def stream_session(
+    session_key: str,
+    request: Request,
+    services: Services,
+    last_sequence_number: int = Query(default=0, ge=0),
+) -> StreamingResponse:
+    return StreamingResponse(
+        session_event_stream(request, services, session_key, last_sequence_number),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.post(
