@@ -1,14 +1,28 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 from __future__ import annotations
 
+import asyncio
+import json
+import logging
+import math
 import re
+import ssl
 import time
-from typing import Any
+from collections.abc import Callable
+from datetime import UTC, datetime
+from enum import StrEnum
+from typing import Any, Protocol
 from urllib.parse import urlparse
 
 import httpx
+import paho.mqtt.client as mqtt
 
 from app.core.settings import Settings
+from app.services.event_pipeline import RaceEventProcessor
+from app.services.raw_events import RawEventInput
+from app.storage.redis import EventBus
+
+logger = logging.getLogger(__name__)
 
 OPENF1_ENDPOINTS = frozenset(
     {
@@ -180,40 +194,219 @@ class OpenF1AuthService:
             await self.client.aclose()
 
 
-class OpenF1LiveClient:
-    """MQTT lifecycle boundary. Transport connection is intentionally deferred to Day 2."""
+class LiveConnectionState(StrEnum):
+    DISABLED = "DISABLED"
+    MISSING_CREDENTIALS = "MISSING_CREDENTIALS"
+    AUTHENTICATING = "AUTHENTICATING"
+    CONNECTING = "CONNECTING"
+    CONNECTED = "CONNECTED"
+    RECONNECTING = "RECONNECTING"
+    DEGRADED = "DEGRADED"
+    DISCONNECTED = "DISCONNECTED"
+    ERROR = "ERROR"
 
-    def __init__(self, settings: Settings, auth: OpenF1AuthService) -> None:
+
+class LiveProcessor(Protocol):
+    async def ingest(self, raw: RawEventInput) -> object: ...
+
+    async def flush_session(self, session_key: str) -> object: ...
+
+
+class OpenF1LiveClient:
+    """TLS MQTT client that feeds the same processor used by historical replay."""
+
+    def __init__(
+        self,
+        settings: Settings,
+        auth: OpenF1AuthService,
+        processor: RaceEventProcessor | LiveProcessor | None = None,
+        event_bus: EventBus | None = None,
+        client_factory: Callable[[], mqtt.Client] | None = None,
+    ) -> None:
         self.settings = settings
         self.auth = auth
-        self.connection_state = "disconnected"
+        self.processor = processor
+        self.event_bus = event_bus
+        self.client_factory = client_factory or self._default_client
+        self.connection_state = LiveConnectionState.DISCONNECTED
+        self.last_event_at: datetime | None = None
+        self.reconnect_attempts = 0
+        self.current_session_key: str | None = None
+        self.degraded_reason: str | None = None
+        self._client: mqtt.Client | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._shutting_down = False
 
     async def connect(self) -> None:
         if not self.settings.live_mode_enabled:
-            self.connection_state = "disabled"
+            await self._set_state(LiveConnectionState.DISABLED)
             return
         if not self.auth.credentials_present:
-            self.connection_state = "degraded_missing_credentials"
+            await self._set_state(
+                LiveConnectionState.MISSING_CREDENTIALS,
+                "OpenF1 live credentials are not configured",
+            )
             return
-        await self.auth.get_access_token()
-        self.connection_state = "auth_ready_transport_deferred"
+
+        self._loop = asyncio.get_running_loop()
+        self._shutting_down = False
+        await self._set_state(LiveConnectionState.AUTHENTICATING)
+        try:
+            token = await self.auth.get_access_token()
+        except OpenF1AuthUnavailable:
+            await self._set_state(LiveConnectionState.DEGRADED, "OpenF1 authentication failed")
+            return
+
+        client = self.client_factory()
+        self._client = client
+        client.username_pw_set(self.settings.openf1_username or "apex-arena", token)
+        client.tls_set(cert_reqs=ssl.CERT_REQUIRED, tls_version=ssl.PROTOCOL_TLS_CLIENT)
+        client.reconnect_delay_set(
+            min_delay=max(1, math.ceil(self.settings.openf1_reconnect_base_delay_ms / 1000)),
+            max_delay=max(1, math.ceil(self.settings.openf1_reconnect_max_delay_ms / 1000)),
+        )
+        client.on_connect = self._on_connect
+        client.on_disconnect = self._on_disconnect
+        client.on_message = self._on_message
+        await self._set_state(LiveConnectionState.CONNECTING)
+        result = client.connect_async(
+            self.settings.openf1_mqtt_host,
+            self.settings.openf1_mqtt_port,
+            keepalive=60,
+        )
+        if result != mqtt.MQTT_ERR_SUCCESS:
+            await self._set_state(
+                LiveConnectionState.ERROR,
+                f"MQTT connect setup failed with code {result}",
+            )
+            return
+        client.loop_start()
 
     async def disconnect(self) -> None:
-        self.connection_state = "disconnected"
+        self._shutting_down = True
+        if self._client is not None:
+            self._client.disconnect()
+            self._client.loop_stop()
+            self._client = None
+        await self._set_state(LiveConnectionState.DISCONNECTED)
 
     def status(self) -> dict[str, Any]:
-        if not self.settings.live_mode_enabled:
-            state = "disabled"
-        elif not self.auth.credentials_present:
-            state = "degraded_missing_credentials"
-        else:
-            state = self.connection_state
         return {
             "live_mode_enabled": self.settings.live_mode_enabled,
             "credentials_present": self.auth.credentials_present,
+            "auth_available": self.auth.credentials_present,
             "token_available": self.auth.token_available,
             "token_expires_in_seconds": (
                 self.auth.expires_in_seconds if self.auth.token_available else None
             ),
-            "connection_state": state,
+            "connection_state": self.connection_state.value,
+            "last_event_at": self.last_event_at,
+            "reconnect_attempts": self.reconnect_attempts,
+            "current_session_key": self.current_session_key,
+            "degraded_reason": self.degraded_reason,
         }
+
+    def _on_connect(
+        self,
+        client: mqtt.Client,
+        userdata: object,
+        flags: object,
+        reason_code: object,
+        properties: object = None,
+    ) -> None:
+        code = int(getattr(reason_code, "value", reason_code))
+        if code != 0:
+            self._submit_state(LiveConnectionState.ERROR, f"MQTT rejected connection ({code})")
+            return
+        self.reconnect_attempts = 0
+        for topic in self.settings.openf1_topics:
+            client.subscribe(topic)
+        self._submit_state(LiveConnectionState.CONNECTED)
+
+    def _on_disconnect(
+        self,
+        client: mqtt.Client,
+        userdata: object,
+        disconnect_flags: object,
+        reason_code: object,
+        properties: object = None,
+    ) -> None:
+        if self._shutting_down:
+            self._submit_state(LiveConnectionState.DISCONNECTED)
+            return
+        self.reconnect_attempts += 1
+        if self.reconnect_attempts > self.settings.openf1_reconnect_max_attempts:
+            self._submit_state(
+                LiveConnectionState.ERROR,
+                "Maximum MQTT reconnect attempts exceeded",
+            )
+            return
+        self._submit_state(LiveConnectionState.RECONNECTING)
+
+    def _on_message(self, client: mqtt.Client, userdata: object, message: object) -> None:
+        if self._loop is None:
+            return
+        try:
+            payload = json.loads(message.payload.decode("utf-8"))  # type: ignore[attr-defined]
+            topic = str(message.topic)  # type: ignore[attr-defined]
+        except (AttributeError, UnicodeDecodeError, json.JSONDecodeError):
+            self._submit_state(LiveConnectionState.DEGRADED, "Invalid MQTT message received")
+            return
+        if not isinstance(payload, dict):
+            self._submit_state(LiveConnectionState.DEGRADED, "Unexpected MQTT payload shape")
+            return
+        asyncio.run_coroutine_threadsafe(self._handle_message(topic, payload), self._loop)
+
+    async def _handle_message(self, topic: str, payload: dict[str, Any]) -> None:
+        session_key = str(payload.get("session_key") or "unknown")
+        self.current_session_key = session_key
+        self.last_event_at = datetime.now(UTC)
+        if self.processor is None:
+            await self._set_state(LiveConnectionState.DEGRADED, "Race event processor unavailable")
+            return
+        try:
+            await self.processor.ingest(
+                RawEventInput(
+                    provider="openf1",
+                    provider_endpoint=topic.removeprefix("v1/"),
+                    provider_event_id=str(payload["_id"]) if "_id" in payload else None,
+                    session_key=session_key,
+                    raw_payload=payload,
+                    received_at=self.last_event_at,
+                )
+            )
+            await asyncio.sleep(self.settings.event_ordering_buffer_ms / 1000)
+            await self.processor.flush_session(session_key)
+            await self._set_state(LiveConnectionState.CONNECTED)
+        except Exception as exc:
+            logger.error("OpenF1 message processing failed error=%s", type(exc).__name__)
+            await self._set_state(LiveConnectionState.DEGRADED, "Race event processing failed")
+
+    async def _set_state(
+        self, state: LiveConnectionState, degraded_reason: str | None = None
+    ) -> None:
+        self.connection_state = state
+        self.degraded_reason = degraded_reason
+        logger.info("OpenF1 live connection state=%s", state.value)
+        if self.event_bus is not None:
+            try:
+                await self.event_bus.publish_connection_status(self.status())
+            except Exception as exc:
+                logger.error("Live status publish failed error=%s", type(exc).__name__)
+
+    def _submit_state(
+        self, state: LiveConnectionState, degraded_reason: str | None = None
+    ) -> None:
+        if self._loop is None:
+            return
+        self._loop.call_soon_threadsafe(
+            lambda: asyncio.create_task(self._set_state(state, degraded_reason))
+        )
+
+    @staticmethod
+    def _default_client() -> mqtt.Client:
+        return mqtt.Client(
+            callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
+            protocol=mqtt.MQTTv5,
+            transport="tcp",
+        )
