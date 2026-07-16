@@ -6,14 +6,19 @@ from uuid import UUID
 from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert
 
-from app.domain.models import NormalizedRaceEvent
+from app.domain.models import NormalizedRaceEvent, RaceStateSnapshot
 from app.services.event_pipeline import NormalizedPersistResult
+from app.services.race_state import SnapshotPersistResult
 from app.services.raw_events import (
     RawEventCreate,
     RawEventRepositoryResult,
 )
 from app.storage.database import Database
-from app.storage.models import NormalizedRaceEventRecord, RawProviderEventRecord
+from app.storage.models import (
+    NormalizedRaceEventRecord,
+    RaceStateSnapshotRecord,
+    RawProviderEventRecord,
+)
 
 
 class SqlRawEventRepository:
@@ -118,3 +123,50 @@ class SqlNormalizedEventRepository:
                 NormalizedRaceEvent.model_validate(record, from_attributes=True)
                 for record in records
             ]
+
+
+class SqlRaceStateSnapshotRepository:
+    def __init__(self, database: Database) -> None:
+        self.database = database
+
+    async def insert(self, snapshot: RaceStateSnapshot) -> SnapshotPersistResult:
+        statement = (
+            insert(RaceStateSnapshotRecord)
+            .values(**snapshot.model_dump())
+            .on_conflict_do_nothing(constraint="uq_snapshot_session_sequence")
+            .returning(RaceStateSnapshotRecord.id)
+        )
+        async with self.database.session_factory() as session:
+            inserted_id = (await session.execute(statement)).scalar_one_or_none()
+            await session.commit()
+            if inserted_id is not None:
+                return SnapshotPersistResult(record_id=inserted_id, is_new=True)
+            existing_id = (
+                await session.execute(
+                    select(RaceStateSnapshotRecord.id).where(
+                        RaceStateSnapshotRecord.session_key == snapshot.session_key,
+                        RaceStateSnapshotRecord.sequence_number == snapshot.sequence_number,
+                    )
+                )
+            ).scalar_one()
+            return SnapshotPersistResult(record_id=existing_id, is_new=False)
+
+    async def latest(self, session_key: str) -> RaceStateSnapshot | None:
+        statement = (
+            select(RaceStateSnapshotRecord)
+            .where(RaceStateSnapshotRecord.session_key == session_key)
+            .order_by(RaceStateSnapshotRecord.sequence_number.desc())
+            .limit(1)
+        )
+        async with self.database.session_factory() as session:
+            record = (await session.execute(statement)).scalar_one_or_none()
+            if record is None:
+                return None
+            return RaceStateSnapshot.model_validate(record, from_attributes=True)
+
+    async def count(self, session_key: str | None = None) -> int:
+        statement = select(func.count(RaceStateSnapshotRecord.id))
+        if session_key is not None:
+            statement = statement.where(RaceStateSnapshotRecord.session_key == session_key)
+        async with self.database.session_factory() as session:
+            return int((await session.execute(statement)).scalar_one())

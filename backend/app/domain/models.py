@@ -138,11 +138,15 @@ class NormalizedRaceEvent(BaseModel):
 
 class RaceStateSnapshot(BaseModel):
     id: UUID = Field(default_factory=uuid4)
-    meeting_id: UUID
+    meeting_id: UUID | None = None
     session_id: UUID | None = None
-    sequence: int = 0
-    captured_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    session_key: str
+    snapshot_time: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    sequence_number: int = 0
+    current_lap: int | None = None
+    session_status: str = "unknown"
     state: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
 class Room(BaseModel):
