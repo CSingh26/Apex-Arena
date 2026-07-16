@@ -14,6 +14,9 @@ def test_settings_exposes_only_safe_runtime_metadata(settings: Settings) -> None
     assert metadata["openf1_credentials_present"] is False
     assert "test-password" not in repr(settings)
     assert "database_url" not in metadata
+    assert settings.stream_backend == "sse"
+    assert settings.race_state_snapshot_every_n_events == 10
+    assert "v1/laps" in settings.openf1_topics
 
 
 def test_database_passwords_must_match() -> None:

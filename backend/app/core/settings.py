@@ -54,6 +54,11 @@ class Settings(BaseSettings):
     openf1_reconnect_max_attempts: int = 20
     openf1_reconnect_base_delay_ms: int = 1000
     openf1_reconnect_max_delay_ms: int = 30000
+    openf1_live_auto_connect: bool = False
+    openf1_live_topics: str = (
+        "v1/sessions,v1/drivers,v1/position,v1/intervals,v1/laps,v1/pit,"
+        "v1/stints,v1/race_control,v1/weather"
+    )
 
     jolpica_base_url: str = "https://api.jolpi.ca/ergast/f1"
 
@@ -77,6 +82,14 @@ class Settings(BaseSettings):
     reaction_queue_enabled: bool = True
     reaction_queue_max_size: int = 100
     reaction_stale_after_seconds: int = 30
+
+    stream_backend: Literal["sse"] = "sse"
+    sse_heartbeat_seconds: int = Field(default=15, ge=1, le=120)
+    race_state_snapshot_every_n_events: int = Field(default=10, ge=1, le=1000)
+    engine_recent_events_limit: int = Field(default=100, ge=1, le=1000)
+    historical_ingestion_enabled: bool = True
+    historical_ingestion_max_records_per_endpoint: int = Field(default=5000, ge=1, le=50000)
+    debug_ingestion_enabled: bool = True
 
     enable_live_rooms: bool = True
     enable_historical_replay: bool = True
@@ -208,6 +221,10 @@ class Settings(BaseSettings):
             and self.openf1_password
             and self.openf1_password.get_secret_value()
         )
+
+    @property
+    def openf1_topics(self) -> list[str]:
+        return [topic.strip() for topic in self.openf1_live_topics.split(",") if topic.strip()]
 
     @property
     def safe_runtime_metadata(self) -> dict[str, object]:
