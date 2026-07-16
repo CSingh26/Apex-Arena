@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.room_routes import router as room_router
 from app.api.routes import router
 from app.core.logging import configure_logging
 from app.core.settings import Settings, get_settings
@@ -41,6 +42,7 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
         allow_headers=["Accept", "Content-Type", "X-Internal-API-Key"],
     )
     application.include_router(router)
+    application.include_router(room_router)
     return application
 
 
