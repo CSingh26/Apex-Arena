@@ -11,12 +11,19 @@ from pydantic import BaseModel, Field
 
 class RaceEventType(StrEnum):
     SESSION_START = "SESSION_START"
+    SESSION_STATUS = "SESSION_STATUS"
     RACE_START = "RACE_START"
+    DRIVER_UPDATE = "DRIVER_UPDATE"
+    POSITION_SAMPLE = "POSITION_SAMPLE"
+    INTERVAL_SAMPLE = "INTERVAL_SAMPLE"
+    LAP_COMPLETED = "LAP_COMPLETED"
     POSITION_CHANGE = "POSITION_CHANGE"
     OVERTAKE = "OVERTAKE"
     LEAD_CHANGE = "LEAD_CHANGE"
     PIT_STOP = "PIT_STOP"
+    STINT_UPDATE = "STINT_UPDATE"
     TYRE_CHANGE = "TYRE_CHANGE"
+    RACE_CONTROL = "RACE_CONTROL"
     SAFETY_CAR = "SAFETY_CAR"
     VIRTUAL_SAFETY_CAR = "VIRTUAL_SAFETY_CAR"
     RED_FLAG = "RED_FLAG"
@@ -24,9 +31,11 @@ class RaceEventType(StrEnum):
     PENALTY = "PENALTY"
     INVESTIGATION = "INVESTIGATION"
     WEATHER_CHANGE = "WEATHER_CHANGE"
+    WEATHER_UPDATE = "WEATHER_UPDATE"
     RETIREMENT = "RETIREMENT"
     FASTEST_LAP = "FASTEST_LAP"
     SESSION_FINISH = "SESSION_FINISH"
+    UNKNOWN_PROVIDER_EVENT = "UNKNOWN_PROVIDER_EVENT"
 
 
 class RoomLifecycleStatus(StrEnum):
@@ -96,21 +105,35 @@ class RawProviderEvent(BaseModel):
     id: UUID = Field(default_factory=uuid4)
     provider: str
     provider_event_id: str | None = None
-    topic: str
-    payload: dict[str, Any]
+    provider_endpoint: str
+    deterministic_hash: str
+    session_key: str | None = None
+    event_time: datetime | None = None
+    raw_payload: dict[str, Any]
+    payload_hash: str
+    processing_status: str = "pending"
     received_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
 class NormalizedRaceEvent(BaseModel):
     id: UUID = Field(default_factory=uuid4)
-    meeting_id: UUID
+    meeting_id: UUID | None = None
     session_id: UUID | None = None
+    session_key: str
+    source: str
+    raw_event_id: UUID | None = None
+    event_time: datetime
+    received_at: datetime
+    processed_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    sequence_number: int = 0
     event_type: RaceEventType
-    occurred_at: datetime
-    driver_id: UUID | None = None
-    importance: float = Field(default=0.5, ge=0, le=1)
+    driver_numbers: list[int] = Field(default_factory=list)
+    lap_number: int | None = None
+    importance: float | None = Field(default=None, ge=0, le=1)
+    confidence: float | None = Field(default=None, ge=0, le=1)
     payload: dict[str, Any] = Field(default_factory=dict)
-    source_event_id: UUID | None = None
+    dedup_key: str
+    is_replay: bool = False
 
 
 class RaceStateSnapshot(BaseModel):
