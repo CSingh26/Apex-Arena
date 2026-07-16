@@ -279,3 +279,11 @@ class SqlRaceRoomRepository:
             )
             await session.commit()
         return await self.get_playback(room_id)
+
+    async def sequence_for_lap(self, room_id: UUID, lap_number: int) -> int:
+        statement = select(func.min(RoomMessageRecord.sequence)).where(
+            RoomMessageRecord.room_id == room_id,
+            RoomMessageRecord.lap_number >= lap_number,
+        )
+        async with self.database.session_factory() as session:
+            return int((await session.execute(statement)).scalar_one_or_none() or 0)
