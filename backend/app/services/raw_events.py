@@ -49,6 +49,8 @@ class RawEventRepository(Protocol):
 
     async def count(self, session_key: str | None = None) -> int: ...
 
+    async def mark_status(self, record_id: UUID, status: str) -> None: ...
+
 
 class RawPersistResult(BaseModel):
     record_id: UUID
@@ -131,6 +133,9 @@ class RawProviderEventService:
             event_time=raw.event_time,
             received_at=raw.received_at,
         )
+
+    async def mark_status(self, record_id: UUID, status: str) -> None:
+        await self.repository.mark_status(record_id, status)
 
     @staticmethod
     def _provider_event_id(raw: RawEventInput, payload_hash: str) -> str:

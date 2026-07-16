@@ -31,6 +31,9 @@ class InMemoryRawRepository:
             return len(self.events)
         return sum(event.session_key == session_key for _, event in self.events.values())
 
+    async def mark_status(self, record_id: UUID, status: str) -> None:
+        return None
+
 
 @pytest.mark.asyncio
 async def test_identical_payload_is_inserted_once() -> None:
