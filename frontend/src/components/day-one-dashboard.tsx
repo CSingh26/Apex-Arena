@@ -1,32 +1,22 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 import {
-  API_URL,
   getEngineStatus,
-  getHealth,
   getSeason,
   getSessionEvents,
   getSessionState,
   sessionStreamUrl,
 } from "@/lib/api";
 import type {
-  ComponentStatus,
   EngineStatus,
-  HealthResponse,
   NormalizedRaceEvent,
   RaceMeeting,
   RaceState,
   SeasonCalendarSummary,
 } from "@/lib/types";
-
-type DashboardStatus = {
-  label: string;
-  status: string;
-  detail: string;
-};
 
 const dateFormatter = new Intl.DateTimeFormat("en-GB", {
   day: "2-digit",
@@ -42,44 +32,6 @@ const spaTimeFormatter = new Intl.DateTimeFormat("en-GB", {
   timeZone: "Europe/Brussels",
   timeZoneName: "short",
 });
-
-function toneFor(status: string): "good" | "warn" | "neutral" | "loading" {
-  const normalized = status.toLowerCase();
-  if (["healthy", "configured", "ready", "enabled", "live", "connected", "open", "completed"].includes(normalized)) return "good";
-  if (["degraded", "unavailable", "error", "missing_credentials"].includes(normalized)) return "warn";
-  if (["checking", "connecting", "reconnecting"].includes(normalized)) return "loading";
-  return "neutral";
-}
-
-function StatusCard({ item }: { item: DashboardStatus }) {
-  const tone = toneFor(item.status);
-  return (
-    <article className="group rounded-2xl border border-white/8 bg-white/[0.035] p-5 transition hover:border-white/15 hover:bg-white/[0.055]">
-      <div className="mb-5 flex items-center justify-between gap-4">
-        <span className="text-[0.68rem] font-semibold uppercase tracking-[0.19em] text-slate-500">
-          {item.label}
-        </span>
-        <span className={`status-dot status-dot--${tone}`} aria-hidden="true" />
-      </div>
-      <p className="font-mono text-sm font-semibold capitalize tracking-tight text-slate-100">
-        {item.status.replaceAll("_", " ")}
-      </p>
-      <p className="mt-2 min-h-10 text-xs leading-5 text-slate-500">{item.detail}</p>
-    </article>
-  );
-}
-
-function compactStatus(
-  label: string,
-  component: ComponentStatus | undefined,
-  fallback: string,
-): DashboardStatus {
-  return {
-    label,
-    status: component?.status ?? fallback,
-    detail: component?.detail ?? "Waiting for backend telemetry.",
-  };
-}
 
 function TargetRace({ race, loading }: { race?: RaceMeeting; loading: boolean }) {
   if (loading) {
@@ -335,10 +287,8 @@ function EnginePanel({
 }
 
 export function ApexArenaDashboard() {
-  const [health, setHealth] = useState<HealthResponse>();
   const [season, setSeason] = useState<SeasonCalendarSummary>();
   const [engine, setEngine] = useState<EngineStatus>();
-  const [healthError, setHealthError] = useState(false);
   const [seasonError, setSeasonError] = useState(false);
   const [engineError, setEngineError] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -349,18 +299,10 @@ export function ApexArenaDashboard() {
   const [streamState, setStreamState] = useState("idle");
 
   const loadData = useCallback(async () => {
-    const [healthResult, seasonResult, engineResult] = await Promise.allSettled([
-      getHealth(),
+    const [seasonResult, engineResult] = await Promise.allSettled([
       getSeason(),
       getEngineStatus(),
     ]);
-
-    if (healthResult.status === "fulfilled") {
-      setHealth(healthResult.value);
-      setHealthError(false);
-    } else {
-      setHealthError(true);
-    }
 
     if (seasonResult.status === "fulfilled") {
       setSeason(seasonResult.value);
@@ -385,17 +327,10 @@ export function ApexArenaDashboard() {
   useEffect(() => {
     const controller = new AbortController();
     void Promise.allSettled([
-      getHealth(controller.signal),
       getSeason(controller.signal),
       getEngineStatus(controller.signal),
-    ]).then(([healthResult, seasonResult, engineResult]) => {
+    ]).then(([seasonResult, engineResult]) => {
       if (controller.signal.aborted) return;
-      if (healthResult.status === "fulfilled") {
-        setHealth(healthResult.value);
-        setHealthError(false);
-      } else {
-        setHealthError(true);
-      }
       if (seasonResult.status === "fulfilled") {
         setSeason(seasonResult.value);
         setSeasonError(false);
@@ -462,28 +397,6 @@ export function ApexArenaDashboard() {
     };
   }, [selectedSession]);
 
-  const cards = useMemo<DashboardStatus[]>(() => {
-    const fallback = loading ? "checking" : "unavailable";
-    return [
-      {
-        label: "Backend health",
-        status: health?.status ?? fallback,
-        detail: healthError ? `No response from ${API_URL}` : "FastAPI control plane is responding.",
-      },
-      {
-        label: "Race engine",
-        status: engine?.status ?? fallback,
-        detail: engineError ? "Engine telemetry is unavailable." : "Unified live and replay pipeline.",
-      },
-      compactStatus("PostgreSQL", health?.database, fallback),
-      compactStatus("Redis", health?.redis, fallback),
-      compactStatus("OpenF1 REST", health?.openf1_rest, fallback),
-      compactStatus("OpenF1 live auth", health?.openf1_live, fallback),
-      compactStatus("Jolpica", health?.jolpica, fallback),
-      compactStatus("AI systems", health?.ai, fallback),
-    ];
-  }, [engine?.status, engineError, health, healthError, loading]);
-
   const targetRace = season?.races.find((race) => race.is_target);
   const completed = season?.races.filter((race) => race.status === "completed") ?? [];
   const onDeck = season?.races.filter((race) => race.status !== "completed") ?? [];
@@ -532,25 +445,6 @@ export function ApexArenaDashboard() {
             converge into one observable race state.
           </div>
         </div>
-
-        <section aria-labelledby="systems-heading" className="mb-16">
-          <div className="mb-5 flex items-end justify-between gap-6">
-            <div>
-              <p className="section-kicker">System telemetry</p>
-              <h2 id="systems-heading" className="mt-2 text-2xl font-bold tracking-tight text-white">
-                Engine foundation status
-              </h2>
-            </div>
-            <p className="hidden font-mono text-[0.65rem] text-slate-600 sm:block">
-              {health?.checked_at
-                ? `CHECKED ${new Date(health.checked_at).toLocaleTimeString()}`
-                : "AWAITING BACKEND"}
-            </p>
-          </div>
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-            {cards.map((item) => <StatusCard key={item.label} item={item} />)}
-          </div>
-        </section>
 
         <EnginePanel
           engine={engine}
