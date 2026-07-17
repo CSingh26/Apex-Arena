@@ -6,6 +6,7 @@ import asyncio
 from app.core.settings import Settings
 from app.providers.jolpica import JolpicaClient
 from app.providers.openf1 import OpenF1AuthService, OpenF1LiveClient, OpenF1RestClient
+from app.services.development_fixture import DevelopmentFixtureService
 from app.services.discussion import RaceRoomDiscussionEngine
 from app.services.discussion_triggers import DiscussionTriggerEvaluator
 from app.services.event_pipeline import (
@@ -54,7 +55,17 @@ class AppServices:
             settings.race_state_snapshot_every_n_events,
         )
         self.redis_publisher = RaceEventRedisPublisher(self.event_bus, self.race_state)
-        self.rooms = RaceRoomService(self.room_repository, self.season, settings.season_year)
+        fixture = (
+            DevelopmentFixtureService(self.normalized_event_repository)
+            if settings.app_env != "production"
+            else None
+        )
+        self.rooms = RaceRoomService(
+            self.room_repository,
+            self.season,
+            settings.season_year,
+            fixture=fixture,
+        )
         self.room_discussion = RaceRoomDiscussionEngine(
             self.room_repository,
             DiscussionTriggerEvaluator(settings.room_topic_cooldown_seconds),

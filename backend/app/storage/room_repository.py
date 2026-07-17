@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import and_, delete, func, or_, select, update
+from sqlalchemy import and_, case, delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 
 from app.domain.rooms import (
@@ -59,13 +59,22 @@ class SqlRaceRoomRepository:
             "created_at",
             "updated_at",
         }
+        update_values = {key: value for key, value in values.items() if key not in dynamic_fields}
+        update_values["session_key"] = func.coalesce(
+            values.get("session_key"), RaceRoomRecord.session_key
+        )
+        for field in ("status", "mode", "source_availability", "telemetry_quality"):
+            update_values[field] = case(
+                (RaceRoomRecord.message_count > 0, getattr(RaceRoomRecord, field)),
+                else_=values[field],
+            )
         async with self.database.session_factory() as session:
             await session.execute(
                 insert(RaceRoomRecord)
                 .values(**values)
                 .on_conflict_do_update(
                     index_elements=["slug"],
-                    set_={key: value for key, value in values.items() if key not in dynamic_fields},
+                    set_=update_values,
                 )
             )
             record = (

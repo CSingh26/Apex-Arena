@@ -11,7 +11,11 @@ from tests.fixtures.race_room_events import race_room_event, ten_lap_fixture
 
 def test_roster_has_five_distinct_enabled_specialists() -> None:
     assert [agent.display_name for agent in DEFAULT_ROOM_AGENTS] == [
-        "Mira Vale", "Theo Voss", "Lena Cross", "Arjun Reyes", "Nova"
+        "Mira Vale",
+        "Theo Voss",
+        "Lena Cross",
+        "Arjun Reyes",
+        "Nova",
     ]
     assert len({topic for agent in DEFAULT_ROOM_AGENTS for topic in agent.supported_topics}) >= 8
     assert all(agent.active and agent.personality_rules for agent in DEFAULT_ROOM_AGENTS)
@@ -30,9 +34,11 @@ def test_trigger_evaluator_ignores_noise_deduplicates_and_respects_cooldown() ->
 
 def test_fixture_covers_ten_laps_and_critical_moments() -> None:
     events = ten_lap_fixture()
-    assert [event.lap_number for event in events] == list(range(1, 11))
+    assert max(event.lap_number or 0 for event in events) >= 10
+    assert len({driver for event in events for driver in event.driver_numbers}) >= 3
     critical = {RaceEventType.SAFETY_CAR, RaceEventType.SESSION_FINISH}
     assert critical <= {event.event_type for event in events}
+    assert RaceEventType.OVERTAKE in {event.event_type for event in events}
 
 
 def test_deterministic_pit_message_only_claims_available_fields() -> None:
@@ -62,9 +68,9 @@ def test_grounding_validator_rejects_invented_radio_and_missing_evidence() -> No
     message.content = "A pit stop was observed."
     assert not validator.validate(message, [])
     evidence = [
-            MessageEvidence(
-                message_id=message.id,
-                evidence_key="event_type",
+        MessageEvidence(
+            message_id=message.id,
+            evidence_key="event_type",
             evidence_type="normalized_event",
             source_provider="fixture",
             source_reference=str(event.id),

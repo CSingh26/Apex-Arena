@@ -1,12 +1,15 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
+import time
 from datetime import UTC, datetime
 
 from app.domain.models import MeetingLifecycleStatus, RaceMeeting
 from app.domain.rooms import RaceRoom, RoomMode, RoomStatus, SourceAvailability
+from app.services.development_fixture import DAY3_FIXTURE_SESSION_KEY, DevelopmentFixtureService
 from app.services.room_agents import active_agent_profiles
 from app.services.season import SeasonService
 from app.storage.room_repository import SqlRaceRoomRepository
@@ -20,27 +23,39 @@ class RaceRoomService:
         repository: SqlRaceRoomRepository,
         season: SeasonService,
         season_year: int,
+        fixture: DevelopmentFixtureService | None = None,
     ) -> None:
         self.repository = repository
         self.season = season
         self.season_year = season_year
+        self.fixture = fixture
         self._catalog_ready = False
+        self._foundation_ready = False
+        self._retry_after = 0.0
+        self._sync_lock = asyncio.Lock()
 
     async def ensure_catalog(self) -> None:
-        if self._catalog_ready:
+        if self._catalog_ready or time.monotonic() < self._retry_after:
             return
-        agents = active_agent_profiles()
-        await self.repository.seed_agents(agents)
-        agent_ids = [agent.id for agent in agents]
-        await self.repository.upsert_room(self._development_room(), agent_ids)
-        try:
-            meetings = await self.season.calendar(self.season_year)
-        except Exception as exc:
-            logger.warning("Race room calendar sync unavailable error=%s", type(exc).__name__)
-        else:
+        async with self._sync_lock:
+            if self._catalog_ready:
+                return
+            agents = active_agent_profiles()
+            await self.repository.seed_agents(agents)
+            agent_ids = [agent.id for agent in agents]
+            if not self._foundation_ready and self.fixture is not None:
+                await self.repository.upsert_room(self._development_room(), agent_ids)
+                await self.fixture.seed()
+                self._foundation_ready = True
+            try:
+                meetings = await self.season.calendar(self.season_year)
+            except Exception as exc:
+                self._retry_after = time.monotonic() + 60
+                logger.warning("Race room calendar sync unavailable error=%s", type(exc).__name__)
+                return
             for meeting in meetings:
                 await self.repository.upsert_room(self._from_meeting(meeting), agent_ids)
-        self._catalog_ready = True
+            self._catalog_ready = True
 
     async def sync_meetings(self, meetings: list[RaceMeeting]) -> None:
         agents = active_agent_profiles()
@@ -80,23 +95,26 @@ class RaceRoomService:
             status=status,
             mode=mode,
             source_availability=availability,
+            telemetry_quality="metadata_only",
             agent_count=5,
             is_featured=meeting.is_target,
         )
 
     def _development_room(self) -> RaceRoom:
         return RaceRoom(
-            slug="development-day2-validation",
-            session_key="day2-validation",
+            slug="day3-validation-room",
+            session_key=DAY3_FIXTURE_SESSION_KEY,
             season=self.season_year,
-            race_name="Day 2 Validation Session",
-            official_name="Apex Arena Development Validation",
+            race_name="Day 3 Validation Room",
+            official_name="Apex Arena Day 3 Development Validation",
             circuit_name="Synthetic validation circuit",
             country="Development fixture",
             scheduled_start=datetime(2026, 7, 16, 12, tzinfo=UTC),
             status=RoomStatus.READY,
             mode=RoomMode.DEVELOPMENT,
             source_availability=SourceAvailability.LIMITED,
+            telemetry_quality="deterministic_fixture",
+            total_laps=12,
             agent_count=5,
             is_featured=True,
             is_development=True,
