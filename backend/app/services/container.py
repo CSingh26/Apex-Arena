@@ -70,6 +70,7 @@ class AppServices:
             self.room_repository,
             DiscussionTriggerEvaluator(settings.room_topic_cooldown_seconds),
             publisher=self.event_bus.publish_room_message,
+            state_reader=self.race_state.get_state,
         )
         self.processor = RaceEventProcessor(
             raw_events=self.raw_events,

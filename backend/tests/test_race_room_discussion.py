@@ -1,12 +1,42 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 from __future__ import annotations
 
+from types import SimpleNamespace
+from uuid import uuid4
+
+import pytest
+
 from app.domain.models import RaceEventType
-from app.domain.rooms import Confidence, EvidenceStatus, MessageEvidence, RoomMessage
-from app.services.discussion import DeterministicRoomGenerator, GroundingValidator
+from app.domain.rooms import Confidence, EvidenceStatus, MessageEvidence, MessageType, RoomMessage
+from app.services.discussion import (
+    DeterministicRoomGenerator,
+    GeneratedRoomMessage,
+    GroundedClaim,
+    GroundingContext,
+    GroundingValidator,
+    RaceRoomDiscussionEngine,
+)
 from app.services.discussion_triggers import DiscussionTriggerEvaluator
 from app.services.room_agents import DEFAULT_ROOM_AGENTS
 from tests.fixtures.race_room_events import race_room_event, ten_lap_fixture
+
+
+class FakeRoomRepository:
+    def __init__(self) -> None:
+        self.room = SimpleNamespace(id=uuid4(), slug="fixture-room")
+        self.messages: list[RoomMessage] = []
+        self.evidence: dict[str, list[MessageEvidence]] = {}
+
+    async def get_room_by_session(self, session_key: str):
+        return self.room if session_key == "test-race-room" else None
+
+    async def insert_message(
+        self, message: RoomMessage, evidence: list[MessageEvidence]
+    ) -> tuple[RoomMessage, bool]:
+        stored = message.model_copy(update={"sequence": len(self.messages) + 1})
+        self.messages.append(stored)
+        self.evidence[str(stored.id)] = evidence
+        return stored, True
 
 
 def test_roster_has_five_distinct_enabled_specialists() -> None:
@@ -23,7 +53,7 @@ def test_roster_has_five_distinct_enabled_specialists() -> None:
 
 def test_trigger_evaluator_ignores_noise_deduplicates_and_respects_cooldown() -> None:
     evaluator = DiscussionTriggerEvaluator(topic_cooldown_seconds=60)
-    noise = race_room_event(RaceEventType.WEATHER_UPDATE)
+    noise = race_room_event(RaceEventType.UNKNOWN_PROVIDER_EVENT)
     meaningful = race_room_event(RaceEventType.PIT_STOP, sequence=2)
     same_topic = race_room_event(RaceEventType.PIT_STOP, sequence=3)
     assert evaluator.evaluate(noise) is None
@@ -45,11 +75,11 @@ def test_deterministic_pit_message_only_claims_available_fields() -> None:
     event = race_room_event(payload={"pit_duration": 2.41})
     trigger = DiscussionTriggerEvaluator(topic_cooldown_seconds=0).evaluate(event)
     assert trigger is not None
-    content, status, confidence = DeterministicRoomGenerator().generate(event, trigger, "mira-vale")
-    assert "2.41 seconds" in content
-    assert "Tyre compound data is unavailable" in content
-    assert status is EvidenceStatus.GROUNDED
-    assert confidence is Confidence.HIGH
+    generated = DeterministicRoomGenerator().generate(event, trigger, "mira-vale")
+    assert "2.41 seconds" in generated.content
+    assert "remain uncertain" in generated.content
+    assert generated.evidence_status is EvidenceStatus.GROUNDED
+    assert generated.confidence is Confidence.HIGH
 
 
 def test_grounding_validator_rejects_invented_radio_and_missing_evidence() -> None:
@@ -77,3 +107,56 @@ def test_grounding_validator_rejects_invented_radio_and_missing_evidence() -> No
         )
     ]
     assert validator.validate(message, evidence)
+
+
+def test_grounding_validator_rejects_an_unsupported_evidence_key() -> None:
+    generated = GeneratedRoomMessage(
+        message_type=MessageType.ANALYSIS,
+        content="Driver 4 has an unsupported claim.",
+        confidence=Confidence.MEDIUM,
+        evidence_status=EvidenceStatus.PARTIAL,
+        claims=[GroundedClaim(claim="Unsupported", evidence_keys=["invented_metric"])],
+    )
+    context = GroundingContext(
+        evidence={"event_type": "PIT_STOP", "driver_numbers": [4]},
+        data_quality="partial",
+    )
+    assert not GroundingValidator().validate(generated, context)
+
+
+@pytest.mark.asyncio
+async def test_discussion_chain_is_bounded_and_preserves_reply_relationships() -> None:
+    repository = FakeRoomRepository()
+    engine = RaceRoomDiscussionEngine(
+        repository,  # type: ignore[arg-type]
+        DiscussionTriggerEvaluator(topic_cooldown_seconds=0, agent_cooldown_seconds=0),
+    )
+    event = race_room_event(
+        RaceEventType.SAFETY_CAR,
+        payload={"message": "Safety car deployed"},
+    )
+
+    await engine.consume(event)
+
+    assert len(repository.messages) == 3
+    assert repository.messages[1].reply_to_message_id == repository.messages[0].id
+    assert repository.messages[2].message_type is MessageType.SUMMARY
+    assert all(repository.evidence[str(message.id)] for message in repository.messages)
+
+
+@pytest.mark.asyncio
+async def test_position_change_produces_a_grounded_disagreement() -> None:
+    repository = FakeRoomRepository()
+    engine = RaceRoomDiscussionEngine(
+        repository,  # type: ignore[arg-type]
+        DiscussionTriggerEvaluator(topic_cooldown_seconds=0, agent_cooldown_seconds=0),
+    )
+    await engine.consume(
+        race_room_event(
+            RaceEventType.POSITION_CHANGE,
+            payload={"previous_position": 7, "position": 6},
+        )
+    )
+
+    assert [message.agent_id for message in repository.messages] == ["lena-cross", "theo-voss"]
+    assert repository.messages[1].message_type is MessageType.DISAGREEMENT
