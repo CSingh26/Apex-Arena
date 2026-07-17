@@ -136,7 +136,7 @@ async def start_replay(room_slug: str, services: Services) -> ReplayResponse:
     if room.status in {RoomStatus.UNAVAILABLE, RoomStatus.FAILED}:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Replay is unavailable")
     playback = await services.room_repository.update_playback(
-        room.id, current_sequence=0, playback_speed=1, is_paused=False
+        room.id, current_event_sequence=0, playback_speed=1, is_paused=False
     )
     return ReplayResponse(room=room, playback=playback)
 
@@ -154,7 +154,7 @@ async def change_playback(
     elif payload.action == "speed":
         values["playback_speed"] = payload.playback_speed or 1
     elif payload.action == "seek":
-        values["current_sequence"] = (
+        values["current_event_sequence"] = (
             payload.sequence
             or await services.room_repository.sequence_for_lap(
                 room.id, payload.lap_number or 0

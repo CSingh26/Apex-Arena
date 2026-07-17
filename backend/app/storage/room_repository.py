@@ -4,15 +4,17 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import and_, func, or_, select, update
+from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 
 from app.domain.rooms import (
     AgentProfile,
     MessageEvidence,
     MessageTopic,
+    MessageType,
     RaceRoom,
     RoomMessage,
+    RoomMode,
     RoomPlaybackState,
     RoomStatus,
 )
@@ -49,13 +51,21 @@ class SqlRaceRoomRepository:
         values["mode"] = room.mode.value
         values["source_availability"] = room.source_availability.value
         values["agent_count"] = len(agent_ids)
+        dynamic_fields = {
+            "id",
+            "message_count",
+            "current_lap",
+            "last_event_at",
+            "created_at",
+            "updated_at",
+        }
         async with self.database.session_factory() as session:
             await session.execute(
                 insert(RaceRoomRecord)
                 .values(**values)
                 .on_conflict_do_update(
                     index_elements=["slug"],
-                    set_={key: value for key, value in values.items() if key != "id"},
+                    set_={key: value for key, value in values.items() if key not in dynamic_fields},
                 )
             )
             record = (
@@ -83,7 +93,9 @@ class SqlRaceRoomRepository:
         *,
         season: int | None = None,
         status: RoomStatus | None = None,
+        mode: RoomMode | None = None,
         search: str | None = None,
+        sort: str = "race_date_desc",
         limit: int = 20,
         offset: int = 0,
     ) -> tuple[list[RaceRoom], int]:
@@ -92,6 +104,8 @@ class SqlRaceRoomRepository:
             filters.append(RaceRoomRecord.season == season)
         if status is not None:
             filters.append(RaceRoomRecord.status == status.value)
+        if mode is not None:
+            filters.append(RaceRoomRecord.mode == mode.value)
         if search:
             pattern = f"%{search.strip()}%"
             filters.append(
@@ -101,13 +115,13 @@ class SqlRaceRoomRepository:
                     RaceRoomRecord.country.ilike(pattern),
                 )
             )
-        statement = (
-            select(RaceRoomRecord)
-            .where(*filters)
-            .order_by(RaceRoomRecord.is_featured.desc(), RaceRoomRecord.scheduled_start.desc())
-            .offset(offset)
-            .limit(limit)
-        )
+        ordering = {
+            "race_date_asc": RaceRoomRecord.scheduled_start.asc(),
+            "latest_activity": RaceRoomRecord.updated_at.desc(),
+        }.get(sort, RaceRoomRecord.scheduled_start.desc())
+        statement = select(RaceRoomRecord).where(*filters)
+        statement = statement.order_by(RaceRoomRecord.is_featured.desc(), ordering)
+        statement = statement.offset(offset).limit(limit)
         count_statement = select(func.count(RaceRoomRecord.id)).where(*filters)
         async with self.database.session_factory() as session:
             records = (await session.execute(statement)).scalars().all()
@@ -150,6 +164,7 @@ class SqlRaceRoomRepository:
             .where(
                 RaceRoomAgentRecord.room_id == room_id,
                 RaceRoomAgentRecord.is_active.is_(True),
+                AgentProfileRecord.active.is_(True),
             )
             .order_by(RaceRoomAgentRecord.sort_order)
         )
@@ -167,16 +182,35 @@ class SqlRaceRoomRepository:
     async def insert_message(
         self, message: RoomMessage, evidence: list[MessageEvidence]
     ) -> tuple[RoomMessage, bool]:
-        values = message.model_dump()
-        for key in ("topic", "message_type", "confidence", "evidence_status"):
-            values[key] = getattr(message, key).value
-        statement = (
-            insert(RoomMessageRecord)
-            .values(**values)
-            .on_conflict_do_nothing(constraint="uq_room_trigger_agent")
-            .returning(RoomMessageRecord.id)
-        )
         async with self.database.session_factory() as session:
+            await session.execute(
+                select(RaceRoomRecord.id)
+                .where(RaceRoomRecord.id == message.room_id)
+                .with_for_update()
+            )
+            sequence = (
+                int(
+                    (
+                        await session.execute(
+                            select(func.max(RoomMessageRecord.sequence)).where(
+                                RoomMessageRecord.room_id == message.room_id
+                            )
+                        )
+                    ).scalar_one_or_none()
+                    or 0
+                )
+                + 1
+            )
+            stored_message = message.model_copy(update={"sequence": sequence})
+            values = stored_message.model_dump()
+            for key in ("topic", "message_type", "confidence", "evidence_status"):
+                values[key] = getattr(stored_message, key).value
+            statement = (
+                insert(RoomMessageRecord)
+                .values(**values)
+                .on_conflict_do_nothing(constraint="uq_room_trigger_agent")
+                .returning(RoomMessageRecord.id)
+            )
             inserted_id = (await session.execute(statement)).scalar_one_or_none()
             if inserted_id is None:
                 return message, False
@@ -195,7 +229,7 @@ class SqlRaceRoomRepository:
                 )
             )
             await session.commit()
-            return message.model_copy(update={"id": inserted_id}), True
+            return stored_message.model_copy(update={"id": inserted_id}), True
 
     async def list_messages(
         self,
@@ -204,8 +238,10 @@ class SqlRaceRoomRepository:
         after_sequence: int = 0,
         agent_id: str | None = None,
         topic: MessageTopic | None = None,
+        message_type: MessageType | None = None,
         lap_from: int | None = None,
         lap_to: int | None = None,
+        sequence_to: int | None = None,
         limit: int = 100,
     ) -> list[RoomMessage]:
         filters = [
@@ -216,10 +252,14 @@ class SqlRaceRoomRepository:
             filters.append(RoomMessageRecord.agent_id == agent_id)
         if topic:
             filters.append(RoomMessageRecord.topic == topic.value)
+        if message_type:
+            filters.append(RoomMessageRecord.message_type == message_type.value)
         if lap_from is not None:
             filters.append(RoomMessageRecord.lap_number >= lap_from)
         if lap_to is not None:
             filters.append(RoomMessageRecord.lap_number <= lap_to)
+        if sequence_to is not None:
+            filters.append(RoomMessageRecord.sequence <= sequence_to)
         statement = (
             select(RoomMessageRecord)
             .where(and_(*filters))
@@ -239,9 +279,16 @@ class SqlRaceRoomRepository:
         async with self.database.session_factory() as session:
             records = (await session.execute(statement)).scalars().all()
             return [
-                MessageEvidence.model_validate(record, from_attributes=True)
-                for record in records
+                MessageEvidence.model_validate(record, from_attributes=True) for record in records
             ]
+
+    async def message_belongs_to_room(self, room_id: UUID, message_id: UUID) -> bool:
+        statement = select(func.count(RoomMessageRecord.id)).where(
+            RoomMessageRecord.room_id == room_id,
+            RoomMessageRecord.id == message_id,
+        )
+        async with self.database.session_factory() as session:
+            return bool((await session.execute(statement)).scalar_one())
 
     async def get_playback(self, room_id: UUID) -> RoomPlaybackState:
         async with self.database.session_factory() as session:
@@ -257,18 +304,27 @@ class SqlRaceRoomRepository:
         self,
         room_id: UUID,
         *,
-        current_sequence: int | None = None,
+        current_event_sequence: int | None = None,
+        current_message_sequence: int | None = None,
+        current_lap: int | None = None,
         playback_speed: float | None = None,
         is_paused: bool | None = None,
+        started_at: datetime | None = None,
     ) -> RoomPlaybackState:
         await self.get_playback(room_id)
         values = {"updated_at": datetime.now(UTC)}
-        if current_sequence is not None:
-            values["current_sequence"] = current_sequence
+        if current_event_sequence is not None:
+            values["current_event_sequence"] = current_event_sequence
+        if current_message_sequence is not None:
+            values["current_message_sequence"] = current_message_sequence
+        if current_lap is not None:
+            values["current_lap"] = current_lap
         if playback_speed is not None:
             values["playback_speed"] = playback_speed
         if is_paused is not None:
             values["is_paused"] = is_paused
+        if started_at is not None:
+            values["started_at"] = started_at
         async with self.database.session_factory() as session:
             await session.execute(
                 update(RoomPlaybackStateRecord)
@@ -278,10 +334,46 @@ class SqlRaceRoomRepository:
             await session.commit()
         return await self.get_playback(room_id)
 
-    async def sequence_for_lap(self, room_id: UUID, lap_number: int) -> int:
-        statement = select(func.min(RoomMessageRecord.sequence)).where(
-            RoomMessageRecord.room_id == room_id,
-            RoomMessageRecord.lap_number >= lap_number,
+    async def max_message_sequence(self, room_id: UUID) -> int:
+        statement = select(func.max(RoomMessageRecord.sequence)).where(
+            RoomMessageRecord.room_id == room_id
         )
         async with self.database.session_factory() as session:
             return int((await session.execute(statement)).scalar_one_or_none() or 0)
+
+    async def update_room_status(
+        self,
+        room_id: UUID,
+        status: RoomStatus,
+        *,
+        current_lap: int | None = None,
+        last_event_at: datetime | None = None,
+    ) -> None:
+        values: dict[str, object] = {"status": status.value, "updated_at": datetime.now(UTC)}
+        if current_lap is not None:
+            values["current_lap"] = current_lap
+        if last_event_at is not None:
+            values["last_event_at"] = last_event_at
+        async with self.database.session_factory() as session:
+            await session.execute(
+                update(RaceRoomRecord).where(RaceRoomRecord.id == room_id).values(**values)
+            )
+            await session.commit()
+
+    async def reset_discussion(self, room_id: UUID) -> None:
+        message_ids = select(RoomMessageRecord.id).where(RoomMessageRecord.room_id == room_id)
+        async with self.database.session_factory() as session:
+            await session.execute(
+                delete(MessageEvidenceRecord).where(
+                    MessageEvidenceRecord.message_id.in_(message_ids)
+                )
+            )
+            await session.execute(
+                delete(RoomMessageRecord).where(RoomMessageRecord.room_id == room_id)
+            )
+            await session.execute(
+                update(RaceRoomRecord)
+                .where(RaceRoomRecord.id == room_id)
+                .values(message_count=0, current_lap=None, last_event_at=None)
+            )
+            await session.commit()

@@ -13,7 +13,9 @@ class RoomStatus(StrEnum):
     PENDING = "pending"
     INGESTING = "ingesting"
     READY = "ready"
+    LIVE = "live"
     REPLAYING = "replaying"
+    PAUSED = "paused"
     COMPLETED = "completed"
     FAILED = "failed"
     UNAVAILABLE = "unavailable"
@@ -29,6 +31,7 @@ class RoomMode(StrEnum):
 class SourceAvailability(StrEnum):
     TELEMETRY = "telemetry"
     LIMITED = "limited_telemetry"
+    TIMING_ONLY = "timing_only"
     RESULTS_ONLY = "results_only"
     UNAVAILABLE = "unavailable"
 
@@ -38,6 +41,8 @@ class MessageTopic(StrEnum):
     PACE = "pace"
     RACECRAFT = "racecraft"
     INCIDENT = "incident"
+    RACE_CONTROL = "race_control"
+    WEATHER = "weather"
     PIT_STOP = "pit_stop"
     TYRES = "tyres"
     CHAMPIONSHIP = "championship"
@@ -49,6 +54,7 @@ class MessageType(StrEnum):
     OBSERVATION = "observation"
     ANALYSIS = "analysis"
     QUESTION = "question"
+    REPLY = "reply"
     AGREEMENT = "agreement"
     DISAGREEMENT = "disagreement"
     CORRECTION = "correction"
@@ -70,18 +76,19 @@ class Confidence(StrEnum):
 
 class AgentProfile(BaseModel):
     id: str
-    name: str
+    display_name: str
     role: str
-    description: str
+    short_description: str
     avatar_key: str
     specialties: list[str]
-    personality: list[str]
-    style_rules: list[str]
+    personality_rules: list[str]
     speaking_style: str
     supported_topics: list[MessageTopic]
-    accent: str
-    enabled: bool = True
+    active: bool = True
     sort_order: int
+    ui_accent_key: str
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
 class RaceRoom(BaseModel):
@@ -94,6 +101,7 @@ class RaceRoom(BaseModel):
     official_name: str
     circuit_name: str
     country: str
+    country_code: str | None = None
     session_type: str = "Race"
     scheduled_start: datetime
     actual_start: datetime | None = None
@@ -102,6 +110,7 @@ class RaceRoom(BaseModel):
     current_lap: int | None = None
     total_laps: int | None = None
     source_availability: SourceAvailability
+    telemetry_quality: str = "unknown"
     message_count: int = 0
     agent_count: int = 0
     last_event_at: datetime | None = None
@@ -145,6 +154,7 @@ class RoomMessage(BaseModel):
 class MessageEvidence(BaseModel):
     id: UUID = Field(default_factory=uuid4)
     message_id: UUID
+    evidence_key: str
     evidence_type: str
     source_provider: str
     source_reference: str
@@ -157,7 +167,10 @@ class MessageEvidence(BaseModel):
 
 class RoomPlaybackState(BaseModel):
     room_id: UUID
-    current_sequence: int = 0
-    playback_speed: float = Field(default=1.0, ge=0.25, le=8)
+    current_event_sequence: int = 0
+    current_message_sequence: int = 0
+    current_lap: int | None = None
+    playback_speed: float = Field(default=1.0, ge=0.5, le=8)
     is_paused: bool = True
+    started_at: datetime | None = None
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))

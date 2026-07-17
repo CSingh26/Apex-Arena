@@ -209,6 +209,14 @@ class SqlNormalizedEventRepository:
                 for record in records
             ]
 
+    async def sequence_for_lap(self, session_key: str, lap_number: int) -> int:
+        statement = select(func.min(NormalizedRaceEventRecord.sequence_number)).where(
+            NormalizedRaceEventRecord.session_key == session_key,
+            NormalizedRaceEventRecord.lap_number >= lap_number,
+        )
+        async with self.database.session_factory() as session:
+            return int((await session.execute(statement)).scalar_one_or_none() or 0)
+
 
 class SqlRaceStateSnapshotRepository:
     def __init__(self, database: Database) -> None:

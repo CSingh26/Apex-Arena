@@ -245,6 +245,7 @@ class RaceRoomDiscussionEngine:
         return [
             MessageEvidence(
                 message_id=message.id,
+                evidence_key="event_type",
                 evidence_type="normalized_event",
                 source_provider=event.source,
                 source_reference=str(event.id),

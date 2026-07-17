@@ -10,11 +10,11 @@ from tests.fixtures.race_room_events import race_room_event, ten_lap_fixture
 
 
 def test_roster_has_five_distinct_enabled_specialists() -> None:
-    assert [agent.name for agent in DEFAULT_ROOM_AGENTS] == [
+    assert [agent.display_name for agent in DEFAULT_ROOM_AGENTS] == [
         "Mira Vale", "Theo Voss", "Lena Cross", "Arjun Reyes", "Nova"
     ]
     assert len({topic for agent in DEFAULT_ROOM_AGENTS for topic in agent.supported_topics}) >= 8
-    assert all(agent.enabled and agent.style_rules for agent in DEFAULT_ROOM_AGENTS)
+    assert all(agent.active and agent.personality_rules for agent in DEFAULT_ROOM_AGENTS)
 
 
 def test_trigger_evaluator_ignores_noise_deduplicates_and_respects_cooldown() -> None:
@@ -62,8 +62,9 @@ def test_grounding_validator_rejects_invented_radio_and_missing_evidence() -> No
     message.content = "A pit stop was observed."
     assert not validator.validate(message, [])
     evidence = [
-        MessageEvidence(
-            message_id=message.id,
+            MessageEvidence(
+                message_id=message.id,
+                evidence_key="event_type",
             evidence_type="normalized_event",
             source_provider="fixture",
             source_reference=str(event.id),
