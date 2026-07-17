@@ -13,10 +13,12 @@ from app.services.discussion import (
     GeneratedRoomMessage,
     GroundedClaim,
     GroundingContext,
+    GroundingContextBuilder,
     GroundingValidator,
     RaceRoomDiscussionEngine,
 )
-from app.services.discussion_triggers import DiscussionTriggerEvaluator
+from app.services.discussion_triggers import DiscussionTriggerEvaluator, TriggerPriority
+from app.services.race_state import DriverRaceState, RaceState
 from app.services.room_agents import DEFAULT_ROOM_AGENTS
 from tests.fixtures.race_room_events import race_room_event, ten_lap_fixture
 
@@ -60,6 +62,103 @@ def test_trigger_evaluator_ignores_noise_deduplicates_and_respects_cooldown() ->
     assert evaluator.evaluate(meaningful) is not None
     assert evaluator.evaluate(meaningful) is None
     assert evaluator.evaluate(same_topic) is None
+
+
+def test_trigger_evaluator_only_emits_meaningful_laps_and_promotes_pace_trends() -> None:
+    evaluator = DiscussionTriggerEvaluator(
+        topic_cooldown_seconds=0,
+        agent_cooldown_seconds=0,
+    )
+
+    assert evaluator.evaluate(race_room_event(RaceEventType.LAP_COMPLETED, lap=2)) is None
+    lap_ten = evaluator.evaluate(
+        race_room_event(RaceEventType.LAP_COMPLETED, sequence=2, lap=10)
+    )
+    pace_trend = evaluator.evaluate(
+        race_room_event(
+            RaceEventType.LAP_COMPLETED,
+            sequence=3,
+            lap=3,
+            payload={"pace_trend_seconds": -0.24},
+        )
+    )
+
+    assert lap_ten is not None
+    assert lap_ten.priority is TriggerPriority.LOW
+    assert pace_trend is not None
+    assert pace_trend.priority is TriggerPriority.HIGH
+    assert pace_trend.needs_reply is True
+
+
+def test_critical_triggers_bypass_topic_agent_cooldowns_and_room_throttle() -> None:
+    evaluator = DiscussionTriggerEvaluator(
+        topic_cooldown_seconds=600,
+        agent_cooldown_seconds=600,
+        room_max_triggers_per_minute=1,
+    )
+
+    first = evaluator.evaluate(race_room_event(RaceEventType.SAFETY_CAR))
+    second = evaluator.evaluate(
+        race_room_event(RaceEventType.VIRTUAL_SAFETY_CAR, sequence=2)
+    )
+
+    assert first is not None and second is not None
+    assert first.priority is TriggerPriority.CRITICAL
+    assert second.priority is TriggerPriority.CRITICAL
+    assert second.needs_host_summary is True
+
+
+def test_trigger_throttle_is_scoped_to_session_and_reset_allows_replay() -> None:
+    evaluator = DiscussionTriggerEvaluator(
+        topic_cooldown_seconds=0,
+        agent_cooldown_seconds=0,
+        room_max_triggers_per_minute=1,
+    )
+    first = race_room_event(RaceEventType.PIT_STOP)
+    throttled = race_room_event(RaceEventType.POSITION_CHANGE, sequence=2)
+    other_session = throttled.model_copy(
+        update={"session_key": "other-room", "dedup_key": "other-room:position"}
+    )
+
+    assert evaluator.evaluate(first) is not None
+    assert evaluator.evaluate(throttled) is None
+    assert evaluator.evaluate(other_session) is not None
+
+    evaluator.reset_session("test-race-room")
+    assert evaluator.evaluate(first) is not None
+
+
+def test_resetting_one_session_preserves_other_sessions_dedup_history() -> None:
+    evaluator = DiscussionTriggerEvaluator(
+        topic_cooldown_seconds=0,
+        agent_cooldown_seconds=0,
+    )
+    first_room = race_room_event(RaceEventType.PIT_STOP)
+    other_room = race_room_event(RaceEventType.POSITION_CHANGE, sequence=2).model_copy(
+        update={"session_key": "other-room", "dedup_key": "other-room:position:2"}
+    )
+
+    assert evaluator.evaluate(first_room) is not None
+    assert evaluator.evaluate(other_room) is not None
+
+    evaluator.reset_session(first_room.session_key)
+
+    assert evaluator.evaluate(first_room) is not None
+    assert evaluator.evaluate(other_room) is None
+
+
+def test_trigger_dedup_memory_is_bounded() -> None:
+    evaluator = DiscussionTriggerEvaluator(
+        topic_cooldown_seconds=0,
+        agent_cooldown_seconds=0,
+        dedup_capacity=1,
+    )
+    first = race_room_event(RaceEventType.PIT_STOP)
+    second = race_room_event(RaceEventType.POSITION_CHANGE, sequence=2)
+
+    assert evaluator.evaluate(first) is not None
+    assert evaluator.evaluate(second) is not None
+    assert evaluator.evaluate(first) is not None
 
 
 def test_fixture_covers_ten_laps_and_critical_moments() -> None:
@@ -124,6 +223,62 @@ def test_grounding_validator_rejects_an_unsupported_evidence_key() -> None:
     assert not GroundingValidator().validate(generated, context)
 
 
+@pytest.mark.parametrize(
+    ("content", "confidence", "claims"),
+    [
+        (
+            "Driver 44 made a pit stop.",
+            Confidence.MEDIUM,
+            [GroundedClaim(claim="A stop occurred", evidence_keys=["event_type"])],
+        ),
+        (
+            "Driver 4 made a pit stop.",
+            Confidence.HIGH,
+            [GroundedClaim(claim="A stop occurred", evidence_keys=["event_type"])],
+        ),
+        ("Driver 4 made a pit stop.", Confidence.MEDIUM, []),
+    ],
+)
+def test_grounding_validator_rejects_unknown_driver_high_incomplete_or_no_claims(
+    content: str,
+    confidence: Confidence,
+    claims: list[GroundedClaim],
+) -> None:
+    message = GeneratedRoomMessage(
+        message_type=MessageType.ANALYSIS,
+        content=content,
+        confidence=confidence,
+        evidence_status=EvidenceStatus.PARTIAL,
+        claims=claims,
+    )
+    context = GroundingContext(
+        evidence={"event_type": "PIT_STOP", "driver_numbers": [4]},
+        data_quality="incomplete",
+    )
+
+    assert not GroundingValidator().validate(message, context)
+
+
+def test_grounding_context_only_includes_relevant_driver_state() -> None:
+    event = race_room_event(RaceEventType.PIT_STOP, payload={"data_quality": "complete"})
+    state = RaceState(
+        session_key=event.session_key,
+        status="started",
+        current_lap=12,
+        drivers={
+            "4": DriverRaceState(position=2),
+            "44": DriverRaceState(position=7),
+        },
+    )
+
+    context = GroundingContextBuilder().build(event, state)
+
+    assert context.data_quality == "complete"
+    assert context.evidence["race_status"] == "started"
+    assert context.evidence["race_current_lap"] == 12
+    assert set(context.evidence["relevant_driver_state"]) == {"4"}
+
+
 @pytest.mark.asyncio
 async def test_discussion_chain_is_bounded_and_preserves_reply_relationships() -> None:
     repository = FakeRoomRepository()
@@ -160,3 +315,39 @@ async def test_position_change_produces_a_grounded_disagreement() -> None:
 
     assert [message.agent_id for message in repository.messages] == ["lena-cross", "theo-voss"]
     assert repository.messages[1].message_type is MessageType.DISAGREEMENT
+
+
+@pytest.mark.asyncio
+async def test_message_publication_failure_does_not_rollback_grounded_messages() -> None:
+    repository = FakeRoomRepository()
+
+    async def failing_publisher(_: RoomMessage) -> None:
+        raise ConnectionError("redis://private-host:6379")
+
+    engine = RaceRoomDiscussionEngine(
+        repository,  # type: ignore[arg-type]
+        DiscussionTriggerEvaluator(topic_cooldown_seconds=0, agent_cooldown_seconds=0),
+        publisher=failing_publisher,
+    )
+
+    await engine.consume(race_room_event(RaceEventType.PIT_STOP))
+
+    assert len(repository.messages) == 2
+    assert engine.metrics.generated_message_count == 2
+    assert engine.metrics.deterministic_fallback_count == 2
+
+
+@pytest.mark.asyncio
+async def test_repeated_content_is_suppressed_and_counted_as_rejected() -> None:
+    repository = FakeRoomRepository()
+    engine = RaceRoomDiscussionEngine(
+        repository,  # type: ignore[arg-type]
+        DiscussionTriggerEvaluator(topic_cooldown_seconds=0, agent_cooldown_seconds=0),
+    )
+
+    await engine.consume(race_room_event(RaceEventType.PIT_STOP))
+    await engine.consume(race_room_event(RaceEventType.PIT_STOP, sequence=2))
+
+    assert len(repository.messages) == 2
+    assert engine.metrics.trigger_count == 2
+    assert engine.metrics.rejected_message_count == 1
