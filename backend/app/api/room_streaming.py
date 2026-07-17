@@ -21,6 +21,12 @@ async def race_room_stream(
     after_sequence: int,
 ) -> AsyncIterator[str]:
     cursor = after_sequence
+    try:
+        redis_id = await services.event_bus.latest_room_stream_id(str(room_id))
+    except Exception as exc:
+        logger.error("Race room stream cursor unavailable error=%s", type(exc).__name__)
+        redis_id = "$"
+    yield _sse("connection_status", {"status": "connected"})
     messages = await services.room_repository.list_messages(
         room_id,
         after_sequence=cursor,
@@ -32,7 +38,6 @@ async def race_room_stream(
 
     playback = await services.room_repository.get_playback(room_id)
     yield _sse("playback_state", playback.model_dump(mode="json"))
-    redis_id = "0-0"
     while not await request.is_disconnected():
         try:
             records = await services.event_bus.read_room_stream(

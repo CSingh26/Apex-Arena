@@ -88,7 +88,18 @@ class EventBus:
     async def publish_room_state(self, room_id: str, state: dict[str, Any]) -> str:
         return await self._publish(
             self.room_stream(room_id),
-            {"kind": "playback_state", "data": json.dumps(state, default=str)},
+            {
+                "kind": "playback_state",
+                "sequence_number": str(state.get("current_message_sequence") or 0),
+                "data": json.dumps(state, default=str),
+            },
+            maxlen=5000,
+        )
+
+    async def publish_room_status(self, room_id: str, status: dict[str, Any]) -> str:
+        return await self._publish(
+            self.room_stream(room_id),
+            {"kind": "room_status", "data": json.dumps(status, default=str)},
             maxlen=5000,
         )
 
@@ -104,6 +115,10 @@ class EventBus:
             {self.room_stream(room_id): after_id}, count=count, block=block_ms
         )
         return self._decode_streams(response)
+
+    async def latest_room_stream_id(self, room_id: str) -> str:
+        records = await self.redis.xrevrange(self.room_stream(room_id), count=1)
+        return str(records[0][0]) if records else "0-0"
 
     async def read_events(
         self, session_key: str, after_id: str = "0-0", count: int = 100

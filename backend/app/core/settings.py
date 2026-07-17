@@ -89,6 +89,8 @@ class Settings(BaseSettings):
     engine_recent_events_limit: int = Field(default=100, ge=1, le=1000)
     room_topic_cooldown_seconds: int = Field(default=20, ge=0, le=600)
     room_stream_backlog_limit: int = Field(default=250, ge=1, le=1000)
+    room_replay_interval_seconds: float = Field(default=0.6, ge=0.05, le=10)
+    room_diagnostics_enabled: bool = False
     historical_ingestion_enabled: bool = True
     historical_ingestion_max_records_per_endpoint: int = Field(default=5000, ge=1, le=50000)
     debug_ingestion_enabled: bool = True

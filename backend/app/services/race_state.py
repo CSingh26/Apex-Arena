@@ -51,6 +51,8 @@ class RaceStateSnapshotRepository(Protocol):
 
     async def count(self, session_key: str | None = None) -> int: ...
 
+    async def delete_for_session(self, session_key: str) -> None: ...
+
 
 class RaceStateEngine:
     """Deterministic, provider-independent session state reducer."""
@@ -102,6 +104,14 @@ class RaceStateEngine:
         async with self._locks[session_key]:
             return (await self._load_state(session_key)).model_copy(deep=True)
 
+    async def reset_session(self, session_key: str) -> None:
+        async with self._locks[session_key]:
+            self._states.pop(session_key, None)
+            self._applied_dedup_keys.pop(session_key, None)
+            delete_for_session = getattr(self.snapshots, "delete_for_session", None)
+            if delete_for_session is not None:
+                await delete_for_session(session_key)
+
     async def _load_state(self, session_key: str) -> RaceState:
         if session_key in self._states:
             return self._states[session_key]
@@ -117,6 +127,8 @@ class RaceStateEngine:
     def _apply_event(self, state: RaceState, event: NormalizedRaceEvent) -> None:
         payload = event.payload
         event_type = event.event_type
+        if event.lap_number is not None:
+            state.current_lap = max(state.current_lap or 0, event.lap_number)
         if event_type in {RaceEventType.SESSION_START, RaceEventType.RACE_START}:
             state.status = str(payload.get("status") or "started")
         elif event_type == RaceEventType.SESSION_STATUS:

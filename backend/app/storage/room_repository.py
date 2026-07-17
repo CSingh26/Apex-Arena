@@ -36,7 +36,7 @@ class SqlRaceRoomRepository:
     async def seed_agents(self, agents: list[AgentProfile]) -> None:
         async with self.database.session_factory() as session:
             for agent in agents:
-                values = agent.model_dump(mode="json")
+                values = agent.model_dump()
                 values["supported_topics"] = [topic.value for topic in agent.supported_topics]
                 await session.execute(
                     insert(AgentProfileRecord)
@@ -250,6 +250,7 @@ class SqlRaceRoomRepository:
         message_type: MessageType | None = None,
         lap_from: int | None = None,
         lap_to: int | None = None,
+        sequence_from: int | None = None,
         sequence_to: int | None = None,
         limit: int = 100,
     ) -> list[RoomMessage]:
@@ -267,6 +268,8 @@ class SqlRaceRoomRepository:
             filters.append(RoomMessageRecord.lap_number >= lap_from)
         if lap_to is not None:
             filters.append(RoomMessageRecord.lap_number <= lap_to)
+        if sequence_from is not None:
+            filters.append(RoomMessageRecord.sequence >= sequence_from)
         if sequence_to is not None:
             filters.append(RoomMessageRecord.sequence <= sequence_to)
         statement = (
@@ -298,6 +301,19 @@ class SqlRaceRoomRepository:
         )
         async with self.database.session_factory() as session:
             return bool((await session.execute(statement)).scalar_one())
+
+    async def get_message(self, room_id: UUID, message_id: UUID) -> RoomMessage | None:
+        statement = select(RoomMessageRecord).where(
+            RoomMessageRecord.room_id == room_id,
+            RoomMessageRecord.id == message_id,
+        )
+        async with self.database.session_factory() as session:
+            record = (await session.execute(statement)).scalar_one_or_none()
+            return (
+                RoomMessage.model_validate(record, from_attributes=True)
+                if record is not None
+                else None
+            )
 
     async def get_playback(self, room_id: UUID) -> RoomPlaybackState:
         async with self.database.session_factory() as session:

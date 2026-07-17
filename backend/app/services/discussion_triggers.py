@@ -131,15 +131,16 @@ class DiscussionTriggerEvaluator:
         self.agent_cooldown_seconds = agent_cooldown_seconds
         self.room_max_triggers_per_minute = room_max_triggers_per_minute
         self.dedup_capacity = dedup_capacity
-        self._seen: set[str] = set()
-        self._seen_order: deque[str] = deque()
+        self._seen: set[tuple[str, str]] = set()
+        self._seen_order: deque[tuple[str, str]] = deque()
         self._topic_last_at: dict[tuple[str, MessageTopic], float] = {}
         self._agent_last_at: dict[tuple[str, str], float] = {}
         self._room_triggers: dict[str, deque[float]] = defaultdict(deque)
 
     def evaluate(self, event: NormalizedRaceEvent) -> DiscussionTrigger | None:
         rule = TRIGGER_RULES.get(event.event_type)
-        if rule is None or event.dedup_key in self._seen or not self._is_meaningful(event):
+        event_identity = (event.session_key, event.dedup_key)
+        if rule is None or event_identity in self._seen or not self._is_meaningful(event):
             return None
         topic, priority, configured_candidates = rule
         if (
@@ -171,7 +172,7 @@ class DiscussionTriggerEvaluator:
         ]
         if not candidates:
             return None
-        self._remember(event.dedup_key)
+        self._remember(event.session_key, event.dedup_key)
         self._topic_last_at[(event.session_key, topic)] = event_at
         room_window.append(event_at)
         for agent in candidates[:2]:
@@ -190,8 +191,10 @@ class DiscussionTriggerEvaluator:
         )
 
     def reset_session(self, session_key: str) -> None:
-        self._seen.clear()
-        self._seen_order.clear()
+        self._seen_order = deque(
+            identity for identity in self._seen_order if identity[0] != session_key
+        )
+        self._seen = set(self._seen_order)
         self._topic_last_at = {
             key: value for key, value in self._topic_last_at.items() if key[0] != session_key
         }
@@ -207,8 +210,9 @@ class DiscussionTriggerEvaluator:
         lap = event.lap_number or 0
         return lap == 1 or lap % 10 == 0 or "pace_trend_seconds" in event.payload
 
-    def _remember(self, dedup_key: str) -> None:
-        self._seen.add(dedup_key)
-        self._seen_order.append(dedup_key)
+    def _remember(self, session_key: str, dedup_key: str) -> None:
+        identity = (session_key, dedup_key)
+        self._seen.add(identity)
+        self._seen_order.append(identity)
         while len(self._seen_order) > self.dedup_capacity:
             self._seen.discard(self._seen_order.popleft())

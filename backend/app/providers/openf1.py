@@ -8,7 +8,7 @@ import math
 import re
 import ssl
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, Protocol
@@ -47,7 +47,12 @@ class ProviderPayloadError(RuntimeError):
 class OpenF1RestClient:
     """Historical OpenF1 REST client. Historical endpoints do not require auth."""
 
-    def __init__(self, settings: Settings, client: httpx.AsyncClient | None = None) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        client: httpx.AsyncClient | None = None,
+        token_provider: Callable[[], Awaitable[str]] | None = None,
+    ) -> None:
         self.base_url = settings.openf1_rest_base_url
         self._owns_client = client is None
         self.client = client or httpx.AsyncClient(
@@ -55,6 +60,7 @@ class OpenF1RestClient:
             timeout=httpx.Timeout(10.0),
             headers={"Accept": "application/json", "User-Agent": "Apex-Arena/0.1"},
         )
+        self.token_provider = token_provider
 
     @property
     def status(self) -> dict[str, Any]:
@@ -63,6 +69,9 @@ class OpenF1RestClient:
             "rest_configured": bool(parsed.scheme and parsed.netloc),
             "rest_host": parsed.hostname,
             "historical_auth_required": False,
+            "historical_auth_mode": (
+                "oauth_retry" if self.token_provider is not None else "public_only"
+            ),
             "supported_endpoints": sorted(OPENF1_ENDPOINTS),
         }
 
@@ -84,6 +93,13 @@ class OpenF1RestClient:
                 params[key] = value
 
         response = await self.client.get(endpoint, params=params)
+        if response.status_code == 401 and self.token_provider is not None:
+            token = await self.token_provider()
+            response = await self.client.get(
+                endpoint,
+                params=params,
+                headers={"Authorization": f"Bearer {token}"},
+            )
         response.raise_for_status()
         data = response.json()
         if not isinstance(data, list):

@@ -19,6 +19,7 @@ from app.services.historical import HistoricalOpenF1Adapter
 from app.services.normalization import OpenF1EventNormalizer
 from app.services.race_state import RaceStateEngine
 from app.services.raw_events import RawProviderEventService
+from app.services.room_replay import RoomReplayCoordinator
 from app.services.rooms import RaceRoomService
 from app.services.season import SeasonService
 from app.storage.database import Database
@@ -39,8 +40,11 @@ class AppServices:
         self.redis = RedisStore(settings.redis_dsn)
         self.event_bus = EventBus(self.redis.client)
         self.jolpica = JolpicaClient(settings.jolpica_base_url)
-        self.openf1 = OpenF1RestClient(settings)
         self.openf1_auth = OpenF1AuthService(settings)
+        self.openf1 = OpenF1RestClient(
+            settings,
+            token_provider=self.openf1_auth.get_access_token,
+        )
         self.season = SeasonService(settings, self.jolpica)
 
         self.raw_event_repository = SqlRawEventRepository(self.database)
@@ -65,12 +69,21 @@ class AppServices:
             self.season,
             settings.season_year,
             fixture=fixture,
+            openf1=self.openf1,
         )
         self.room_discussion = RaceRoomDiscussionEngine(
             self.room_repository,
             DiscussionTriggerEvaluator(settings.room_topic_cooldown_seconds),
             publisher=self.event_bus.publish_room_message,
             state_reader=self.race_state.get_state,
+        )
+        self.room_replay = RoomReplayCoordinator(
+            self.room_repository,
+            self.normalized_event_repository,
+            self.room_discussion,
+            self.race_state,
+            self.event_bus,
+            settings.room_replay_interval_seconds,
         )
         self.processor = RaceEventProcessor(
             raw_events=self.raw_events,
@@ -97,6 +110,7 @@ class AppServices:
 
     async def close(self) -> None:
         await self.openf1_live.disconnect()
+        await self.room_replay.close()
         await asyncio.gather(
             self.database.close(),
             self.redis.close(),

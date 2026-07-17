@@ -51,6 +51,7 @@ class DiscussionMetrics(BaseModel):
     generated_message_count: int = 0
     rejected_message_count: int = 0
     deterministic_fallback_count: int = 0
+    generation_failure_count: int = 0
 
 
 class GroundingContextBuilder:
@@ -78,6 +79,9 @@ class GroundingContextBuilder:
 
 class GroundingValidator:
     FORBIDDEN_UNGROUNDED_PHRASES = ("team radio says", "radio message", "confirmed tyre")
+    TYRE_COMPOUNDS = ("soft", "medium", "hard", "intermediate", "wet")
+    INCIDENT_TERMS = ("crash", "collision", "contact", "spun", "spin")
+    HISTORICAL_TERMS = ("last season", "last year", "previous race", "championship points")
 
     def validate(
         self,
@@ -99,9 +103,54 @@ class GroundingValidator:
         mentioned_drivers = set(re.findall(r"\bDriver (\d+)\b", message.content))
         if not mentioned_drivers <= supplied_drivers:
             return False
+        compound = str(context.evidence.get("compound") or "").casefold()
+        mentioned_compounds = {
+            tyre for tyre in self.TYRE_COMPOUNDS if re.search(rf"\b{tyre}\b", lowered)
+        }
+        if mentioned_compounds and (
+            not compound or any(tyre != compound for tyre in mentioned_compounds)
+        ):
+            return False
+        event_type = str(context.evidence.get("event_type") or "")
+        if any(term in lowered for term in self.INCIDENT_TERMS) and event_type not in {
+            RaceEventType.OVERTAKE.value,
+            RaceEventType.RACE_CONTROL.value,
+            RaceEventType.RETIREMENT.value,
+            RaceEventType.SAFETY_CAR.value,
+            RaceEventType.VIRTUAL_SAFETY_CAR.value,
+            RaceEventType.RED_FLAG.value,
+            RaceEventType.YELLOW_FLAG.value,
+        }:
+            return False
+        if any(term in lowered for term in self.HISTORICAL_TERMS) and not context.evidence.get(
+            "season_context"
+        ):
+            return False
+        stated_seconds = [
+            float(value)
+            for value in re.findall(r"\b(\d+(?:\.\d+)?) seconds\b", lowered)
+        ]
+        supplied_numbers = self._numeric_evidence(context.evidence)
+        if any(
+            not any(abs(stated - abs(supplied)) <= 0.011 for supplied in supplied_numbers)
+            for stated in stated_seconds
+        ):
+            return False
         if context.data_quality == "incomplete" and message.confidence == Confidence.HIGH:
             return False
         return bool(message.claims)
+
+    @classmethod
+    def _numeric_evidence(cls, value: Any) -> list[float]:
+        if isinstance(value, bool) or value is None:
+            return []
+        if isinstance(value, (int, float)):
+            return [float(value)]
+        if isinstance(value, dict):
+            return [number for item in value.values() for number in cls._numeric_evidence(item)]
+        if isinstance(value, list):
+            return [number for item in value for number in cls._numeric_evidence(item)]
+        return []
 
 
 class DeterministicRoomGenerator:
@@ -368,17 +417,27 @@ class RaceRoomDiscussionEngine:
         self._recent_content: dict[str, deque[str]] = defaultdict(lambda: deque(maxlen=50))
 
     async def consume(self, event: NormalizedRaceEvent) -> None:
-        room = await self.repository.get_room_by_session(event.session_key)
-        if room is None:
-            return
-        trigger = self.evaluator.evaluate(event)
-        if trigger is None:
-            return
-        self.metrics.trigger_count += 1
-        state = await self.state_reader(event.session_key) if self.state_reader else None
-        context = self.context_builder.build(event, state)
-        async with self._locks[room.slug]:
-            await self._generate_chain(room.id, event, trigger, context)
+        try:
+            room = await self.repository.get_room_by_session(event.session_key)
+            if room is None:
+                return
+            trigger = self.evaluator.evaluate(event)
+            if trigger is None:
+                return
+            self.metrics.trigger_count += 1
+            state = await self.state_reader(event.session_key) if self.state_reader else None
+            context = self.context_builder.build(event, state)
+            async with self._locks[room.slug]:
+                await self._generate_chain(room.id, event, trigger, context)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.metrics.generation_failure_count += 1
+            logger.error(
+                "Room discussion generation failed event_type=%s error=%s",
+                event.event_type.value,
+                type(exc).__name__,
+            )
 
     def reset_session(self, session_key: str, room_id: str) -> None:
         self.evaluator.reset_session(session_key)
