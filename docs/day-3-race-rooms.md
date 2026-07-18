@@ -446,10 +446,11 @@ Set the two E2E URLs to the active Compose frontend and backend origins when usi
 published ports.
 
 The automated backend coverage includes trigger/grounding chains, replay lifecycle, safe routes,
-message filters/evidence, and stream recovery. The Day 3 frontend unit suite has 13 tests in six
+message filters/evidence, and stream recovery. The Day 3 frontend unit suite has 14 tests in seven
 Vitest/Testing Library files covering the archive and filters, five-agent roster/collapse,
 timeline replies and filters, evidence details/Escape dismissal, exact replay-control payloads,
-and bounded duplicate/out-of-order message merging. The Playwright suite has six Chromium tests:
+hydration-safe theme restoration, and bounded duplicate/out-of-order message merging. The
+Playwright suite has six Chromium tests:
 one covers the primary archive-to-room replay, filtering, evidence, seek/resume/completion flow,
 and five cover the required responsive width matrix. Manual browser validation remains a release
 gate for console/network inspection and fault scenarios outside that scripted path.
