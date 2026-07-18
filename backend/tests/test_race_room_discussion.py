@@ -78,9 +78,7 @@ def test_trigger_evaluator_only_emits_meaningful_laps_and_promotes_pace_trends()
     )
 
     assert evaluator.evaluate(race_room_event(RaceEventType.LAP_COMPLETED, lap=2)) is None
-    lap_ten = evaluator.evaluate(
-        race_room_event(RaceEventType.LAP_COMPLETED, sequence=2, lap=10)
-    )
+    lap_ten = evaluator.evaluate(race_room_event(RaceEventType.LAP_COMPLETED, sequence=2, lap=10))
     pace_trend = evaluator.evaluate(
         race_room_event(
             RaceEventType.LAP_COMPLETED,
@@ -105,9 +103,7 @@ def test_critical_triggers_bypass_topic_agent_cooldowns_and_room_throttle() -> N
     )
 
     first = evaluator.evaluate(race_room_event(RaceEventType.SAFETY_CAR))
-    second = evaluator.evaluate(
-        race_room_event(RaceEventType.VIRTUAL_SAFETY_CAR, sequence=2)
-    )
+    second = evaluator.evaluate(race_room_event(RaceEventType.VIRTUAL_SAFETY_CAR, sequence=2))
 
     assert first is not None and second is not None
     assert first.priority is TriggerPriority.CRITICAL

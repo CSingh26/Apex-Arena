@@ -31,6 +31,7 @@ async def test_stream_replays_missed_events_then_sends_current_state(settings: S
         dedup_key="stream-dedup",
         is_replay=True,
     )
+
     async def list_events(*_: Any, **__: Any) -> list[NormalizedRaceEvent]:
         return [event]
 

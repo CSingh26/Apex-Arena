@@ -43,9 +43,7 @@ class FakeRuns:
         self.run_id = uuid4()
         self.finished: dict[str, Any] | None = None
 
-    async def start(
-        self, *, provider: str, session_key: str, metadata: dict[str, Any]
-    ) -> UUID:
+    async def start(self, *, provider: str, session_key: str, metadata: dict[str, Any]) -> UUID:
         assert provider == "openf1"
         assert metadata["adapter"] == "historical_rest"
         return self.run_id

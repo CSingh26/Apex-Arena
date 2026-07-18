@@ -78,9 +78,9 @@ class EventOrderingBuffer:
 
     def __init__(self, window_ms: int) -> None:
         self.window = timedelta(milliseconds=max(0, window_ms))
-        self._buffers: dict[
-            str, list[tuple[datetime, int, NormalizedRaceEvent]]
-        ] = defaultdict(list)
+        self._buffers: dict[str, list[tuple[datetime, int, NormalizedRaceEvent]]] = defaultdict(
+            list
+        )
         self._latest_event_time: dict[str, datetime] = {}
         self._counter = itertools.count()
 

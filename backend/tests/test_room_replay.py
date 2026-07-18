@@ -174,11 +174,7 @@ class FakeEventRepository:
 
     async def max_sequence(self, session_key: str) -> int:
         return max(
-            (
-                event.sequence_number
-                for event in self.events
-                if event.session_key == session_key
-            ),
+            (event.sequence_number for event in self.events if event.session_key == session_key),
             default=0,
         )
 
@@ -209,9 +205,7 @@ class FakeDiscussion:
             await self.consume_release.wait()
         if event.sequence_number not in self.rooms.event_message_sequences:
             self.rooms.message_sequence += 1
-            self.rooms.event_message_sequences[event.sequence_number] = (
-                self.rooms.message_sequence
-            )
+            self.rooms.event_message_sequences[event.sequence_number] = self.rooms.message_sequence
 
     def reset_session(self, session_key: str, room_id: str) -> None:
         self.resets.append((session_key, room_id))
@@ -309,9 +303,7 @@ async def test_start_consumes_events_in_order_and_completes_durably() -> None:
 @pytest.mark.asyncio
 async def test_restart_resets_discussion_state_and_replays_from_sequence_zero() -> None:
     room = replay_room()
-    replay, rooms, events, discussion, race_state, bus = coordinator(
-        room, [replay_event(1, 1)]
-    )
+    replay, rooms, events, discussion, race_state, bus = coordinator(room, [replay_event(1, 1)])
     rooms.playback = rooms.playback.model_copy(
         update={
             "current_event_sequence": 99,

@@ -29,9 +29,7 @@ class SqlIngestionRunRepository:
     def __init__(self, database: Database) -> None:
         self.database = database
 
-    async def start(
-        self, *, provider: str, session_key: str, metadata: dict[str, Any]
-    ) -> UUID:
+    async def start(self, *, provider: str, session_key: str, metadata: dict[str, Any]) -> UUID:
         run_id = uuid4()
         async with self.database.session_factory() as session:
             session.add(
@@ -73,9 +71,7 @@ class SqlIngestionRunRepository:
 
     async def latest(self) -> IngestionRunSummary | None:
         statement = (
-            select(IngestionRunRecord)
-            .order_by(IngestionRunRecord.started_at.desc())
-            .limit(1)
+            select(IngestionRunRecord).order_by(IngestionRunRecord.started_at.desc()).limit(1)
         )
         async with self.database.session_factory() as session:
             record = (await session.execute(statement)).scalar_one_or_none()

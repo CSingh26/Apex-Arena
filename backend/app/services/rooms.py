@@ -61,9 +61,7 @@ class RaceRoomService:
             sessions = await self._historical_sessions()
             for meeting in meetings:
                 session = self._match_session(meeting, sessions)
-                await self.repository.upsert_room(
-                    self._from_meeting(meeting, session), agent_ids
-                )
+                await self.repository.upsert_room(self._from_meeting(meeting, session), agent_ids)
             self._catalog_ready = True
 
     async def sync_meetings(
@@ -96,9 +94,7 @@ class RaceRoomService:
             sessions = await self._historical_sessions()
             for meeting in meetings:
                 session = self._match_session(meeting, sessions)
-                await self.repository.upsert_room(
-                    self._from_meeting(meeting, session), agent_ids
-                )
+                await self.repository.upsert_room(self._from_meeting(meeting, session), agent_ids)
             self._catalog_ready = True
             self._retry_after = 0.0
             return count + len(meetings)

@@ -63,9 +63,7 @@ async def test_cleanup_selection_requires_every_empty_development_room_guard() -
     database = RecordingDatabase(room_id)
     repository = SqlRaceRoomRepository(database)  # type: ignore[arg-type]
 
-    deleted = await repository.delete_empty_development_room(
-        "development-day2-validation"
-    )
+    deleted = await repository.delete_empty_development_room("development-day2-validation")
 
     assert deleted is True
     selection_sql, selection_params = compiled(database.session.statements[0])
@@ -84,8 +82,7 @@ async def test_cleanup_selection_requires_every_empty_development_room_guard() -
     assert deletion_sql[1].startswith("DELETE FROM race_room_agents")
     assert deletion_sql[2].startswith("DELETE FROM race_rooms")
     assert all(
-        room_id in compiled(statement)[1].values()
-        for statement in database.session.statements[1:]
+        room_id in compiled(statement)[1].values() for statement in database.session.statements[1:]
     )
     assert database.session.commit_count == 1
 
@@ -106,9 +103,7 @@ async def test_cleanup_never_deletes_when_any_protection_guard_rejects_room(
     database = RecordingDatabase(selected_room_id=None)
     repository = SqlRaceRoomRepository(database)  # type: ignore[arg-type]
 
-    deleted = await repository.delete_empty_development_room(
-        "development-day2-validation"
-    )
+    deleted = await repository.delete_empty_development_room("development-day2-validation")
 
     assert protected_case
     assert deleted is False

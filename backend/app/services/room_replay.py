@@ -62,9 +62,7 @@ class RoomReplayCoordinator:
                     is_paused=False,
                     started_at=datetime.now(UTC),
                 )
-                await self._publish_status(
-                    str(room.id), {"status": "discussion_reset"}
-                )
+                await self._publish_status(str(room.id), {"status": "discussion_reset"})
             else:
                 playback = await self.rooms.update_playback(
                     room.id,
@@ -160,14 +158,10 @@ class RoomReplayCoordinator:
                             limit=1,
                         )
                         if not events:
-                            completed = await self.rooms.update_playback(
-                                room.id, is_paused=True
-                            )
+                            completed = await self.rooms.update_playback(room.id, is_paused=True)
                             await self.rooms.update_room_status(room.id, RoomStatus.COMPLETED)
                             await self._publish(room.id, completed, RoomStatus.COMPLETED)
-                            await self._publish_status(
-                                str(room.id), {"status": "replay_complete"}
-                            )
+                            await self._publish_status(str(room.id), {"status": "replay_complete"})
                             return
                         event = events[0]
                         await self.race_state.consume(event)
@@ -255,9 +249,7 @@ class RoomReplayCoordinator:
         self, room_id: UUID, playback: RoomPlaybackState, status: RoomStatus
     ) -> None:
         try:
-            await self.event_bus.publish_room_state(
-                str(room_id), playback.model_dump(mode="json")
-            )
+            await self.event_bus.publish_room_state(str(room_id), playback.model_dump(mode="json"))
         except Exception as exc:
             logger.error("Playback publication failed error=%s", type(exc).__name__)
         await self._publish_status(str(room_id), {"status": status.value})

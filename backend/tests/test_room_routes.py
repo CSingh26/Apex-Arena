@@ -364,9 +364,7 @@ async def test_diagnostics_aggregate_counts_recent_events_state_and_metrics() ->
             )
         )
     )
-    services.openf1_live = SimpleNamespace(
-        status=lambda: {"connection_state": "DISCONNECTED"}
-    )
+    services.openf1_live = SimpleNamespace(status=lambda: {"connection_state": "DISCONNECTED"})
     services.room_discussion = SimpleNamespace(
         metrics=DiscussionMetrics(trigger_count=8, generated_message_count=14)
     )

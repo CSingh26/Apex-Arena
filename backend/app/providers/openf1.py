@@ -164,11 +164,7 @@ class OpenF1AuthService:
 
     async def get_access_token(self, force_refresh: bool = False) -> str:
         refresh_buffer = self.settings.openf1_token_refresh_buffer_seconds
-        if (
-            not force_refresh
-            and self._access_token
-            and self.expires_in_seconds > refresh_buffer
-        ):
+        if not force_refresh and self._access_token and self.expires_in_seconds > refresh_buffer:
             return self._access_token
 
         if not self.credentials_present:
@@ -410,9 +406,7 @@ class OpenF1LiveClient:
             except Exception as exc:
                 logger.error("Live status publish failed error=%s", type(exc).__name__)
 
-    def _submit_state(
-        self, state: LiveConnectionState, degraded_reason: str | None = None
-    ) -> None:
+    def _submit_state(self, state: LiveConnectionState, degraded_reason: str | None = None) -> None:
         if self._loop is None:
             return
         self._loop.call_soon_threadsafe(

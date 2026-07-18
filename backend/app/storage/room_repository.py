@@ -445,9 +445,7 @@ class SqlRaceRoomRepository:
             if room_id is None:
                 return False
             await session.execute(
-                delete(RoomPlaybackStateRecord).where(
-                    RoomPlaybackStateRecord.room_id == room_id
-                )
+                delete(RoomPlaybackStateRecord).where(RoomPlaybackStateRecord.room_id == room_id)
             )
             await session.execute(
                 delete(RaceRoomAgentRecord).where(RaceRoomAgentRecord.room_id == room_id)

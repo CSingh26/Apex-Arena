@@ -128,8 +128,7 @@ class GroundingValidator:
         ):
             return False
         stated_seconds = [
-            float(value)
-            for value in re.findall(r"\b(\d+(?:\.\d+)?) seconds\b", lowered)
+            float(value) for value in re.findall(r"\b(\d+(?:\.\d+)?) seconds\b", lowered)
         ]
         supplied_numbers = self._numeric_evidence(context.evidence)
         if any(

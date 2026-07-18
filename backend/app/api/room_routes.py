@@ -125,8 +125,7 @@ async def race_room_detail(room_slug: str, services: Services) -> RaceRoomDetail
         playback=playback,
         data_notice=notices[room.source_availability],
         diagnostics_available=(
-            services.settings.app_env != "production"
-            or services.settings.room_diagnostics_enabled
+            services.settings.app_env != "production" or services.settings.room_diagnostics_enabled
         ),
     )
 
@@ -260,10 +259,7 @@ async def room_diagnostics(
     room_slug: str,
     services: Services,
 ) -> RoomDiagnosticsResponse:
-    if (
-        services.settings.app_env == "production"
-        and not services.settings.room_diagnostics_enabled
-    ):
+    if services.settings.app_env == "production" and not services.settings.room_diagnostics_enabled:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
     room = await require_room(room_slug, services)
     if room.session_key is None:

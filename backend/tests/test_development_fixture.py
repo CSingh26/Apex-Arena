@@ -18,9 +18,7 @@ def test_day3_fixture_is_deterministic_ordered_and_covers_major_discussion_paths
     first = day3_validation_events()
     second = day3_validation_events()
 
-    assert [
-        event.model_dump(mode="json", exclude={"id", "processed_at"}) for event in first
-    ] == [
+    assert [event.model_dump(mode="json", exclude={"id", "processed_at"}) for event in first] == [
         event.model_dump(mode="json", exclude={"id", "processed_at"}) for event in second
     ]
     assert len(first) == 14
@@ -55,8 +53,7 @@ def test_fixture_contains_explicit_uncertainty_pace_and_non_championship_evidenc
     trend = next(
         event
         for event in events
-        if event.event_type is RaceEventType.LAP_COMPLETED
-        and "pace_trend_seconds" in event.payload
+        if event.event_type is RaceEventType.LAP_COMPLETED and "pace_trend_seconds" in event.payload
     )
     finish = next(event for event in events if event.event_type is RaceEventType.SESSION_FINISH)
 

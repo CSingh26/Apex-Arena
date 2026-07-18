@@ -43,9 +43,7 @@ class IngestionRunSummary(BaseModel):
 
 
 class IngestionRunRepository(Protocol):
-    async def start(
-        self, *, provider: str, session_key: str, metadata: dict[str, Any]
-    ) -> UUID: ...
+    async def start(self, *, provider: str, session_key: str, metadata: dict[str, Any]) -> UUID: ...
 
     async def finish(
         self,

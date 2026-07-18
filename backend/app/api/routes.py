@@ -142,9 +142,7 @@ async def engine_status(services: Services) -> EngineStatusResponse:
         database=ComponentHealth(
             status="healthy" if database_ok else "degraded", detail=database_detail
         ),
-        redis=ComponentHealth(
-            status="healthy" if redis_ok else "degraded", detail=redis_detail
-        ),
+        redis=ComponentHealth(status="healthy" if redis_ok else "degraded", detail=redis_detail),
         current_session_key=current_session_key,
         raw_event_count=raw_count,
         normalized_event_count=normalized_count,
