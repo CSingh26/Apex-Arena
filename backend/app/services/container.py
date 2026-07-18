@@ -19,6 +19,7 @@ from app.services.historical import HistoricalOpenF1Adapter
 from app.services.normalization import OpenF1EventNormalizer
 from app.services.race_state import RaceStateEngine
 from app.services.raw_events import RawProviderEventService
+from app.services.room_eligibility import RoomEligibilityService
 from app.services.room_replay import RoomReplayCoordinator
 from app.services.rooms import RaceRoomService
 from app.services.season import SeasonService
@@ -61,15 +62,17 @@ class AppServices:
         self.redis_publisher = RaceEventRedisPublisher(self.event_bus, self.race_state)
         fixture = (
             DevelopmentFixtureService(self.normalized_event_repository)
-            if settings.app_env != "production"
+            if settings.app_env in {"local", "test"} and settings.development_fixture_enabled
             else None
         )
+        self.room_eligibility = RoomEligibilityService()
         self.rooms = RaceRoomService(
             self.room_repository,
             self.season,
             settings.season_year,
             fixture=fixture,
             openf1=self.openf1,
+            eligibility=self.room_eligibility,
         )
         self.room_discussion = RaceRoomDiscussionEngine(
             self.room_repository,
@@ -106,6 +109,7 @@ class AppServices:
             runs=self.ingestion_runs,
             snapshots=self.snapshot_repository,
             max_records_per_endpoint=settings.historical_ingestion_max_records_per_endpoint,
+            room_availability=self.room_repository,
         )
 
     async def close(self) -> None:
