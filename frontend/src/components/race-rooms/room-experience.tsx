@@ -4,12 +4,12 @@
 import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { AppNavigation } from "@/components/navigation/app-navigation";
 import { AgentRoster } from "@/components/race-rooms/agent-roster";
 import { EvidenceDrawer } from "@/components/race-rooms/evidence-drawer";
 import { MessageTimeline } from "@/components/race-rooms/message-timeline";
 import { PlaybackControls } from "@/components/race-rooms/playback-controls";
 import { RoomContext } from "@/components/race-rooms/room-context";
-import { ThemeToggle } from "@/components/race-rooms/theme-toggle";
 import { getRaceRoom, getRoomMessages, roomStreamUrl, startRoomReplay, updateRoomPlayback } from "@/lib/api";
 import { mergeRoomMessages } from "@/lib/room-state";
 import type { PlaybackAction, RaceRoomDetailResponse, ReplayAction, RoomMessage, RoomPlayback, RoomStatus } from "@/lib/types";
@@ -147,13 +147,17 @@ export function RoomExperience({ slug }: { slug: string }) {
 
   const { room, agents } = detail;
   const evidenceAgent = selectedMessage ? agents.find((agent) => agent.id === selectedMessage.agent_id) : undefined;
+  const qualifying = room.session_type.toUpperCase().includes("QUALIFY") || room.session_type.toUpperCase().includes("SHOOTOUT");
+  const progressLabel = qualifying ? "Current phase" : room.status === "live" ? "Current lap" : "Replay lap";
+  const progressValue = qualifying ? (room.current_phase ?? "Session") : (playback.current_lap ?? room.current_lap ?? "—");
   return <main className="room-page track-grid">
-    <nav className="room-topbar" aria-label="Room navigation"><Link href="/race-rooms"><span aria-hidden>←</span> All Race Rooms</Link><div className="room-topbar__identity"><span className="rooms-brand"><i className="brand-mark" /> APEX ARENA</span><span aria-hidden>·</span><b>{room.race_name}</b></div><div className="room-topbar__actions"><span className={`connection connection--${connection}`} role="status"><span aria-hidden />{connection === "live" ? "Stream connected" : connection === "connecting" ? "Connecting" : connection === "reconnecting" ? "Reconnecting" : "Stream degraded"}</span><ThemeToggle /></div></nav>
-    <header className="room-header"><div><div className="room-header__meta"><span>{room.season} season</span><span>Round {room.round_number ?? "—"}</span><span>{room.session_type}</span><span className={`status status--${room.status}`}>{room.status}</span></div><h1>{room.race_name}</h1><p>{room.official_name}</p><p>{room.circuit_name} · {room.country}</p>{room.is_development && <strong className="dev-label"><span aria-hidden>◆</span> Development room · deterministic simulated data</strong>}</div><div className="lap-display"><span>Replay lap</span><b>{playback.current_lap ?? room.current_lap ?? "—"}</b><small>/ {room.total_laps ?? "—"}</small></div></header>
+    <AppNavigation contextLabel={`${room.race_name} · ${room.session_type}`} connection={connection} />
+    <Link className="room-breadcrumb" href="/race-rooms"><span aria-hidden>←</span> All Race Rooms</Link>
+    <header className="room-header"><div><div className="room-header__meta"><span>Round {room.round_number ?? "—"}</span><span>{room.session_type.replaceAll("_", " ")}</span><span className={`status status--${room.status}`}>{room.status}</span></div><h1>{room.race_name}</h1><p>{room.circuit_name} · {room.country}</p></div><div className="session-progress"><span>{progressLabel}</span><b>{progressValue}</b>{!qualifying && room.total_laps != null && <small>/ {room.total_laps}</small>}</div></header>
     <div className="sticky-playback"><PlaybackControls room={room} playback={playback} busy={controlBusy} error={controlError} onReplay={runReplay} onControl={runControl} /></div>
+    <AgentRoster agents={agents} selectedAgent={selectedAgent} onSelectAgent={setSelectedAgent} />
     <div className="room-layout">
-      <AgentRoster agents={agents} selectedAgent={selectedAgent} onSelectAgent={setSelectedAgent} />
-      <MessageTimeline messages={messages} agents={agents} selectedAgent={selectedAgent} totalLaps={room.total_laps} hasMore={nextCursor !== null} loadingMore={loadingMore} onSelectedAgentChange={setSelectedAgent} onLoadMore={loadMore} onInspectEvidence={setSelectedMessage} />
+      <MessageTimeline messages={messages} agents={agents} selectedAgent={selectedAgent} totalLaps={room.total_laps} sessionType={room.session_type} hasMore={nextCursor !== null} loadingMore={loadingMore} onSelectedAgentChange={setSelectedAgent} onLoadMore={loadMore} onInspectEvidence={setSelectedMessage} />
       <RoomContext slug={slug} detail={detail} playback={playback} />
     </div>
     <EvidenceDrawer slug={slug} message={selectedMessage} agent={evidenceAgent} onClose={closeEvidence} />

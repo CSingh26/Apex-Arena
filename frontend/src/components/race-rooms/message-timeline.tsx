@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 "use client";
 
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import type { AgentProfile, MessageTopic, MessageType, RoomMessage } from "@/lib/types";
 import { roomMessageTime } from "@/lib/room-state";
@@ -9,16 +9,6 @@ import { roomMessageTime } from "@/lib/room-state";
 const TOPICS: MessageTopic[] = ["strategy", "pace", "racecraft", "incident", "race_control", "weather", "pit_stop", "tyres", "championship", "summary", "session"];
 const MESSAGE_TYPES: MessageType[] = ["observation", "analysis", "question", "reply", "agreement", "disagreement", "correction", "summary", "uncertainty_notice"];
 const MAX_RENDERED_MESSAGES = 300;
-
-function subscribeToCompactFilters(callback: () => void): () => void {
-  const query = window.matchMedia("(max-width: 600px)");
-  query.addEventListener("change", callback);
-  return () => query.removeEventListener("change", callback);
-}
-
-function compactFiltersSnapshot(): boolean {
-  return window.matchMedia("(max-width: 600px)").matches;
-}
 
 type TimelineFilters = {
   agent: string;
@@ -41,6 +31,7 @@ type MessageTimelineProps = {
   agents: AgentProfile[];
   selectedAgent: string;
   totalLaps: number | null;
+  sessionType: string;
   hasMore: boolean;
   loadingMore: boolean;
   onSelectedAgentChange: (agent: string) => void;
@@ -48,14 +39,13 @@ type MessageTimelineProps = {
   onInspectEvidence: (message: RoomMessage) => void;
 };
 
-export function MessageTimeline({ messages, agents, selectedAgent, totalLaps, hasMore, loadingMore, onSelectedAgentChange, onLoadMore, onInspectEvidence }: MessageTimelineProps) {
+export function MessageTimeline({ messages, agents, selectedAgent, totalLaps, sessionType, hasMore, loadingMore, onSelectedAgentChange, onLoadMore, onInspectEvidence }: MessageTimelineProps) {
   const [topic, setTopic] = useState("all");
   const [type, setType] = useState("all");
   const [lap, setLap] = useState("");
-  const [filtersOpenOverride, setFiltersOpenOverride] = useState<boolean | null>(null);
+  const [filtersOpen, setFiltersOpen] = useState(false);
   const endRef = useRef<HTMLDivElement>(null);
-  const compactFilters = useSyncExternalStore(subscribeToCompactFilters, compactFiltersSnapshot, () => true);
-  const filtersOpen = filtersOpenOverride ?? !compactFilters;
+  const qualifying = sessionType.toUpperCase().includes("QUALIFY") || sessionType.toUpperCase().includes("SHOOTOUT");
   const filters = useMemo(() => ({ agent: selectedAgent, topic, type, lap }), [selectedAgent, topic, type, lap]);
   const filtered = useMemo(() => filterRoomMessages(messages, filters), [filters, messages]);
   const omitted = Math.max(0, filtered.length - MAX_RENDERED_MESSAGES);
@@ -73,13 +63,13 @@ export function MessageTimeline({ messages, agents, selectedAgent, totalLaps, ha
   }, [lap, selectedAgent, topic, type]);
 
   return <section className="timeline-card" aria-labelledby="timeline-title">
-    <div className="timeline-heading"><div><p className="section-kicker">Grounded conversation</p><h2 id="timeline-title">Race timeline</h2></div><button className="control-button control-button--quiet" type="button" onClick={() => endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" })}>Jump to latest <span aria-hidden>↓</span></button></div>
-    <button className="filter-toggle" type="button" aria-expanded={filtersOpen} aria-controls="timeline-filters" onClick={() => setFiltersOpenOverride(!filtersOpen)}><span>Filter conversation</span><span>{filtersActive ? "Filters active" : "All messages"} <b aria-hidden>{filtersOpen ? "−" : "+"}</b></span></button>
+    <div className="timeline-heading"><div><p className="section-kicker">What matters and why</p><h2 id="timeline-title">Session conversation</h2></div><button className="control-button control-button--quiet" type="button" onClick={() => endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" })}>Jump to latest <span aria-hidden>↓</span></button></div>
+    <button className="filter-toggle" type="button" aria-expanded={filtersOpen} aria-controls="timeline-filters" onClick={() => setFiltersOpen(!filtersOpen)}><span>Filter conversation</span><span>{filtersActive ? "Filters active" : "All messages"} <b aria-hidden>{filtersOpen ? "−" : "+"}</b></span></button>
     {filtersOpen && <div id="timeline-filters" className="timeline-filters" aria-label="Filter messages">
       <label><span>Voice</span><select value={selectedAgent} onChange={(event) => onSelectedAgentChange(event.target.value)}><option value="all">All five agents</option>{agents.map((agent) => <option key={agent.id} value={agent.id}>{agent.display_name}</option>)}</select></label>
       <label><span>Topic</span><select value={topic} onChange={(event) => setTopic(event.target.value)}><option value="all">All topics</option>{TOPICS.map((item) => <option key={item} value={item}>{item.replaceAll("_", " ")}</option>)}</select></label>
       <label><span>Message</span><select value={type} onChange={(event) => setType(event.target.value)}><option value="all">All types</option>{MESSAGE_TYPES.map((item) => <option key={item} value={item}>{item.replaceAll("_", " ")}</option>)}</select></label>
-      <label className="lap-filter"><span>Lap</span><input type="number" min="0" max={totalLaps ?? undefined} value={lap} placeholder="All" onChange={(event) => setLap(event.target.value)} /></label>
+      {!qualifying && <label className="lap-filter"><span>Lap</span><input type="number" min="0" max={totalLaps ?? undefined} value={lap} placeholder="All" onChange={(event) => setLap(event.target.value)} /></label>}
       {filtersActive && <button className="clear-filters" type="button" onClick={clear}>Clear filters</button>}
       <span className="filter-count">{filtered.length} {filtered.length === 1 ? "message" : "messages"}</span>
     </div>}
@@ -93,10 +83,10 @@ export function MessageTimeline({ messages, agents, selectedAgent, totalLaps, ha
         return <article className={`message message--${message.message_type}`} data-testid="room-message" data-message-sequence={message.sequence} data-agent-id={message.agent_id} data-topic={message.topic} data-message-type={message.message_type} data-accent={agent?.ui_accent_key} key={message.id}>
           <div className="message__rail"><span className="agent-avatar" aria-hidden>{agent?.avatar_key ?? "AA"}</span><span className="timeline-line" /></div>
           <div className="message__body">
-            <header className="message__meta"><strong>{agent?.display_name ?? "Race Room"}</strong><span>{agent?.role ?? "Unknown voice"}</span><time>{roomMessageTime(message)}</time><span>{message.lap_number == null ? "Session" : `Lap ${message.lap_number}`}</span></header>
-            <div className="message__labels"><span>{message.topic.replaceAll("_", " ")}</span><span className={`message-type message-type--${message.message_type}`}>{message.message_type.replaceAll("_", " ")}</span>{message.reply_to_message_id && <span className="reply-label">↳ Replying to {parentAgent?.display_name ?? "an earlier message"}</span>}</div>
+            <header className="message__meta"><strong>{agent?.display_name ?? "Race Room"}</strong><span>{agent?.role ?? "Room voice"}</span><span>{message.session_phase ?? (qualifying ? "Session" : message.lap_number == null ? "Session" : `Lap ${message.lap_number}`)}</span></header>
+            <div className="message__labels"><span>{message.topic.replaceAll("_", " ")}</span>{message.reply_to_message_id && <span className="reply-label">↳ Replying to {parentAgent?.display_name ?? "an earlier message"}</span>}</div>
             <p>{message.content}</p>
-            <footer className="message__footer"><button className="evidence-button" type="button" onClick={() => onInspectEvidence(message)}><span className={`evidence-dot evidence-dot--${message.evidence_status}`} /> Why this was said <span>· {message.evidence_status}</span></button><span>{message.confidence} confidence</span><time dateTime={message.created_at}>{new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit" }).format(new Date(message.created_at))}</time><span>#{message.sequence}</span></footer>
+            <footer className="message__footer"><button className="evidence-button" type="button" aria-label={`See the data behind ${agent?.display_name ?? "this"} message`} onClick={() => onInspectEvidence(message)}><span className={`evidence-dot evidence-dot--${message.evidence_status}`} aria-hidden /> See the data <span className="sr-only">Evidence status: {message.evidence_status}. Message time: {roomMessageTime(message)}.</span></button></footer>
           </div>
         </article>;
       })}
