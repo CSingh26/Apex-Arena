@@ -164,7 +164,7 @@ test("keeps a real historical conversation compact, inspectable, and session-awa
   await page.setViewportSize({ width: 1280, height: 800 });
   await page.goto(`/race-rooms/${session.room_slug}`);
   await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
-  await expect(page.getByRole("img", { name: /circuit outline/ })).toBeVisible();
+  await expect(page.getByRole("img", { name: /2026 circuit layout/ })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Session conversation" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Session timeline" })).toBeVisible();
   await expect(page.getByTestId("playback-controls")).toBeVisible();
@@ -200,6 +200,7 @@ for (const width of VIEWPORT_WIDTHS) {
     await page.goto("/race-rooms");
     await expect(page.getByRole("heading", { name: "Race Rooms" })).toBeVisible();
     await expect(page.locator(".app-nav")).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+    await expect(page.locator(".app-nav")).toHaveCSS("position", "absolute");
     await expectNoHorizontalOverflow(page);
 
     const menuButton = page.getByRole("button", { name: "Open navigation menu" });
