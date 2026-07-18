@@ -179,7 +179,8 @@ def test_deterministic_pit_message_only_claims_available_fields() -> None:
     assert trigger is not None
     generated = DeterministicRoomGenerator().generate(event, trigger, "mira-vale")
     assert "2.41 seconds" in generated.content
-    assert "remain uncertain" in generated.content
+    assert "My call" in generated.content
+    assert "do not celebrate" in generated.content
     assert generated.evidence_status is EvidenceStatus.GROUNDED
     assert generated.confidence is Confidence.HIGH
 
@@ -371,6 +372,23 @@ async def test_mira_pace_reply_is_classified_as_strategy_analysis() -> None:
         "mira-vale",
     ]
     assert repository.messages[1].topic is MessageTopic.STRATEGY
+    assert "0.42-second pace gain" in repository.messages[1].content
+    assert "speed can still become a trap" in repository.messages[1].content
+
+
+def test_position_message_takes_a_grounded_stand_on_the_stat_line() -> None:
+    event = race_room_event(
+        RaceEventType.OVERTAKE,
+        payload={"previous_position": 7, "position": 6},
+    )
+    trigger = DiscussionTriggerEvaluator(topic_cooldown_seconds=0).evaluate(event)
+    assert trigger is not None
+
+    generated = DeterministicRoomGenerator().generate(event, trigger, "lena-cross")
+
+    assert "from P7 to P6" in generated.content
+    assert "clean track-position win" in generated.content
+    assert GroundingValidator().validate(generated, GroundingContextBuilder().build(event, None))
 
 
 @pytest.mark.asyncio
