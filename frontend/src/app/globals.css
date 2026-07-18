@@ -1171,8 +1171,6 @@ summary:focus-visible {
 .context-column {
   display: grid;
   gap: 12px;
-  max-height: none;
-  overflow: visible;
 }
 
 .context-card {
@@ -1527,7 +1525,7 @@ summary:focus-visible {
   .room-controls .search-control { grid-row: span 2; }
   .room-grid--compact { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .room-layout { grid-template-columns: minmax(220px, 270px) minmax(440px, 1fr); }
-  .context-column { position: static; grid-column: 1 / -1; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .context-column { position: static; grid-column: 1 / -1; grid-template-columns: repeat(2, minmax(0, 1fr)); max-height: none; overflow: visible; }
   .context-column > * { align-self: start; }
 }
 

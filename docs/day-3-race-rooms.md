@@ -452,8 +452,10 @@ timeline replies and filters, evidence details/Escape dismissal, exact replay-co
 hydration-safe theme restoration, and bounded duplicate/out-of-order message merging. The
 Playwright suite has six Chromium tests:
 one covers the primary archive-to-room replay, filtering, evidence, seek/resume/completion flow,
-and five cover the required responsive width matrix. Manual browser validation remains a release
-gate for console/network inspection and fault scenarios outside that scripted path.
+and five cover the required responsive width matrix. Those tests fail on browser console/page
+errors and verify that Pipeline Diagnostics remains reachable at a 1280 × 720 viewport. Manual
+browser validation remains a release gate for network inspection and fault scenarios outside that
+scripted path.
 
 For manual browser acceptance, inspect light and dark themes at 1440, 1280, 1024, 768, and 390
 CSS pixels. Exercise start/restart, pause/resume, every speed, lap seek, agent/topic/type/lap

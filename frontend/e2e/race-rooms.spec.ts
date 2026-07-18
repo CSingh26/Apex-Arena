@@ -5,6 +5,15 @@ const ROOM_SLUG = "day3-validation-room";
 const API_BASE_URL = process.env.E2E_API_URL ?? "http://localhost:8764";
 const VIEWPORT_WIDTHS = [1440, 1280, 1024, 768, 390] as const;
 
+function collectBrowserErrors(page: Page): string[] {
+  const errors: string[] = [];
+  page.on("console", (message) => {
+    if (message.type() === "error") errors.push(message.text());
+  });
+  page.on("pageerror", (error) => errors.push(error.message));
+  return errors;
+}
+
 async function postRoomAction(request: APIRequestContext, path: string, data: object): Promise<void> {
   const response = await request.post(`${API_BASE_URL}/api/v1/race-rooms/${ROOM_SLUG}/${path}`, { data });
   expect(response.ok(), `${path} precondition returned HTTP ${response.status()}`).toBeTruthy();
@@ -37,6 +46,7 @@ async function expectNoHorizontalOverflow(page: Page): Promise<void> {
 test.describe.configure({ mode: "serial" });
 
 test("runs a grounded replay through filtering, evidence, seek, and completion", async ({ page, request }) => {
+  const browserErrors = collectBrowserErrors(page);
   await postRoomAction(request, "replay", { action: "restart" });
   await postRoomAction(request, "playback", { action: "pause" });
 
@@ -105,11 +115,13 @@ test("runs a grounded replay through filtering, evidence, seek, and completion",
   await expect(page.getByTestId("playback-status")).toHaveText("Replay complete", { timeout: 15_000 });
   await expect(page.locator('[data-testid="room-message"][data-topic="summary"]')).toHaveCount(2);
   await expect(page.locator('[data-testid="room-message"][data-message-type="summary"]')).toHaveCount(2);
+  expect(browserErrors).toEqual([]);
 });
 
 for (const width of VIEWPORT_WIDTHS) {
   test(`keeps the index and room usable without horizontal overflow at ${width}px`, async ({ page }) => {
-    await page.setViewportSize({ width, height: width <= 768 ? 844 : 900 });
+    const browserErrors = collectBrowserErrors(page);
+    await page.setViewportSize({ width, height: width <= 768 ? 844 : 720 });
     await page.goto("/race-rooms");
     await expect(page.getByRole("heading", { name: "Race Rooms" })).toBeVisible();
     await expect(page.locator(`[data-room-slug="${ROOM_SLUG}"]`)).toBeVisible();
@@ -139,6 +151,11 @@ for (const width of VIEWPORT_WIDTHS) {
       await expect(filterToggle).toBeHidden();
       await expect(page.locator("#timeline-filters")).toBeVisible();
     }
+    if (width === 1280) {
+      await page.getByText("Pipeline diagnostics", { exact: true }).click();
+      await expect(page.locator(".diagnostic-counts")).toBeVisible();
+    }
     await expectNoHorizontalOverflow(page);
+    expect(browserErrors).toEqual([]);
   });
 }
