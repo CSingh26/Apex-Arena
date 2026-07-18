@@ -27,8 +27,11 @@ def test_playback_schema_rejects_unsupported_speeds(speed: float) -> None:
         {"action": "set_speed"},
         {"action": "seek_to_sequence"},
         {"action": "seek_to_lap"},
+        {"action": "seek_to_phase"},
+        {"action": "seek_to_session_time"},
         {"action": "seek_to_sequence", "sequence": -1},
         {"action": "seek_to_lap", "lap_number": -1},
+        {"action": "seek_to_session_time", "session_time": -0.1},
     ],
 )
 def test_playback_schema_requires_nonnegative_action_value(payload: dict[str, object]) -> None:
@@ -43,6 +46,8 @@ def test_playback_schema_requires_nonnegative_action_value(payload: dict[str, ob
         {"action": "resume"},
         {"action": "seek_to_sequence", "sequence": 0},
         {"action": "seek_to_lap", "lap_number": 0},
+        {"action": "seek_to_phase", "phase": "SQ3"},
+        {"action": "seek_to_session_time", "session_time": 0},
     ],
 )
 def test_playback_schema_accepts_each_control_action(payload: dict[str, object]) -> None:
