@@ -63,6 +63,8 @@ export function MessageTimeline({ messages, agents, selectedAgent, totalLaps, se
   const [type, setType] = useState("all");
   const [lap, setLap] = useState("");
   const [filtersOpen, setFiltersOpen] = useState(false);
+  const [followingLatest, setFollowingLatest] = useState(true);
+  const feedRef = useRef<HTMLDivElement>(null);
   const endRef = useRef<HTMLDivElement>(null);
   const qualifying = sessionType.toUpperCase().includes("QUALIFY") || sessionType.toUpperCase().includes("SHOOTOUT");
   const filters = useMemo(() => ({ agent: selectedAgent, topic, type, lap }), [selectedAgent, topic, type, lap]);
@@ -81,8 +83,23 @@ export function MessageTimeline({ messages, agents, selectedAgent, totalLaps, se
     window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
   }, [lap, selectedAgent, topic, type]);
 
+  useEffect(() => {
+    if (followingLatest) endRef.current?.scrollIntoView({ block: "end" });
+  }, [followingLatest, visible.length]);
+
+  const onFeedScroll = () => {
+    const feed = feedRef.current;
+    if (!feed) return;
+    setFollowingLatest(feed.scrollHeight - feed.scrollTop - feed.clientHeight < 80);
+  };
+
+  const jumpToLatest = () => {
+    setFollowingLatest(true);
+    endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+  };
+
   return <section className="timeline-card" aria-labelledby="timeline-title">
-    <div className="timeline-heading"><div><p className="section-kicker">What matters and why</p><h2 id="timeline-title">Session conversation</h2></div><button className="control-button control-button--quiet" type="button" onClick={() => endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" })}>Jump to latest <span aria-hidden>↓</span></button></div>
+    <div className="timeline-heading"><div><p className="section-kicker">What matters and why</p><h2 id="timeline-title">Session conversation</h2></div><button className="control-button control-button--quiet" type="button" onClick={jumpToLatest}>{followingLatest ? "At latest" : "Jump to latest"} <span aria-hidden>↓</span></button></div>
     <button className="filter-toggle" type="button" aria-expanded={filtersOpen} aria-controls="timeline-filters" onClick={() => setFiltersOpen(!filtersOpen)}><span>Filter conversation</span><span>{filtersActive ? "Filters active" : "All messages"} <b aria-hidden>{filtersOpen ? "−" : "+"}</b></span></button>
     {filtersOpen && <div id="timeline-filters" className="timeline-filters" aria-label="Filter messages">
       <label><span>Voice</span><select value={selectedAgent} onChange={(event) => onSelectedAgentChange(event.target.value)}><option value="all">All five agents</option>{agents.map((agent) => <option key={agent.id} value={agent.id}>{agent.display_name}</option>)}</select></label>
@@ -94,7 +111,7 @@ export function MessageTimeline({ messages, agents, selectedAgent, totalLaps, se
     </div>}
     {hasMore && <div className="pagination-row"><button className="control-button" type="button" disabled={loadingMore} onClick={onLoadMore}>{loadingMore ? "Loading…" : "Load next messages"}</button><span>Messages are fetched in bounded pages.</span></div>}
     {omitted > 0 && <p className="window-notice">For performance, {omitted} earlier matching messages are hidden. Refine the filters to inspect them.</p>}
-    <div className="message-feed">
+    <div ref={feedRef} className="message-feed" role="log" aria-label="Agent conversation" aria-live="polite" aria-relevant="additions" tabIndex={0} onScroll={onFeedScroll}>
       {visible.map((message) => {
         const agent = agentsById.get(message.agent_id);
         const parent = message.reply_to_message_id ? messagesById.get(message.reply_to_message_id) : undefined;

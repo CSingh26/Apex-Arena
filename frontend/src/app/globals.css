@@ -3660,10 +3660,27 @@ body {
 /* Day 5 — arena-style agent conversation */
 .message-feed {
   display: flex;
+  height: min(68vh, 780px);
+  min-height: 420px;
   flex-direction: column;
   gap: 18px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 22px;
   background: linear-gradient(180deg, rgb(109 140 255 / 3%), transparent 30%);
+  scroll-behavior: smooth;
+  scrollbar-color: var(--apex-coral) color-mix(in srgb, var(--panel) 80%, transparent);
+  scrollbar-width: thin;
+}
+
+.message-feed:focus-visible {
+  outline: 2px solid var(--apex-cyan);
+  outline-offset: -3px;
+}
+
+.message-feed::-webkit-scrollbar { width: 8px; }
+.message-feed::-webkit-scrollbar-track { background: color-mix(in srgb, var(--panel) 80%, transparent); }
+.message-feed::-webkit-scrollbar-thumb { border-radius: 999px; background: linear-gradient(var(--apex-coral), var(--apex-violet)); }
 }
 
 .message {
@@ -3737,7 +3754,7 @@ body {
 }
 
 @media (max-width: 700px) {
-  .message-feed { gap: 12px; padding: 14px 10px; }
+  .message-feed { height: 62vh; min-height: 360px; gap: 12px; padding: 14px 10px; }
   .message, .message--side-host { width: calc(100% - 10px); padding: 16px 14px; border-radius: 17px; }
   .message--side-right { margin-left: 10px; }
   .message--side-left { margin-right: 10px; }

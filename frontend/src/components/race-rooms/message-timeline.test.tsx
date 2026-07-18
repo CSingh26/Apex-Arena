@@ -21,6 +21,7 @@ describe("MessageTimeline", () => {
   it("renders editorial reply relationships and filters by agent, topic, and lap", async () => {
     const user = userEvent.setup();
     render(<TimelineHarness />);
+    expect(screen.getByRole("log", { name: "Agent conversation" })).toHaveAttribute("tabindex", "0");
     expect(screen.getByText(strategy.content).closest("article")).toHaveAttribute("data-message-side", "right");
     expect(screen.getByText(pace.content).closest("article")).toHaveAttribute("data-message-side", "left");
     expect(screen.getByText("Counterpoint")).toBeVisible();
@@ -45,7 +46,7 @@ describe("MessageTimeline", () => {
   it("shows a purposeful replay empty state and a jump-to-latest control", async () => {
     render(<TimelineHarness items={[]} />);
     expect(screen.getByText("The room is waiting for lights out.")).toBeVisible();
-    await userEvent.click(screen.getByRole("button", { name: /jump to latest/i }));
+    await userEvent.click(screen.getByRole("button", { name: /at latest/i }));
     expect(HTMLElement.prototype.scrollIntoView).toHaveBeenCalled();
   });
 });
