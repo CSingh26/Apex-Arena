@@ -8,7 +8,7 @@ import math
 import re
 import ssl
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, Protocol
@@ -45,9 +45,14 @@ class ProviderPayloadError(RuntimeError):
 
 
 class OpenF1RestClient:
-    """Historical OpenF1 REST client. Historical endpoints do not require auth."""
+    """Historical REST client that starts public and retries a 401 with backend OAuth."""
 
-    def __init__(self, settings: Settings, client: httpx.AsyncClient | None = None) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        client: httpx.AsyncClient | None = None,
+        token_provider: Callable[[], Awaitable[str]] | None = None,
+    ) -> None:
         self.base_url = settings.openf1_rest_base_url
         self._owns_client = client is None
         self.client = client or httpx.AsyncClient(
@@ -55,6 +60,7 @@ class OpenF1RestClient:
             timeout=httpx.Timeout(10.0),
             headers={"Accept": "application/json", "User-Agent": "Apex-Arena/0.1"},
         )
+        self.token_provider = token_provider
 
     @property
     def status(self) -> dict[str, Any]:
@@ -63,6 +69,9 @@ class OpenF1RestClient:
             "rest_configured": bool(parsed.scheme and parsed.netloc),
             "rest_host": parsed.hostname,
             "historical_auth_required": False,
+            "historical_auth_mode": (
+                "oauth_retry" if self.token_provider is not None else "public_only"
+            ),
             "supported_endpoints": sorted(OPENF1_ENDPOINTS),
         }
 
@@ -84,6 +93,13 @@ class OpenF1RestClient:
                 params[key] = value
 
         response = await self.client.get(endpoint, params=params)
+        if response.status_code == 401 and self.token_provider is not None:
+            token = await self.token_provider()
+            response = await self.client.get(
+                endpoint,
+                params=params,
+                headers={"Authorization": f"Bearer {token}"},
+            )
         response.raise_for_status()
         data = response.json()
         if not isinstance(data, list):
@@ -148,11 +164,7 @@ class OpenF1AuthService:
 
     async def get_access_token(self, force_refresh: bool = False) -> str:
         refresh_buffer = self.settings.openf1_token_refresh_buffer_seconds
-        if (
-            not force_refresh
-            and self._access_token
-            and self.expires_in_seconds > refresh_buffer
-        ):
+        if not force_refresh and self._access_token and self.expires_in_seconds > refresh_buffer:
             return self._access_token
 
         if not self.credentials_present:
@@ -394,9 +406,7 @@ class OpenF1LiveClient:
             except Exception as exc:
                 logger.error("Live status publish failed error=%s", type(exc).__name__)
 
-    def _submit_state(
-        self, state: LiveConnectionState, degraded_reason: str | None = None
-    ) -> None:
+    def _submit_state(self, state: LiveConnectionState, degraded_reason: str | None = None) -> None:
         if self._loop is None:
             return
         self._loop.call_soon_threadsafe(

@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert
 
 from app.domain.models import NormalizedRaceEvent, RaceStateSnapshot
@@ -29,9 +29,7 @@ class SqlIngestionRunRepository:
     def __init__(self, database: Database) -> None:
         self.database = database
 
-    async def start(
-        self, *, provider: str, session_key: str, metadata: dict[str, Any]
-    ) -> UUID:
+    async def start(self, *, provider: str, session_key: str, metadata: dict[str, Any]) -> UUID:
         run_id = uuid4()
         async with self.database.session_factory() as session:
             session.add(
@@ -73,9 +71,7 @@ class SqlIngestionRunRepository:
 
     async def latest(self) -> IngestionRunSummary | None:
         statement = (
-            select(IngestionRunRecord)
-            .order_by(IngestionRunRecord.started_at.desc())
-            .limit(1)
+            select(IngestionRunRecord).order_by(IngestionRunRecord.started_at.desc()).limit(1)
         )
         async with self.database.session_factory() as session:
             record = (await session.execute(statement)).scalar_one_or_none()
@@ -209,6 +205,15 @@ class SqlNormalizedEventRepository:
                 for record in records
             ]
 
+    async def sequence_for_lap(self, session_key: str, lap_number: int) -> int | None:
+        statement = select(func.min(NormalizedRaceEventRecord.sequence_number)).where(
+            NormalizedRaceEventRecord.session_key == session_key,
+            NormalizedRaceEventRecord.lap_number >= lap_number,
+        )
+        async with self.database.session_factory() as session:
+            sequence = (await session.execute(statement)).scalar_one_or_none()
+            return int(sequence) if sequence is not None else None
+
 
 class SqlRaceStateSnapshotRepository:
     def __init__(self, database: Database) -> None:
@@ -255,3 +260,12 @@ class SqlRaceStateSnapshotRepository:
             statement = statement.where(RaceStateSnapshotRecord.session_key == session_key)
         async with self.database.session_factory() as session:
             return int((await session.execute(statement)).scalar_one())
+
+    async def delete_for_session(self, session_key: str) -> None:
+        async with self.database.session_factory() as session:
+            await session.execute(
+                delete(RaceStateSnapshotRecord).where(
+                    RaceStateSnapshotRecord.session_key == session_key
+                )
+            )
+            await session.commit()

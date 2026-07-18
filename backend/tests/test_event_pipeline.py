@@ -50,9 +50,7 @@ class NormalizedRepository:
 
     async def insert(self, event: NormalizedRaceEvent) -> NormalizedPersistResult:
         if event.dedup_key in self.events:
-            return NormalizedPersistResult(
-                record_id=self.events[event.dedup_key].id, is_new=False
-            )
+            return NormalizedPersistResult(record_id=self.events[event.dedup_key].id, is_new=False)
         self.events[event.dedup_key] = event
         return NormalizedPersistResult(record_id=event.id, is_new=True)
 

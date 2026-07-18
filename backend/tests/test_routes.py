@@ -75,9 +75,7 @@ def test_engine_status_reports_current_session_counts(settings: Settings) -> Non
         services = app.state.services
         services.database.health_check = AsyncMock(return_value=(True, "connected"))
         services.redis.health_check = AsyncMock(return_value=(True, "connected"))
-        services.normalized_event_repository.latest_session_key = AsyncMock(
-            return_value="spa-race"
-        )
+        services.normalized_event_repository.latest_session_key = AsyncMock(return_value="spa-race")
         services.raw_event_repository.count = AsyncMock(return_value=12)
         services.normalized_event_repository.count = AsyncMock(return_value=10)
         services.snapshot_repository.count = AsyncMock(return_value=2)
@@ -111,9 +109,7 @@ def test_session_events_and_state_are_exposed(settings: Settings) -> None:
             return_value=RaceState(session_key="spa-race", sequence_number=4, is_replay=True)
         )
 
-        events_response = client.get(
-            "/api/v1/sessions/spa-race/events?after_sequence_number=3"
-        )
+        events_response = client.get("/api/v1/sessions/spa-race/events?after_sequence_number=3")
         state_response = client.get("/api/v1/sessions/spa-race/state")
 
     assert events_response.json()["events"][0]["sequence_number"] == 4

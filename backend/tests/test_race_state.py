@@ -27,6 +27,11 @@ class SnapshotRepository:
             return len(self.snapshots)
         return sum(snapshot.session_key == session_key for snapshot in self.snapshots)
 
+    async def delete_for_session(self, session_key: str) -> None:
+        self.snapshots = [
+            snapshot for snapshot in self.snapshots if snapshot.session_key != session_key
+        ]
+
 
 def event(
     event_type: RaceEventType,
@@ -127,3 +132,21 @@ async def test_snapshot_is_persisted_on_configured_interval() -> None:
     assert snapshot is not None
     assert snapshot.current_lap == 1
     assert snapshot.sequence_number == 2
+
+
+@pytest.mark.asyncio
+async def test_reset_clears_cached_dedup_state_and_persisted_snapshots() -> None:
+    snapshots = SnapshotRepository()
+    engine = RaceStateEngine(snapshots, snapshot_every_n_events=1)
+    pit = event(RaceEventType.PIT_STOP, 1, {"lap_number": 3}, dedup_key="pit-once")
+
+    await engine.apply(pit)
+    assert await snapshots.count("spa-race") == 1
+    assert len((await engine.get_state("spa-race")).pit_stop_history) == 1
+
+    await engine.reset_session("spa-race")
+
+    assert await snapshots.count("spa-race") == 0
+    assert (await engine.get_state("spa-race")).sequence_number == 0
+    replayed = await engine.apply(pit)
+    assert len(replayed.pit_stop_history) == 1

@@ -5,6 +5,7 @@ Revises: 20260715_0001
 
 SPDX-License-Identifier: AGPL-3.0-only
 """
+
 from collections.abc import Sequence
 
 import sqlalchemy as sa
@@ -78,12 +79,8 @@ def upgrade_raw_events() -> None:
 
 
 def upgrade_normalized_events() -> None:
-    op.drop_index(
-        "ix_normalized_race_events_occurred_at", table_name="normalized_race_events"
-    )
-    op.alter_column(
-        "normalized_race_events", "source_event_id", new_column_name="raw_event_id"
-    )
+    op.drop_index("ix_normalized_race_events_occurred_at", table_name="normalized_race_events")
+    op.alter_column("normalized_race_events", "source_event_id", new_column_name="raw_event_id")
     op.alter_column("normalized_race_events", "occurred_at", new_column_name="event_time")
     op.alter_column("normalized_race_events", "meeting_id", nullable=True)
     op.alter_column("normalized_race_events", "importance", nullable=True)
@@ -95,9 +92,7 @@ def upgrade_normalized_events() -> None:
     )
     op.add_column("normalized_race_events", sa.Column("session_key", sa.String(80)))
     op.add_column("normalized_race_events", sa.Column("source", sa.String(30)))
-    op.add_column(
-        "normalized_race_events", sa.Column("received_at", sa.DateTime(timezone=True))
-    )
+    op.add_column("normalized_race_events", sa.Column("received_at", sa.DateTime(timezone=True)))
     op.add_column(
         "normalized_race_events",
         sa.Column("processed_at", sa.DateTime(timezone=True), server_default=sa.func.now()),
@@ -190,15 +185,11 @@ def upgrade_normalized_events() -> None:
         "ix_normalized_race_events_session_key", "normalized_race_events", ["session_key"]
     )
     op.create_index("ix_normalized_race_events_source", "normalized_race_events", ["source"])
-    op.create_index(
-        "ix_normalized_race_events_dedup_key", "normalized_race_events", ["dedup_key"]
-    )
+    op.create_index("ix_normalized_race_events_dedup_key", "normalized_race_events", ["dedup_key"])
 
 
 def upgrade_snapshots() -> None:
-    op.drop_constraint(
-        "uq_snapshot_session_sequence", "race_state_snapshots", type_="unique"
-    )
+    op.drop_constraint("uq_snapshot_session_sequence", "race_state_snapshots", type_="unique")
     op.drop_index("ix_race_state_snapshots_captured_at", table_name="race_state_snapshots")
     op.alter_column("race_state_snapshots", "sequence", new_column_name="sequence_number")
     op.alter_column("race_state_snapshots", "captured_at", new_column_name="snapshot_time")
@@ -237,9 +228,7 @@ def upgrade_snapshots() -> None:
         "race_state_snapshots",
         ["session_key", "sequence_number"],
     )
-    op.create_index(
-        "ix_race_state_snapshots_session_key", "race_state_snapshots", ["session_key"]
-    )
+    op.create_index("ix_race_state_snapshots_session_key", "race_state_snapshots", ["session_key"])
     op.create_index(
         "ix_race_state_snapshots_snapshot_time", "race_state_snapshots", ["snapshot_time"]
     )
@@ -283,9 +272,7 @@ def downgrade() -> None:
 
     op.drop_index("ix_race_state_snapshots_snapshot_time", table_name="race_state_snapshots")
     op.drop_index("ix_race_state_snapshots_session_key", table_name="race_state_snapshots")
-    op.drop_constraint(
-        "uq_snapshot_session_sequence", "race_state_snapshots", type_="unique"
-    )
+    op.drop_constraint("uq_snapshot_session_sequence", "race_state_snapshots", type_="unique")
     op.drop_column("race_state_snapshots", "created_at")
     op.drop_column("race_state_snapshots", "session_status")
     op.drop_column("race_state_snapshots", "current_lap")
@@ -302,9 +289,7 @@ def downgrade() -> None:
     op.create_unique_constraint(
         "uq_snapshot_session_sequence", "race_state_snapshots", ["session_id", "sequence"]
     )
-    op.create_index(
-        "ix_race_state_snapshots_captured_at", "race_state_snapshots", ["captured_at"]
-    )
+    op.create_index("ix_race_state_snapshots_captured_at", "race_state_snapshots", ["captured_at"])
 
     op.drop_index("ix_normalized_race_events_dedup_key", table_name="normalized_race_events")
     op.drop_index("ix_normalized_race_events_source", table_name="normalized_race_events")
@@ -313,9 +298,7 @@ def downgrade() -> None:
     op.drop_constraint(
         "uq_normalized_event_session_sequence", "normalized_race_events", type_="unique"
     )
-    op.drop_constraint(
-        "uq_normalized_event_dedup_key", "normalized_race_events", type_="unique"
-    )
+    op.drop_constraint("uq_normalized_event_dedup_key", "normalized_race_events", type_="unique")
     op.add_column(
         "normalized_race_events",
         sa.Column("driver_id", sa.Uuid(), sa.ForeignKey("drivers.id")),

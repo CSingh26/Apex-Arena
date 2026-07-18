@@ -81,7 +81,8 @@ async def health(services: Services) -> HealthResponse:
         ),
         redis=ComponentHealth(status="healthy" if redis_ok else "degraded", detail=redis_detail),
         openf1_rest=ComponentHealth(
-            status="configured", detail="Historical REST access requires no authentication"
+            status="configured",
+            detail="Historical REST is configured with an OAuth retry when required",
         ),
         openf1_live=ComponentHealth(status=live_status, detail=live_detail),
         jolpica=ComponentHealth(status="configured", detail="2026 calendar provider configured"),
@@ -141,9 +142,7 @@ async def engine_status(services: Services) -> EngineStatusResponse:
         database=ComponentHealth(
             status="healthy" if database_ok else "degraded", detail=database_detail
         ),
-        redis=ComponentHealth(
-            status="healthy" if redis_ok else "degraded", detail=redis_detail
-        ),
+        redis=ComponentHealth(status="healthy" if redis_ok else "degraded", detail=redis_detail),
         current_session_key=current_session_key,
         raw_event_count=raw_count,
         normalized_event_count=normalized_count,

@@ -5,6 +5,7 @@ Revises: None
 
 SPDX-License-Identifier: AGPL-3.0-only
 """
+
 from collections.abc import Sequence
 
 import sqlalchemy as sa
@@ -143,12 +144,8 @@ def upgrade() -> None:
         sa.Column("state", sa.JSON(), nullable=False),
         sa.UniqueConstraint("session_id", "sequence", name="uq_snapshot_session_sequence"),
     )
-    op.create_index(
-        "ix_race_state_snapshots_meeting_id", "race_state_snapshots", ["meeting_id"]
-    )
-    op.create_index(
-        "ix_race_state_snapshots_captured_at", "race_state_snapshots", ["captured_at"]
-    )
+    op.create_index("ix_race_state_snapshots_meeting_id", "race_state_snapshots", ["meeting_id"])
+    op.create_index("ix_race_state_snapshots_captured_at", "race_state_snapshots", ["captured_at"])
 
 
 def downgrade() -> None:

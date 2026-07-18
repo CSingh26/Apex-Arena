@@ -12,6 +12,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -109,9 +110,7 @@ class RoomRecord(Base, TimestampMixin):
 
 class RawProviderEventRecord(Base):
     __tablename__ = "raw_provider_events"
-    __table_args__ = (
-        UniqueConstraint("deterministic_hash", name="uq_raw_provider_event_hash"),
-    )
+    __table_args__ = (UniqueConstraint("deterministic_hash", name="uq_raw_provider_event_hash"),)
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     provider: Mapped[str] = mapped_column(String(30), index=True)
@@ -205,22 +204,22 @@ class AgentProfileRecord(Base, TimestampMixin):
     __tablename__ = "agent_profiles"
 
     id: Mapped[str] = mapped_column(String(80), primary_key=True)
-    name: Mapped[str] = mapped_column(String(100))
+    display_name: Mapped[str] = mapped_column(String(100))
     role: Mapped[str] = mapped_column(String(120))
-    description: Mapped[str] = mapped_column(Text)
+    short_description: Mapped[str] = mapped_column(Text)
     avatar_key: Mapped[str] = mapped_column(String(20))
     specialties: Mapped[list[str]] = mapped_column(JSON_TYPE, default=list)
-    personality: Mapped[list[str]] = mapped_column(JSON_TYPE, default=list)
-    style_rules: Mapped[list[str]] = mapped_column(JSON_TYPE, default=list)
+    personality_rules: Mapped[list[str]] = mapped_column(JSON_TYPE, default=list)
     speaking_style: Mapped[str] = mapped_column(Text)
     supported_topics: Mapped[list[str]] = mapped_column(JSON_TYPE, default=list)
-    accent: Mapped[str] = mapped_column(String(30))
-    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
     sort_order: Mapped[int] = mapped_column(Integer)
+    ui_accent_key: Mapped[str] = mapped_column(String(30))
 
 
 class RaceRoomRecord(Base, TimestampMixin):
     __tablename__ = "race_rooms"
+    __table_args__ = (Index("ix_race_rooms_season_round", "season", "round_number"),)
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     slug: Mapped[str] = mapped_column(String(180), unique=True, index=True)
@@ -231,6 +230,7 @@ class RaceRoomRecord(Base, TimestampMixin):
     official_name: Mapped[str] = mapped_column(String(180))
     circuit_name: Mapped[str] = mapped_column(String(180))
     country: Mapped[str] = mapped_column(String(100))
+    country_code: Mapped[str | None] = mapped_column(String(3), nullable=True)
     session_type: Mapped[str] = mapped_column(String(60), default="Race")
     scheduled_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     actual_start: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -239,6 +239,7 @@ class RaceRoomRecord(Base, TimestampMixin):
     current_lap: Mapped[int | None] = mapped_column(Integer, nullable=True)
     total_laps: Mapped[int | None] = mapped_column(Integer, nullable=True)
     source_availability: Mapped[str] = mapped_column(String(40))
+    telemetry_quality: Mapped[str] = mapped_column(String(30), default="unknown")
     message_count: Mapped[int] = mapped_column(Integer, default=0)
     agent_count: Mapped[int] = mapped_column(Integer, default=0)
     last_event_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -264,6 +265,9 @@ class RoomMessageRecord(Base):
     __table_args__ = (
         UniqueConstraint("room_id", "sequence", name="uq_room_message_sequence"),
         UniqueConstraint("room_id", "trigger_event_id", "agent_id", name="uq_room_trigger_agent"),
+        Index("ix_room_messages_room_lap", "room_id", "lap_number"),
+        Index("ix_room_messages_room_agent", "room_id", "agent_id"),
+        Index("ix_room_messages_created_at", "created_at"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
@@ -298,6 +302,7 @@ class MessageEvidenceRecord(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     message_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("room_messages.id"), index=True)
+    evidence_key: Mapped[str] = mapped_column(String(100))
     evidence_type: Mapped[str] = mapped_column(String(40))
     source_provider: Mapped[str] = mapped_column(String(40))
     source_reference: Mapped[str] = mapped_column(String(180))
@@ -312,9 +317,12 @@ class RoomPlaybackStateRecord(Base):
     __tablename__ = "room_playback_states"
 
     room_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("race_rooms.id"), primary_key=True)
-    current_sequence: Mapped[int] = mapped_column(Integer, default=0)
+    current_event_sequence: Mapped[int] = mapped_column(Integer, default=0)
+    current_message_sequence: Mapped[int] = mapped_column(Integer, default=0)
+    current_lap: Mapped[int | None] = mapped_column(Integer, nullable=True)
     playback_speed: Mapped[float] = mapped_column(Float, default=1.0)
     is_paused: Mapped[bool] = mapped_column(Boolean, default=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )

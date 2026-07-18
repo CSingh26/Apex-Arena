@@ -142,6 +142,44 @@ async def test_historical_query_helper_rejects_unsafe_keys(settings: Settings) -
 
 
 @pytest.mark.asyncio
+async def test_historical_query_retries_one_401_with_bearer_token_without_logging_secret(
+    settings: Settings,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    requests: list[httpx.Request] = []
+    token_requests = 0
+
+    async def token_provider() -> str:
+        nonlocal token_requests
+        token_requests += 1
+        return "never-log-oauth-token"
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if len(requests) == 1:
+            return httpx.Response(401, json={"detail": "authentication required"})
+        assert request.headers["Authorization"] == "Bearer never-log-oauth-token"
+        return httpx.Response(200, json=[{"session_key": 9839}])
+
+    http_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://api.openf1.test/v1/",
+    )
+    client = OpenF1RestClient(settings, http_client, token_provider=token_provider)
+    caplog.set_level(logging.DEBUG)
+
+    rows = await client.sessions(year=2026, session_name="Race")
+
+    assert rows == [{"session_key": 9839}]
+    assert len(requests) == 2
+    assert "Authorization" not in requests[0].headers
+    assert token_requests == 1
+    assert client.status["historical_auth_mode"] == "oauth_retry"
+    assert "never-log-oauth-token" not in caplog.text
+    await http_client.aclose()
+
+
+@pytest.mark.asyncio
 async def test_live_client_reports_missing_credentials_without_crashing(settings: Settings) -> None:
     auth = OpenF1AuthService(settings)
     live = OpenF1LiveClient(settings, auth)

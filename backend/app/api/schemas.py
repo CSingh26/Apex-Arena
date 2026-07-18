@@ -38,6 +38,7 @@ class OpenF1StatusResponse(BaseModel):
     rest_configured: bool
     rest_host: str | None
     historical_auth_required: bool = False
+    historical_auth_mode: str = "public_only"
     live_auth_ready: bool
     supported_endpoints: list[str]
 

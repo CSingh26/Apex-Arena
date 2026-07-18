@@ -9,7 +9,10 @@ import type {
   RaceRoomDetailResponse,
   RaceRoomListResponse,
   RoomMessagesResponse,
-  RoomPlayback,
+  PlaybackAction,
+  ReplayAction,
+  ReplayResponse,
+  RoomDiagnostics,
 } from "@/lib/types";
 
 const API_URL = (process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000").replace(/\/$/, "");
@@ -20,7 +23,7 @@ async function request<T>(path: string, signal?: AbortSignal): Promise<T> {
     signal,
   });
   if (!response.ok) {
-    throw new Error(`API request failed with HTTP ${response.status}`);
+    throw await responseError(response);
   }
   return response.json() as Promise<T>;
 }
@@ -31,8 +34,18 @@ async function mutate<T>(path: string, body?: object): Promise<T> {
     headers: { Accept: "application/json", "Content-Type": "application/json" },
     body: body ? JSON.stringify(body) : undefined,
   });
-  if (!response.ok) throw new Error(`API request failed with HTTP ${response.status}`);
+  if (!response.ok) throw await responseError(response);
   return response.json() as Promise<T>;
+}
+
+async function responseError(response: Response): Promise<Error> {
+  const fallback = `API request failed with HTTP ${response.status}`;
+  try {
+    const body = await response.json() as { detail?: string };
+    return new Error(body.detail || fallback);
+  } catch {
+    return new Error(fallback);
+  }
 }
 
 export function getHealth(signal?: AbortSignal): Promise<HealthResponse> {
@@ -87,12 +100,16 @@ export function getMessageEvidence(slug: string, id: string): Promise<MessageEvi
   return request<MessageEvidenceResponse>(`/api/v1/race-rooms/${encodeURIComponent(slug)}/messages/${id}/evidence`);
 }
 
-export function updateRoomPlayback(slug: string, body: object): Promise<{ playback: RoomPlayback }> {
+export function updateRoomPlayback(slug: string, body: PlaybackAction): Promise<ReplayResponse> {
   return mutate(`/api/v1/race-rooms/${encodeURIComponent(slug)}/playback`, body);
 }
 
-export function startRoomReplay(slug: string): Promise<{ playback: RoomPlayback }> {
-  return mutate(`/api/v1/race-rooms/${encodeURIComponent(slug)}/replay`);
+export function startRoomReplay(slug: string, action: ReplayAction): Promise<ReplayResponse> {
+  return mutate(`/api/v1/race-rooms/${encodeURIComponent(slug)}/replay`, { action });
+}
+
+export function getRoomDiagnostics(slug: string, signal?: AbortSignal): Promise<RoomDiagnostics> {
+  return request<RoomDiagnostics>(`/api/v1/race-rooms/${encodeURIComponent(slug)}/diagnostics`, signal);
 }
 
 export function roomStreamUrl(slug: string, afterSequence = 0): string {
