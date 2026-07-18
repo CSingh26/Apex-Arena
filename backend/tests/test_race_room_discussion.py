@@ -321,6 +321,33 @@ async def test_position_change_produces_a_grounded_disagreement() -> None:
 
 
 @pytest.mark.asyncio
+async def test_qualifying_reply_challenges_the_easy_conclusion() -> None:
+    repository = FakeRoomRepository()
+    engine = RaceRoomDiscussionEngine(
+        repository,  # type: ignore[arg-type]
+        DiscussionTriggerEvaluator(topic_cooldown_seconds=0, agent_cooldown_seconds=0),
+    )
+    event = race_room_event(
+        RaceEventType.LAP_COMPLETED,
+        payload={
+            "normalized_session_type": "QUALIFYING",
+            "session_phase": "Q2",
+            "lap_duration": 88.42,
+            "is_personal_best": True,
+        },
+    )
+
+    await engine.consume(event)
+
+    assert [message.agent_id for message in repository.messages] == [
+        "theo-voss",
+        "lena-cross",
+    ]
+    assert repository.messages[1].message_type is MessageType.DISAGREEMENT
+    assert "Quick lap, yes. Safe? Not yet." in repository.messages[1].content
+
+
+@pytest.mark.asyncio
 async def test_mira_pace_reply_is_classified_as_strategy_analysis() -> None:
     repository = FakeRoomRepository()
     engine = RaceRoomDiscussionEngine(

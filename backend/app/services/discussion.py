@@ -441,10 +441,30 @@ class DeterministicRoomGenerator:
             context.evidence.get("normalized_session_type") or context.evidence.get("session_type")
         )
         if qualifying:
+            if agent_id == "lena-cross":
+                return self._message(
+                    MessageType.DISAGREEMENT,
+                    "Quick lap, yes. Safe? Not yet. The order can still move, and only the "
+                    "remaining valid runs will settle the elimination fight.",
+                    Confidence.MEDIUM,
+                    EvidenceStatus.PARTIAL,
+                    "The timing update does not settle the qualifying order.",
+                    ["event_type"],
+                )
+            if agent_id == "theo-voss":
+                return self._message(
+                    MessageType.QUESTION,
+                    "The timing is real; the verdict is not. Does the next valid lap confirm "
+                    "this pace, or expose it as a single-run peak?",
+                    Confidence.MEDIUM,
+                    EvidenceStatus.PARTIAL,
+                    "More valid timing is required to confirm the pace.",
+                    ["event_type"],
+                )
             return self._message(
                 MessageType.REPLY,
-                "The timing update is real, but the consequence depends on the remaining runs "
-                "and whether the driver can complete another valid lap.",
+                "That lap changes the argument, not the final answer. The remaining runs decide "
+                "whether this is breathing room or the start of real elimination pressure.",
                 Confidence.MEDIUM,
                 EvidenceStatus.PARTIAL,
                 "Qualifying timing supports a narrow conclusion.",
@@ -462,13 +482,46 @@ class DeterministicRoomGenerator:
             )
         if agent_id == "mira-vale" and "pace_trend_seconds" in context.evidence:
             return self._message(
-                MessageType.REPLY,
-                "Theo's measured trend is supported by the representative laps. Its strategic "
-                "relevance remains uncertain without a usable traffic gap or pit-loss estimate.",
+                MessageType.DISAGREEMENT,
+                "The pace trend is real, but calling it a strategy advantage is premature. "
+                "Without a usable traffic gap or pit-loss estimate, speed can still become a trap.",
                 Confidence.MEDIUM,
                 EvidenceStatus.PARTIAL,
                 "Representative laps support the trend but not a strategy call.",
                 ["pace_trend_seconds", "representative_laps"],
+            )
+        if agent_id == "lena-cross" and event.event_type in {
+            RaceEventType.SAFETY_CAR,
+            RaceEventType.VIRTUAL_SAFETY_CAR,
+        }:
+            return self._message(
+                MessageType.DISAGREEMENT,
+                "Do not call this a free stop for everyone. The neutralisation is confirmed; "
+                "who actually benefits still depends on track position and the pit cycle.",
+                Confidence.MEDIUM,
+                EvidenceStatus.PARTIAL,
+                "Neutralisation alone does not establish a strategic winner.",
+                ["event_type"],
+            )
+        if agent_id == "theo-voss" and event.event_type == RaceEventType.PIT_STOP:
+            return self._message(
+                MessageType.CORRECTION,
+                "A tidy stop is not the same as a successful stop. The timing record confirms "
+                "the service; the next position sample decides whether the call worked.",
+                Confidence.MEDIUM,
+                EvidenceStatus.PARTIAL,
+                "Pit service timing does not establish the strategic outcome.",
+                ["event_type"],
+            )
+        if agent_id == "lena-cross" and event.event_type == RaceEventType.FASTEST_LAP:
+            return self._message(
+                MessageType.DISAGREEMENT,
+                "Fastest on one lap is a headline, not a race verdict. Show me that pace again "
+                "under traffic or tyre stress before we crown the stronger car.",
+                Confidence.MEDIUM,
+                EvidenceStatus.PARTIAL,
+                "One fastest lap does not prove sustainable race pace.",
+                ["event_type"],
             )
         if agent_id == "arjun-reyes" and "season_context" in context.evidence:
             return self._message(
@@ -481,9 +534,9 @@ class DeterministicRoomGenerator:
                 ["season_context"],
             )
         return self._message(
-            MessageType.REPLY,
-            "The observed event is supported. I would keep the interpretation narrow because "
-            "the current evidence does not establish the wider trend.",
+            MessageType.QUESTION,
+            "The event is real, but the easy conclusion is still on trial. What does the next "
+            "timing sample confirm—and what does it overturn?",
             Confidence.MEDIUM,
             EvidenceStatus.PARTIAL,
             "The triggering event is supported.",

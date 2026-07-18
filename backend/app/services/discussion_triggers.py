@@ -168,6 +168,10 @@ class DiscussionTriggerEvaluator:
                 RaceEventType.LAP_DELETED,
             }:
                 configured_candidates = ["theo-voss", "lena-cross"]
+                if event.event_type != RaceEventType.LAP_COMPLETED or event.payload.get(
+                    "is_personal_best"
+                ):
+                    priority = TriggerPriority.HIGH
             elif event.event_type in {
                 RaceEventType.QUALIFYING_PHASE,
                 RaceEventType.SESSION_RESULT,
