@@ -6,3 +6,7 @@ tests
 *.pyc
 *.pyo
 .DS_Store
+
+# Never bake local secrets into an image layer
+.env
+.env.*

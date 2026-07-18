@@ -2,3 +2,7 @@ node_modules
 .next
 npm-debug.log*
 .DS_Store
+
+# Never bake local secrets into an image layer
+.env
+.env.*

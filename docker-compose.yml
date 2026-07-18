@@ -9,8 +9,10 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-apex_arena}
       POSTGRES_USER: ${POSTGRES_USER:-apex}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    # Bind to loopback only: this compose is for local development, never staging.
+    # Staging/production use private RDS PostgreSQL and must not reuse this file.
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -24,8 +26,10 @@ services:
     image: redis:7.4-alpine
     restart: unless-stopped
     command: ["redis-server", "--appendonly", "yes"]
+    # Bind to loopback only: unauthenticated local Redis must never be reachable
+    # off-host. Staging/production use private ElastiCache with auth + TLS.
     ports:
-      - "${REDIS_PORT:-6379}:6379"
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
     volumes:
       - redis_data:/data
     healthcheck:
