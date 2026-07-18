@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from app.domain.rooms import (
     AgentProfile,
+    EventWeekend,
     MessageEvidence,
     MessageTopic,
     MessageType,
@@ -19,6 +20,13 @@ from app.domain.rooms import (
 
 class RaceRoomListResponse(BaseModel):
     rooms: list[RaceRoom]
+    total: int
+    limit: int
+    offset: int
+
+
+class EventWeekendListResponse(BaseModel):
+    events: list[EventWeekend]
     total: int
     limit: int
     offset: int
@@ -56,12 +64,16 @@ class PlaybackRequest(BaseModel):
         "pause",
         "resume",
         "seek_to_lap",
+        "seek_to_phase",
         "seek_to_sequence",
+        "seek_to_session_time",
         "set_speed",
     ]
     playback_speed: Literal[0.5, 1.0, 2.0, 4.0, 8.0] | None = None
     sequence: int | None = Field(default=None, ge=0)
     lap_number: int | None = Field(default=None, ge=0)
+    phase: str | None = Field(default=None, min_length=2, max_length=4)
+    session_time: float | None = Field(default=None, ge=0)
 
     @model_validator(mode="after")
     def validate_action_value(self) -> PlaybackRequest:
@@ -71,6 +83,10 @@ class PlaybackRequest(BaseModel):
             raise ValueError("sequence is required when seeking by sequence")
         if self.action == "seek_to_lap" and self.lap_number is None:
             raise ValueError("lap_number is required when seeking by lap")
+        if self.action == "seek_to_phase" and self.phase is None:
+            raise ValueError("phase is required when seeking by qualifying phase")
+        if self.action == "seek_to_session_time" and self.session_time is None:
+            raise ValueError("session_time is required when seeking by session time")
         return self
 
 
