@@ -36,6 +36,12 @@ export type RaceMeeting = {
   status: MeetingLifecycleStatus;
   is_target: boolean;
   source_url: string | null;
+  sessions: RaceWeekendSession[];
+};
+
+export type RaceWeekendSession = {
+  name: string;
+  starts_at: string;
 };
 
 export type SeasonCalendarSummary = {

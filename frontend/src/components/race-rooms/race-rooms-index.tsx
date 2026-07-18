@@ -5,8 +5,8 @@ import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 
 import { ThemeToggle } from "@/components/race-rooms/theme-toggle";
-import { getRaceRooms } from "@/lib/api";
-import type { RaceRoom } from "@/lib/types";
+import { getRaceRooms, getSeason } from "@/lib/api";
+import type { RaceMeeting, RaceRoom, RaceWeekendSession } from "@/lib/types";
 
 function raceDate(value: string): string {
   return new Intl.DateTimeFormat(undefined, { day: "numeric", month: "short", year: "numeric" }).format(new Date(value));
@@ -23,6 +23,40 @@ function RoomCard({ room, featured = false }: { room: RaceRoom; featured?: boole
   </Link>;
 }
 
+type UpcomingSession = RaceWeekendSession & Pick<RaceMeeting, "race_name" | "circuit_name" | "country" | "round_number">;
+
+function sessionCountdown(milliseconds: number) {
+  const totalSeconds = Math.max(0, Math.floor(milliseconds / 1000));
+  const days = Math.floor(totalSeconds / 86400);
+  const hours = Math.floor((totalSeconds % 86400) / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  return { days, hours, minutes, seconds };
+}
+
+function NextSession({ session, now }: { session: UpcomingSession; now: number }) {
+  const start = new Date(session.starts_at);
+  const remaining = start.getTime() - now;
+  const countdown = sessionCountdown(remaining);
+  const live = remaining <= 0 && remaining > -3 * 60 * 60 * 1000;
+  const date = new Intl.DateTimeFormat(undefined, { weekday: "long", day: "numeric", month: "long", hour: "numeric", minute: "2-digit", timeZoneName: "short" }).format(start);
+  return <section className="next-session" aria-labelledby="next-session-title">
+    <div className="next-session__eyebrow"><span className={live ? "live-pulse" : "signal-pulse"} />{live ? "Live now" : "Next live session"}</div>
+    <div className="next-session__layout">
+      <div className="next-session__copy">
+        <p>Round {session.round_number} · {session.country}</p>
+        <h2 id="next-session-title">{session.name}</h2>
+        <h3>{session.race_name}</h3>
+        <span>{session.circuit_name}</span>
+      </div>
+      {live ? <div className="next-session__live"><strong>On air</strong><span>The session is underway</span></div> : <div className="countdown" aria-label={`Countdown to ${session.name}`}>
+        {Object.entries(countdown).map(([unit, value]) => <div key={unit}><strong>{String(value).padStart(2, "0")}</strong><span>{unit}</span></div>)}
+      </div>}
+    </div>
+    <footer><span>{date}</span><span>Times shown in your timezone</span></footer>
+  </section>;
+}
+
 export function RaceRoomsIndex() {
   const [rooms, setRooms] = useState<RaceRoom[]>([]);
   const [total, setTotal] = useState(0);
@@ -35,6 +69,29 @@ export function RaceRoomsIndex() {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [retryKey, setRetryKey] = useState(0);
+  const [nextSession, setNextSession] = useState<UpcomingSession | null>(null);
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    getSeason(controller.signal).then((calendar) => {
+      const sessions = calendar.races.flatMap((race) => (race.sessions ?? [{ name: "Race", starts_at: race.race_start }]).map((session) => ({
+        ...session,
+        race_name: race.race_name,
+        circuit_name: race.circuit_name,
+        country: race.country,
+        round_number: race.round_number,
+      })));
+      const cutoff = Date.now() - 3 * 60 * 60 * 1000;
+      setNextSession(sessions.filter((session) => new Date(session.starts_at).getTime() > cutoff).sort((a, b) => new Date(a.starts_at).getTime() - new Date(b.starts_at).getTime())[0] ?? null);
+    }).catch(() => setNextSession(null));
+    return () => controller.abort();
+  }, []);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -53,17 +110,9 @@ export function RaceRoomsIndex() {
   }, [mode, retryKey, search, season, sort, status]);
 
   const sections = useMemo(() => {
-    const playable = (room: RaceRoom) => room.source_availability !== "unavailable" && room.status !== "unavailable";
-    const featured = rooms.find((room) => room.is_featured && playable(room))
-      ?? rooms.find((room) => room.mode === "development" && playable(room))
-      ?? rooms.find(playable)
-      ?? rooms[0]
-      ?? null;
-    const remaining = rooms.filter((room) => room.id !== featured?.id);
     return {
-      featured,
-      open: remaining.filter((room) => room.mode !== "archived" && room.status !== "completed"),
-      archive: remaining.filter((room) => room.mode === "archived" || room.status === "completed"),
+      open: rooms.filter((room) => room.mode !== "archived" && room.status !== "completed"),
+      archive: rooms.filter((room) => room.mode === "archived" || room.status === "completed"),
     };
   }, [rooms]);
   const filtersActive = search !== "" || status !== "all" || mode !== "all" || sort !== "race_date_desc";
@@ -83,7 +132,7 @@ export function RaceRoomsIndex() {
     <div className="results-summary"><span>{refreshing ? "Refreshing rooms…" : `${total} ${total === 1 ? "room" : "rooms"}`}</span>{filtersActive && <span>Filtered view</span>}</div>
     {loading && <div className="room-skeletons" role="status" aria-label="Loading Race Rooms"><span /><span /><span /></div>}
     {error && <div className="room-state room-state--error" role="alert"><b>Connection interrupted</b><p>{error}</p><button className="control-button" type="button" onClick={() => setRetryKey((value) => value + 1)}>Try again</button></div>}
-    {!loading && !error && sections.featured && <section><div className="section-heading"><div><p className="section-kicker">Featured room</p><h2>Start here</h2></div><span>{sections.featured.source_availability === "unavailable" ? "Race metadata" : sections.featured.mode === "live" ? "Live race coverage" : "Replay conversation"}</span></div><RoomCard room={sections.featured} featured /></section>}
+    {!loading && !error && nextSession && <NextSession session={nextSession} now={now} />}
     {!error && !!sections.open.length && <section><div className="section-heading"><div><p className="section-kicker">Open rooms</p><h2>Current conversations</h2></div><span>{sections.open.length} available</span></div><div className="room-grid">{sections.open.map((room) => <RoomCard key={room.id} room={room} />)}</div></section>}
     {!error && !!sections.archive.length && <section><div className="section-heading"><div><p className="section-kicker">Season archive</p><h2>Completed races</h2></div><span>{sections.archive.length} archived</span></div><div className="room-grid room-grid--compact">{sections.archive.map((room) => <RoomCard key={room.id} room={room} />)}</div></section>}
     {!loading && !error && !rooms.length && <div className="room-state"><span aria-hidden>◌</span><b>No rooms match this view.</b><p>Try a different race, mode, or status.</p>{filtersActive && <button className="control-button" type="button" onClick={resetFilters}>Reset filters</button>}</div>}
