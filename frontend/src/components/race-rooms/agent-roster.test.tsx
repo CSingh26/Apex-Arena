@@ -11,6 +11,9 @@ describe("AgentRoster", () => {
     const user = userEvent.setup();
     render(<AgentRoster agents={agents} selectedAgent="all" onSelectAgent={vi.fn()} />);
 
+    expect(screen.getByText("5 agents in this room")).toBeVisible();
+    expect(screen.queryByText("Race Strategist")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /expand agent roster/i }));
     expect(screen.getAllByRole("button", { pressed: false })).toHaveLength(5);
     expect(screen.getByText("Mira Vale")).toBeVisible();
     expect(screen.getByText("Nova")).toBeVisible();
@@ -22,6 +25,7 @@ describe("AgentRoster", () => {
   it("selects an agent as a timeline filter", async () => {
     const onSelect = vi.fn();
     render(<AgentRoster agents={agents} selectedAgent="all" onSelectAgent={onSelect} />);
+    await userEvent.click(screen.getByRole("button", { name: /expand agent roster/i }));
     await userEvent.click(screen.getByRole("button", { name: /Mira Vale/i }));
     expect(onSelect).toHaveBeenCalledWith("mira-vale");
   });

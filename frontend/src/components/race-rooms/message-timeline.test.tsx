@@ -14,7 +14,7 @@ const reply = message({ id: "00000000-0000-0000-0000-000000000003", sequence: 3,
 
 function TimelineHarness({ items = [strategy, pace, reply] }: { items?: RoomMessage[] }) {
   const [agent, setAgent] = useState("all");
-  return <MessageTimeline messages={items} agents={agents} selectedAgent={agent} totalLaps={12} hasMore={false} loadingMore={false} onSelectedAgentChange={setAgent} onLoadMore={vi.fn()} onInspectEvidence={vi.fn()} />;
+  return <MessageTimeline messages={items} agents={agents} selectedAgent={agent} totalLaps={12} sessionType="RACE" hasMore={false} loadingMore={false} onSelectedAgentChange={setAgent} onLoadMore={vi.fn()} onInspectEvidence={vi.fn()} />;
 }
 
 describe("MessageTimeline", () => {
@@ -23,6 +23,8 @@ describe("MessageTimeline", () => {
     render(<TimelineHarness />);
     expect(screen.getByText(/Replying to Mira Vale/)).toBeVisible();
     expect(screen.getByText("Track position still limits that strategy gain.")).toBeVisible();
+
+    await user.click(screen.getByRole("button", { name: /filter conversation/i }));
 
     await user.selectOptions(screen.getByLabelText("Voice"), "mira-vale");
     expect(screen.getByText(strategy.content)).toBeVisible();

@@ -1,9 +1,30 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
 
-const ROOM_SLUG = "day3-validation-room";
 const API_BASE_URL = process.env.E2E_API_URL ?? "http://localhost:8764";
-const VIEWPORT_WIDTHS = [1440, 1280, 1024, 768, 390] as const;
+const VIEWPORT_WIDTHS = [1440, 1280, 1024, 768, 390, 320] as const;
+
+type SessionSummary = {
+  session_type: string;
+  display_name: string;
+  scheduled_start: string;
+  status: string;
+  room_slug: string | null;
+  eligibility: string;
+  replay_available: boolean;
+};
+
+type EventWeekend = {
+  event_slug: string;
+  event_name: string;
+  weekend_start: string;
+  weekend_status: "live" | "completed" | "upcoming";
+  is_sprint_weekend: boolean;
+  sessions: SessionSummary[];
+};
+
+type EventResponse = { events: EventWeekend[]; total: number };
+type RoomListResponse = { total: number };
 
 function collectBrowserErrors(page: Page): string[] {
   const errors: string[] = [];
@@ -14,33 +35,35 @@ function collectBrowserErrors(page: Page): string[] {
   return errors;
 }
 
-async function postRoomAction(request: APIRequestContext, path: string, data: object): Promise<void> {
-  const response = await request.post(`${API_BASE_URL}/api/v1/race-rooms/${ROOM_SLUG}/${path}`, { data });
-  expect(response.ok(), `${path} precondition returned HTTP ${response.status()}`).toBeTruthy();
+async function eventCatalog(request: APIRequestContext): Promise<EventResponse> {
+  const response = await request.get(`${API_BASE_URL}/api/v1/race-rooms/events?season=2026&limit=100`);
+  expect(response.ok(), `event catalog returned HTTP ${response.status()}`).toBeTruthy();
+  return response.json() as Promise<EventResponse>;
 }
 
-async function openValidationRoom(page: Page): Promise<void> {
-  await page.goto("/race-rooms");
-  await expect(page.getByRole("heading", { name: "Race Rooms" })).toBeVisible();
-  const roomCard = page.locator(`[data-room-slug="${ROOM_SLUG}"]`);
-  await expect(roomCard).toBeVisible();
-  await roomCard.click();
-  await expect(page).toHaveURL(new RegExp(`/race-rooms/${ROOM_SLUG}(?:\\?.*)?$`));
-  await expect(page.getByRole("heading", { name: "Day 3 Validation Room" })).toBeVisible();
+async function roomCount(request: APIRequestContext): Promise<number> {
+  const response = await request.get(`${API_BASE_URL}/api/v1/race-rooms?season=2026&limit=100`);
+  expect(response.ok(), `room catalog returned HTTP ${response.status()}`).toBeTruthy();
+  return ((await response.json()) as RoomListResponse).total;
+}
+
+async function replayRoom(request: APIRequestContext): Promise<{ event: EventWeekend; session: SessionSummary }> {
+  const catalog = await eventCatalog(request);
+  for (const event of catalog.events) {
+    const session = event.sessions.find((item) => item.room_slug && item.replay_available);
+    if (session) return { event, session };
+  }
+  throw new Error("The Day 4 smoke test needs at least one completed replay-ready session");
 }
 
 async function expectNoHorizontalOverflow(page: Page): Promise<void> {
   await expect.poll(() => page.evaluate(() => (
     Math.max(document.documentElement.scrollWidth, document.body.scrollWidth) - window.innerWidth
   ))).toBeLessThanOrEqual(1);
+}
 
-  const overflow = await page.evaluate(() => ({
-    viewport: window.innerWidth,
-    document: document.documentElement.scrollWidth,
-    body: document.body.scrollWidth,
-  }));
-  expect(overflow.document, `document overflow at ${overflow.viewport}px`).toBeLessThanOrEqual(overflow.viewport + 1);
-  expect(overflow.body, `body overflow at ${overflow.viewport}px`).toBeLessThanOrEqual(overflow.viewport + 1);
+function expectAscending(values: number[]): void {
+  expect(values).toEqual([...values].sort((left, right) => left - right));
 }
 
 test.describe.configure({ mode: "serial" });
@@ -51,6 +74,7 @@ test("introduces Apex Arena on a responsive, theme-aware landing page", async ({
   await page.goto("/");
   await expect(page.getByRole("heading", { name: /Every race has a story/ })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Not another timing screen." })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Experience" })).toHaveAttribute("href", "#experience");
   await expectNoHorizontalOverflow(page);
 
   const themeToggle = page.locator(".theme-toggle");
@@ -68,115 +92,133 @@ test("introduces Apex Arena on a responsive, theme-aware landing page", async ({
   expect(browserErrors).toEqual([]);
 });
 
-test("runs a grounded replay through filtering, evidence, seek, and completion", async ({ page, request }) => {
+test("groups real standard and Sprint weekends in chronological public categories", async ({ page, request }) => {
   const browserErrors = collectBrowserErrors(page);
-  await postRoomAction(request, "replay", { action: "restart" });
-  await postRoomAction(request, "playback", { action: "pause" });
+  const catalog = await eventCatalog(request);
+  const completed = catalog.events.filter((event) => event.weekend_status === "completed");
+  const upcoming = catalog.events.filter((event) => event.weekend_status === "upcoming");
+  const standard = catalog.events.find((event) => !event.is_sprint_weekend);
+  const sprint = catalog.events.find((event) => event.is_sprint_weekend);
 
-  await openValidationRoom(page);
-
-  const roster = page.getByTestId("agent-roster");
-  await expect(roster.locator(".agent-profile")).toHaveCount(5);
-  for (const name of ["Mira Vale", "Theo Voss", "Lena Cross", "Arjun Reyes", "Nova"]) {
-    await expect(roster.getByText(name, { exact: true })).toBeVisible();
+  expect(catalog.events.length).toBeGreaterThan(0);
+  expectAscending(completed.map((event) => Date.parse(event.weekend_start)));
+  expectAscending(upcoming.map((event) => Date.parse(event.weekend_start)));
+  expect(standard?.sessions.map((session) => session.session_type)).toEqual(["QUALIFYING", "RACE"]);
+  expect(sprint?.sessions.map((session) => session.session_type)).toEqual([
+    "SPRINT_QUALIFYING",
+    "SPRINT",
+    "QUALIFYING",
+    "RACE",
+  ]);
+  for (const event of catalog.events) {
+    expectAscending(event.sessions.map((session) => Date.parse(session.scheduled_start)));
   }
 
-  const restart = page.getByTestId("restart-replay");
-  await restart.click();
-  await expect(page.getByTestId("playback-status")).toHaveText("Running");
-  await page.getByTestId("toggle-playback").click();
-  await expect(page.getByTestId("playback-status")).toHaveText("Paused");
+  await page.goto("/race-rooms");
+  await expect(page.getByRole("heading", { name: "Live This Weekend" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Completed Events" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Upcoming Events" })).toBeVisible();
+  await expect(page.getByText("Day 3 Validation Room")).toHaveCount(0);
+  if (sprint) {
+    await expect(page.locator(".event-card").filter({ hasText: sprint.event_name }).getByText("Sprint weekend")).toBeVisible();
+  }
+  const fixture = await request.get(`${API_BASE_URL}/api/v1/race-rooms/day3-validation-room`);
+  expect(fixture.status()).toBe(404);
+  await expectNoHorizontalOverflow(page);
+  expect(browserErrors).toEqual([]);
+});
 
-  const speed = page.getByLabel("Playback speed");
-  await speed.selectOption("8");
-  await expect(speed).toHaveValue("8");
-  await speed.selectOption("1");
-  await page.getByTestId("toggle-playback").click();
-  await expect(page.getByTestId("playback-status")).toHaveText("Running");
+test("opens an upcoming schedule without creating a room and preserves browser history", async ({ page, request }) => {
+  const browserErrors = collectBrowserErrors(page);
+  const catalog = await eventCatalog(request);
+  const event = catalog.events.find((item) => item.weekend_status === "upcoming" && item.sessions.length);
+  expect(event, "the 2026 calendar should contain a future weekend").toBeTruthy();
+  const session = event!.sessions[0];
+  expect(session.room_slug).toBeNull();
+  expect(session.eligibility).toBe("future_read_only");
+  const before = await roomCount(request);
+
+  await page.goto("/race-rooms");
+  const card = page.locator(".event-card--upcoming").filter({ hasText: event!.event_name });
+  await card.getByRole("button", { name: `View schedule for ${event!.event_name} ${session.display_name}` }).click();
+  const dialog = page.getByRole("dialog", { name: event!.event_name });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByText("Room opens when session data becomes available.")).toBeVisible();
+  await expect(page.locator(".timeline-card")).toHaveCount(0);
+  await expect(page).toHaveURL(new RegExp(`event=${encodeURIComponent(event!.event_slug)}`));
+  expect(await roomCount(request)).toBe(before);
+
+  await page.reload();
+  await expect(page.getByRole("dialog", { name: event!.event_name })).toBeVisible();
+  expect(await roomCount(request)).toBe(before);
+  await page.goBack();
+  await expect(page.getByRole("dialog", { name: event!.event_name })).toHaveCount(0);
+  await expect(page).not.toHaveURL(/event=/);
+  expect(await roomCount(request)).toBe(before);
+  expect(browserErrors).toEqual([]);
+});
+
+test("keeps a real historical conversation compact, inspectable, and session-aware", async ({ page, request }) => {
+  const browserErrors = collectBrowserErrors(page);
+  const { session } = await replayRoom(request);
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto(`/race-rooms/${session.room_slug}`);
+  await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Session conversation" })).toBeVisible();
+  await expect(page.getByTestId("playback-controls")).toBeVisible();
+  await expect(page.getByTestId("agent-roster").locator(".agent-profile")).toHaveCount(0);
+  await page.getByTestId("agent-roster").getByRole("button", { name: /agents in this room/ }).click();
+  await expect(page.getByTestId("agent-roster").locator(".agent-profile")).toHaveCount(5);
+  await expect(page.locator(".room-context-technical")).not.toHaveAttribute("open");
 
   const messages = page.getByTestId("room-message");
-  await expect.poll(() => messages.count(), { timeout: 20_000 }).toBeGreaterThanOrEqual(10);
-  await page.getByTestId("toggle-playback").click();
-  await expect(page.getByTestId("playback-status")).toHaveText("Paused");
-
-  const sequences = await messages.evaluateAll((nodes) => nodes.map((node) => Number(node.getAttribute("data-message-sequence"))));
-  expect(sequences.length).toBeGreaterThanOrEqual(10);
-  expect(sequences).toEqual([...sequences].sort((left, right) => left - right));
-  expect(new Set(sequences).size).toBe(sequences.length);
-
-  await page.getByLabel("Voice").selectOption("mira-vale");
-  await page.getByLabel("Topic").selectOption("pit_stop");
-  await expect(page).toHaveURL(/agent=mira-vale/);
-  await expect(page).toHaveURL(/topic=pit_stop/);
-  await expect(messages).toHaveCount(1);
-  await expect(messages.first()).toHaveAttribute("data-agent-id", "mira-vale");
-  await expect(messages.first()).toHaveAttribute("data-topic", "pit_stop");
-
-  await messages.first().getByRole("button", { name: /Why this was said/ }).click();
-  const drawer = page.getByTestId("evidence-drawer");
-  await expect(drawer).toBeVisible();
-  await expect(drawer.getByRole("heading", { name: "Message evidence" })).toBeVisible();
-  await expect(drawer.getByText("Trigger event")).toBeVisible();
-  await expect(drawer.locator(".evidence-list article").first()).toBeVisible();
+  await expect.poll(() => messages.count(), { timeout: 20_000 }).toBeGreaterThan(0);
+  const copy = (await messages.first().locator(".message__body > p").innerText()).trim();
+  expect(copy.length).toBeLessThanOrEqual(420);
+  await messages.first().getByRole("button", { name: /See the data behind/ }).click();
+  await expect(page.getByTestId("evidence-drawer")).toBeVisible();
   await page.keyboard.press("Escape");
-  await expect(drawer).toBeHidden();
-
-  await page.getByRole("button", { name: "Clear filters" }).click();
-  await expect(page).not.toHaveURL(/agent=/);
-  await expect(page).not.toHaveURL(/topic=/);
-  await expect.poll(() => messages.count()).toBeGreaterThanOrEqual(10);
-
-  await page.getByRole("button", { name: /Seek/ }).click();
-  const seekControls = page.locator("#replay-seek-controls");
-  await seekControls.getByLabel("Lap").fill("11");
-  await seekControls.getByRole("button", { name: "Go to lap" }).click();
-  await expect(page.getByTestId("playback-status")).toHaveText("Paused");
-  await expect(page.locator(".playback-bar__readout")).toContainText("Lap 11 / 12");
-
-  await speed.selectOption("8");
-  await page.getByTestId("toggle-playback").click();
-  await expect(page.getByTestId("playback-status")).toHaveText("Replay complete", { timeout: 15_000 });
-  await expect(page.locator('[data-testid="room-message"][data-topic="summary"]')).toHaveCount(2);
-  await expect(page.locator('[data-testid="room-message"][data-message-type="summary"]')).toHaveCount(2);
+  await expect(page.getByTestId("evidence-drawer")).toBeHidden();
+  if (session.session_type.includes("QUALIFYING")) {
+    await expect(page.locator(".room-header")).not.toContainText("Lap 0 / 0");
+  }
+  await expectNoHorizontalOverflow(page);
   expect(browserErrors).toEqual([]);
 });
 
 for (const width of VIEWPORT_WIDTHS) {
-  test(`keeps the index and room usable without horizontal overflow at ${width}px`, async ({ page }) => {
+  test(`keeps navigation, grouped events, and a real room usable at ${width}px`, async ({ page, request }) => {
     const browserErrors = collectBrowserErrors(page);
-    await page.setViewportSize({ width, height: width <= 768 ? 844 : 720 });
+    const { session } = await replayRoom(request);
+    await page.setViewportSize({ width, height: width <= 768 ? 844 : 800 });
     await page.goto("/race-rooms");
     await expect(page.getByRole("heading", { name: "Race Rooms" })).toBeVisible();
-    await expect(page.locator(`[data-room-slug="${ROOM_SLUG}"]`)).toBeVisible();
     await expectNoHorizontalOverflow(page);
 
-    await page.goto(`/race-rooms/${ROOM_SLUG}`);
-    await expect(page.getByRole("heading", { name: "Day 3 Validation Room" })).toBeVisible();
-    await expect(page.getByTestId("playback-controls")).toBeVisible();
-    await expect(page.getByTestId("agent-roster")).toBeVisible();
-    await expectNoHorizontalOverflow(page);
-
-    if (width <= 860) {
-      await expect(page.getByRole("button", { name: /5 agents in this room/ })).toBeVisible();
-      await expect(page.getByRole("button", { name: /Race context & data/ })).toBeVisible();
+    const menuButton = page.getByRole("button", { name: "Open navigation menu" });
+    if (width <= 800) {
+      await expect(menuButton).toBeVisible();
+      await menuButton.click();
+      await expect(page.getByRole("dialog", { name: "Mobile navigation" })).toBeVisible();
+      await page.keyboard.press("Escape");
+      await expect(page.getByRole("dialog", { name: "Mobile navigation" })).toHaveCount(0);
+      await expect(menuButton).toBeFocused();
     } else {
-      await expect(page.getByTestId("agent-roster").locator(".agent-profile")).toHaveCount(5);
-      await expect(page.getByRole("button", { name: /Race context & data/ })).toBeHidden();
+      await expect(menuButton).toBeHidden();
+      await expect(page.getByRole("navigation", { name: "Primary navigation" })).toBeVisible();
     }
-
-    const filterToggle = page.getByRole("button", { name: /Filter conversation/ });
     if (width <= 600) {
+      const filterToggle = page.getByRole("button", { name: /All events|Active/ });
       await expect(filterToggle).toBeVisible();
-      await expect(filterToggle).toHaveAttribute("aria-expanded", "false");
       await filterToggle.click();
-      await expect(page.locator("#timeline-filters")).toBeVisible();
-    } else {
-      await expect(filterToggle).toBeHidden();
-      await expect(page.locator("#timeline-filters")).toBeVisible();
+      await expect(page.locator("#event-filter-fields")).toBeVisible();
     }
-    if (width === 1280) {
-      await page.getByText("Pipeline diagnostics", { exact: true }).click();
-      await expect(page.locator(".diagnostic-counts")).toBeVisible();
+
+    await page.goto(`/race-rooms/${session.room_slug}`);
+    await expect(page.getByRole("heading", { name: "Session conversation" })).toBeVisible();
+    await expect(page.getByTestId("agent-roster")).toBeVisible();
+    if (width <= 860) {
+      await expect(page.getByRole("button", { name: /Session details/ })).toBeVisible();
     }
     await expectNoHorizontalOverflow(page);
     expect(browserErrors).toEqual([]);
