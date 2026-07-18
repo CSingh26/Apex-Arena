@@ -257,9 +257,13 @@ async def stream_session(
     request: Request,
     services: Services,
     last_sequence_number: int = Query(default=0, ge=0),
+    last_event_id: Annotated[str | None, Header(alias="Last-Event-ID")] = None,
 ) -> StreamingResponse:
+    recovered_sequence = last_sequence_number
+    if last_event_id is not None and last_event_id.isdigit():
+        recovered_sequence = max(recovered_sequence, int(last_event_id))
     return StreamingResponse(
-        session_event_stream(request, services, session_key, last_sequence_number),
+        session_event_stream(request, services, session_key, recovered_sequence),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache, no-transform",
