@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import Link from "next/link";
 
-import { ThemeToggle } from "@/components/race-rooms/theme-toggle";
+import { AppNavigation } from "@/components/navigation/app-navigation";
 
 const agents = [
   { initials: "MV", name: "Mira Vale", role: "Strategy", accent: "copper" },
@@ -37,15 +37,7 @@ const features = [
 
 export function LandingPage() {
   return <main className="landing-shell track-grid">
-    <nav className="landing-nav" aria-label="Primary navigation">
-      <Link className="landing-brand" href="/" aria-label="Apex Arena home"><i className="brand-mark" /><span>APEX ARENA</span></Link>
-      <div className="landing-nav__links">
-        <a href="#experience">Experience</a>
-        <a href="#agents">The room</a>
-        <Link href="/race-rooms">Race Rooms</Link>
-      </div>
-      <div className="landing-nav__actions"><span>2026 season</span><ThemeToggle /></div>
-    </nav>
+    <AppNavigation />
 
     <section className="landing-hero" aria-labelledby="landing-title">
       <div className="landing-hero__copy">
