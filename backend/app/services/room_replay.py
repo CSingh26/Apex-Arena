@@ -9,6 +9,7 @@ from uuid import UUID
 from app.domain.rooms import RaceRoom, RoomPlaybackState, RoomStatus
 from app.services.discussion import RaceRoomDiscussionEngine
 from app.services.race_state import RaceStateEngine
+from app.services.session_semantics import normalize_qualifying_phase
 from app.storage.redis import EventBus
 from app.storage.repositories import SqlNormalizedEventRepository
 from app.storage.room_repository import SqlRaceRoomRepository
@@ -136,6 +137,47 @@ class RoomReplayCoordinator:
             await self._publish(room.id, playback, room_status)
             return playback
 
+    async def seek_to_phase(self, room: RaceRoom, phase: str) -> RoomPlaybackState:
+        """Seek qualifying replays using provider-confirmed Q/SQ boundaries."""
+
+        if room.session_key is None:
+            raise ReplayUnavailableError("No normalized session is linked to this room")
+        normalized_phase = normalize_qualifying_phase(phase, room.session_type)
+        if normalized_phase is None:
+            raise ReplayUnavailableError("Replay phase is not valid for this session")
+        sequence = await self._sequence_for_phase(room.session_key, normalized_phase)
+        if sequence is None:
+            raise ReplayUnavailableError(
+                "Replay phase boundary is not available from provider data"
+            )
+        maximum = await self.events.max_sequence(room.session_key)
+        target_sequence = max(0, sequence - 1)
+        async with self._locks.setdefault(room.id, asyncio.Lock()):
+            playback = await self._rebuild_to_sequence(room, target_sequence)
+            room_status = await self._status_after_seek(room, target_sequence, maximum)
+            await self._publish(room.id, playback, room_status)
+            return playback
+
+    async def seek_to_session_time(
+        self,
+        room: RaceRoom,
+        session_time: float,
+    ) -> RoomPlaybackState:
+        if room.session_key is None:
+            raise ReplayUnavailableError("No normalized session is linked to this room")
+        if session_time < 0:
+            raise ReplayUnavailableError("Replay session time cannot be negative")
+        sequence = await self._sequence_for_session_time(room.session_key, session_time)
+        if sequence is None:
+            raise ReplayUnavailableError("Replay session time is outside the available range")
+        maximum = await self.events.max_sequence(room.session_key)
+        target_sequence = max(0, sequence - 1)
+        async with self._locks.setdefault(room.id, asyncio.Lock()):
+            playback = await self._rebuild_to_sequence(room, target_sequence)
+            room_status = await self._status_after_seek(room, target_sequence, maximum)
+            await self._publish(room.id, playback, room_status)
+            return playback
+
     async def close(self) -> None:
         await asyncio.gather(
             *(self._cancel(room_id) for room_id in list(self._tasks)),
@@ -244,6 +286,58 @@ class RoomReplayCoordinator:
             await self.rooms.update_room_status(room.id, RoomStatus.PAUSED)
             return RoomStatus.PAUSED
         return room.status
+
+    async def _sequence_for_phase(self, session_key: str, phase: str) -> int | None:
+        cursor = 0
+        while True:
+            events = await self.events.list_for_session(
+                session_key,
+                after_sequence=cursor,
+                limit=250,
+            )
+            if not events:
+                return None
+            for event in events:
+                if str(event.payload.get("session_phase") or "").upper() == phase:
+                    return event.sequence_number
+            cursor = events[-1].sequence_number
+            if len(events) < 250:
+                return None
+
+    async def _sequence_for_session_time(
+        self,
+        session_key: str,
+        session_time: float,
+    ) -> int | None:
+        cursor = 0
+        first_event_time: datetime | None = None
+        last_sequence: int | None = None
+        while True:
+            events = await self.events.list_for_session(
+                session_key,
+                after_sequence=cursor,
+                limit=250,
+            )
+            if not events:
+                return last_sequence if session_time == 0 else None
+            if first_event_time is None:
+                first_event_time = events[0].event_time
+            for event in events:
+                last_sequence = event.sequence_number
+                supplied_time = event.payload.get("session_time")
+                try:
+                    elapsed = (
+                        float(supplied_time)
+                        if supplied_time is not None
+                        else (event.event_time - first_event_time).total_seconds()
+                    )
+                except (TypeError, ValueError):
+                    elapsed = (event.event_time - first_event_time).total_seconds()
+                if elapsed >= session_time:
+                    return event.sequence_number
+            cursor = events[-1].sequence_number
+            if len(events) < 250:
+                return None
 
     async def _publish(
         self, room_id: UUID, playback: RoomPlaybackState, status: RoomStatus

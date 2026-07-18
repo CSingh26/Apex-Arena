@@ -9,6 +9,7 @@ from pydantic import BaseModel
 
 from app.domain.models import NormalizedRaceEvent, RaceEventType
 from app.domain.rooms import MessageTopic
+from app.services.session_semantics import is_qualifying_session
 
 
 class TriggerPriority(IntEnum):
@@ -36,6 +37,11 @@ TRIGGER_RULES: dict[RaceEventType, tuple[MessageTopic, TriggerPriority, list[str
         MessageTopic.SESSION,
         TriggerPriority.HIGH,
         ["nova", "arjun-reyes"],
+    ),
+    RaceEventType.QUALIFYING_PHASE: (
+        MessageTopic.SESSION,
+        TriggerPriority.HIGH,
+        ["nova", "theo-voss"],
     ),
     RaceEventType.RACE_START: (MessageTopic.SESSION, TriggerPriority.HIGH, ["nova", "lena-cross"]),
     RaceEventType.LAP_COMPLETED: (
@@ -67,6 +73,16 @@ TRIGGER_RULES: dict[RaceEventType, tuple[MessageTopic, TriggerPriority, list[str
         MessageTopic.PACE,
         TriggerPriority.MEDIUM,
         ["theo-voss", "lena-cross"],
+    ),
+    RaceEventType.LAP_DELETED: (
+        MessageTopic.RACE_CONTROL,
+        TriggerPriority.HIGH,
+        ["theo-voss", "lena-cross"],
+    ),
+    RaceEventType.SESSION_RESULT: (
+        MessageTopic.SUMMARY,
+        TriggerPriority.CRITICAL,
+        ["nova", "theo-voss"],
     ),
     RaceEventType.SAFETY_CAR: (
         MessageTopic.INCIDENT,
@@ -143,6 +159,21 @@ class DiscussionTriggerEvaluator:
         if rule is None or event_identity in self._seen or not self._is_meaningful(event):
             return None
         topic, priority, configured_candidates = rule
+        if is_qualifying_session(event.payload.get("normalized_session_type")):
+            if event.event_type in {RaceEventType.PIT_STOP, RaceEventType.STINT_UPDATE}:
+                return None
+            if event.event_type in {
+                RaceEventType.LAP_COMPLETED,
+                RaceEventType.FASTEST_LAP,
+                RaceEventType.LAP_DELETED,
+            }:
+                configured_candidates = ["theo-voss", "lena-cross"]
+            elif event.event_type in {
+                RaceEventType.QUALIFYING_PHASE,
+                RaceEventType.SESSION_RESULT,
+                RaceEventType.SESSION_FINISH,
+            }:
+                configured_candidates = ["nova", "theo-voss"]
         if (
             event.event_type == RaceEventType.LAP_COMPLETED
             and "pace_trend_seconds" in event.payload
@@ -205,8 +236,22 @@ class DiscussionTriggerEvaluator:
 
     @staticmethod
     def _is_meaningful(event: NormalizedRaceEvent) -> bool:
+        if event.event_type == RaceEventType.SESSION_RESULT:
+            try:
+                return int(event.payload.get("position")) == 1
+            except (TypeError, ValueError):
+                return False
         if event.event_type != RaceEventType.LAP_COMPLETED:
             return True
+        if is_qualifying_session(event.payload.get("normalized_session_type")):
+            return bool(
+                event.payload.get("session_phase")
+                and (
+                    event.payload.get("is_personal_best")
+                    or event.payload.get("lap_duration") is not None
+                    or event.payload.get("position") is not None
+                )
+            )
         lap = event.lap_number or 0
         return lap == 1 or lap % 10 == 0 or "pace_trend_seconds" in event.payload
 
