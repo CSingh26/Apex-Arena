@@ -3,5 +3,5 @@ import { RoomExperience } from "@/components/race-rooms/room-experience";
 
 export default async function RoomPage({ params }: { params: Promise<{ slug: string }> }) {
   const { slug } = await params;
-  return <RoomExperience slug={slug} />;
+  return <RoomExperience key={slug} slug={slug} />;
 }

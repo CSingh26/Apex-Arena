@@ -2,59 +2,160 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
-import { getEngineStatus, getMessageEvidence, getRaceRoom, getRoomMessages, roomStreamUrl, startRoomReplay, updateRoomPlayback } from "@/lib/api";
-import type { AgentProfile, EngineStatus, MessageEvidence, MessageTopic, RaceRoomDetailResponse, RoomMessage, RoomPlayback } from "@/lib/types";
-import { mergeRoomMessages } from "@/lib/room-state";
+import { AgentRoster } from "@/components/race-rooms/agent-roster";
+import { EvidenceDrawer } from "@/components/race-rooms/evidence-drawer";
+import { MessageTimeline } from "@/components/race-rooms/message-timeline";
+import { PlaybackControls } from "@/components/race-rooms/playback-controls";
+import { RoomContext } from "@/components/race-rooms/room-context";
 import { ThemeToggle } from "@/components/race-rooms/theme-toggle";
+import { getRaceRoom, getRoomMessages, roomStreamUrl, startRoomReplay, updateRoomPlayback } from "@/lib/api";
+import { mergeRoomMessages } from "@/lib/room-state";
+import type { PlaybackAction, RaceRoomDetailResponse, ReplayAction, RoomMessage, RoomPlayback, RoomStatus } from "@/lib/types";
 
-const TOPICS: MessageTopic[] = ["strategy", "pace", "racecraft", "incident", "pit_stop", "tyres", "championship", "summary"];
-const initials = (name: string) => name.split(" ").map((part) => part[0]).join("");
-
-function MessageCard({ message, agent, slug }: { message: RoomMessage; agent?: AgentProfile; slug: string }) {
-  const [evidence, setEvidence] = useState<MessageEvidence[] | null>(null);
-  const [open, setOpen] = useState(false);
-  const inspect = async () => { setOpen((value) => !value); if (!evidence) setEvidence((await getMessageEvidence(slug, message.id)).evidence); };
-  return <article className={`message message--${agent?.avatar_key ?? "host"}`}>
-    <div className="agent-avatar" aria-hidden>{initials(agent?.name ?? "Unknown")}</div>
-    <div className="message__body"><div className="message__meta"><strong>{agent?.name ?? "Race Room"}</strong><span>{agent?.role}</span><span>{message.lap_number == null ? "Session" : `Lap ${message.lap_number}`}</span><span>{message.topic.replaceAll("_", " ")}</span></div>
-      <p>{message.content}</p>
-      <button className="evidence-toggle" onClick={inspect} aria-expanded={open}>Evidence · {message.evidence_status} <span aria-hidden>{open ? "−" : "+"}</span></button>
-      {open && <div className="evidence"><span>{message.confidence} confidence · {message.generated_by}</span>{evidence === null ? <p>Loading source references…</p> : evidence.length ? evidence.map((item) => <p key={item.id}><b>{item.source_provider}</b> · {item.metric_name ?? item.evidence_type}: {String(item.metric_value ?? item.source_reference)} {item.unit}</p>) : <p>No detailed telemetry evidence is available for this message.</p>}</div>}
-    </div>
-  </article>;
-}
-
-function Diagnostics({ status, detail }: { status: EngineStatus | null; detail: RaceRoomDetailResponse }) {
-  return <details className="diagnostics"><summary>System diagnostics</summary><div><p><b>Room source</b> {detail.room.source_availability}</p><p><b>Control plane</b> {status?.status ?? "checking"}</p><p><b>Database</b> {status?.database.status ?? "checking"}</p><p><b>Redis stream</b> {status?.redis.status ?? "checking"}</p><p><b>Session</b> {detail.room.session_key ?? "not linked"}</p><p>{detail.data_notice}</p></div></details>;
-}
+type ConnectionState = "connecting" | "live" | "reconnecting" | "degraded";
+const ROOM_STATUSES = new Set<RoomStatus>(["pending", "ingesting", "ready", "live", "replaying", "paused", "completed", "failed", "unavailable"]);
 
 export function RoomExperience({ slug }: { slug: string }) {
   const [detail, setDetail] = useState<RaceRoomDetailResponse | null>(null);
   const [messages, setMessages] = useState<RoomMessage[]>([]);
   const [playback, setPlayback] = useState<RoomPlayback | null>(null);
-  const [engine, setEngine] = useState<EngineStatus | null>(null);
-  const [agentFilter, setAgentFilter] = useState("all"); const [topicFilter, setTopicFilter] = useState("all");
-  const [lap, setLap] = useState(""); const [connected, setConnected] = useState(false); const [error, setError] = useState<string | null>(null);
+  const [selectedAgent, setSelectedAgent] = useState("all");
+  const [selectedMessage, setSelectedMessage] = useState<RoomMessage | null>(null);
+  const [nextCursor, setNextCursor] = useState<number | null>(null);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [connection, setConnection] = useState<ConnectionState>("connecting");
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [controlError, setControlError] = useState<string | null>(null);
+  const [controlBusy, setControlBusy] = useState(false);
+  const [reloadKey, setReloadKey] = useState(0);
+  const [streamGeneration, setStreamGeneration] = useState(0);
+  const lastSequenceRef = useRef(0);
 
-  const mergeMessages = useCallback((incoming: RoomMessage[]) => setMessages((current) => {
-    return mergeRoomMessages(current, incoming);
-  }), []);
-  useEffect(() => { const controller = new AbortController(); Promise.all([getRaceRoom(slug, controller.signal), getRoomMessages(slug, "limit=250", controller.signal), getEngineStatus(controller.signal)]).then(([room, feed, status]) => { setDetail(room); setPlayback(room.playback); mergeMessages(feed.messages); setEngine(status); }).catch((reason: Error) => { if (reason.name !== "AbortError") setError("This room is not available right now."); }); return () => controller.abort(); }, [slug, mergeMessages]);
-  useEffect(() => { if (!detail) return; const source = new EventSource(roomStreamUrl(slug)); source.addEventListener("open", () => setConnected(true)); source.addEventListener("error", () => setConnected(false)); source.addEventListener("room_message", (event) => mergeMessages([JSON.parse((event as MessageEvent).data) as RoomMessage])); source.addEventListener("playback_state", (event) => setPlayback(JSON.parse((event as MessageEvent).data) as RoomPlayback)); return () => source.close(); }, [detail, slug, mergeMessages]);
-  const visible = useMemo(() => messages.filter((message) => (agentFilter === "all" || message.agent_id === agentFilter) && (topicFilter === "all" || message.topic === topicFilter) && (!lap || message.lap_number === Number(lap))), [messages, agentFilter, topicFilter, lap]);
-  const control = async (body: object) => setPlayback((await updateRoomPlayback(slug, body)).playback);
-  if (error) return <main className="room-page"><div className="room-state room-state--error"><b>Room unavailable</b><p>{error}</p><Link href="/race-rooms">Return to Race Rooms</Link></div></main>;
-  if (!detail || !playback) return <main className="room-page"><div className="room-state" role="status">Joining the room…</div></main>;
+  const mergeMessages = useCallback((incoming: RoomMessage[]) => {
+    if (incoming.length) lastSequenceRef.current = Math.max(lastSequenceRef.current, ...incoming.map((message) => message.sequence));
+    setMessages((current) => mergeRoomMessages(current, incoming));
+  }, []);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let active = true;
+    Promise.all([
+      getRaceRoom(slug, controller.signal),
+      getRoomMessages(slug, "after_sequence=0&limit=100", controller.signal),
+    ]).then(([room, feed]) => {
+      if (!active) return;
+      setDetail(room);
+      setPlayback(room.playback);
+      setMessages([]);
+      lastSequenceRef.current = 0;
+      mergeMessages(feed.messages);
+      setNextCursor(feed.next_cursor);
+    }).catch((reason: Error) => {
+      if (active && reason.name !== "AbortError") setError(reason.message || "This room is not available right now.");
+    }).finally(() => { if (active) setLoading(false); });
+    return () => { active = false; controller.abort(); };
+  }, [mergeMessages, reloadKey, slug]);
+
+  const roomId = detail?.room.id;
+  useEffect(() => {
+    if (!roomId) return;
+    let disposed = false;
+    let source: EventSource | null = null;
+    let retryTimer: number | null = null;
+    let retryAttempt = 0;
+
+    const connect = () => {
+      if (disposed) return;
+      setConnection(retryAttempt ? "reconnecting" : "connecting");
+      source = new EventSource(roomStreamUrl(slug, lastSequenceRef.current));
+      source.addEventListener("open", () => { retryAttempt = 0; setConnection("live"); });
+      source.addEventListener("room_message", (event) => {
+        const message = JSON.parse((event as MessageEvent).data) as RoomMessage;
+        mergeMessages([message]);
+      });
+      source.addEventListener("playback_state", (event) => {
+        setPlayback(JSON.parse((event as MessageEvent).data) as RoomPlayback);
+      });
+      source.addEventListener("room_status", (event) => {
+        const payload = JSON.parse((event as MessageEvent).data) as Record<string, unknown>;
+        const nextStatus = String(payload.status ?? "");
+        setDetail((current) => current && ROOM_STATUSES.has(nextStatus as RoomStatus) ? { ...current, room: { ...current.room, status: nextStatus as RoomStatus, current_lap: typeof payload.current_lap === "number" ? payload.current_lap : current.room.current_lap } } : current);
+      });
+      source.addEventListener("connection_status", (event) => {
+        const payload = JSON.parse((event as MessageEvent).data) as { status?: string };
+        if (payload.status === "degraded") setConnection("degraded");
+      });
+      source.addEventListener("error", () => {
+        source?.close();
+        if (disposed) return;
+        retryAttempt += 1;
+        setConnection(retryAttempt > 3 ? "degraded" : "reconnecting");
+        retryTimer = window.setTimeout(connect, Math.min(8000, 750 * 2 ** Math.min(retryAttempt, 4)));
+      });
+    };
+    connect();
+    return () => { disposed = true; source?.close(); if (retryTimer != null) window.clearTimeout(retryTimer); };
+  }, [mergeMessages, roomId, slug, streamGeneration]);
+
+  const runControl = useCallback(async (action: PlaybackAction) => {
+    setControlBusy(true); setControlError(null);
+    try {
+      const response = await updateRoomPlayback(slug, action);
+      setPlayback(response.playback);
+      setDetail((current) => current ? { ...current, room: response.room } : current);
+    } catch (reason) {
+      setControlError(reason instanceof Error ? reason.message : "The replay control did not respond.");
+    } finally { setControlBusy(false); }
+  }, [slug]);
+
+  const runReplay = useCallback(async (action: ReplayAction) => {
+    setControlBusy(true); setControlError(null);
+    try {
+      const response = await startRoomReplay(slug, action);
+      if (action === "restart") {
+        setMessages([]);
+        setNextCursor(null);
+        lastSequenceRef.current = 0;
+        setStreamGeneration((value) => value + 1);
+      }
+      setPlayback(response.playback);
+      setDetail((current) => current ? { ...current, room: response.room } : current);
+    } catch (reason) {
+      setControlError(reason instanceof Error ? reason.message : "The replay could not be started.");
+    } finally { setControlBusy(false); }
+  }, [slug]);
+
+  const loadMore = useCallback(async () => {
+    if (nextCursor == null || loadingMore) return;
+    setLoadingMore(true);
+    try {
+      const feed = await getRoomMessages(slug, `after_sequence=${nextCursor}&limit=100`);
+      mergeMessages(feed.messages);
+      setNextCursor(feed.next_cursor);
+    } catch (reason) {
+      setControlError(reason instanceof Error ? reason.message : "More messages could not be loaded.");
+    } finally { setLoadingMore(false); }
+  }, [loadingMore, mergeMessages, nextCursor, slug]);
+
+  const closeEvidence = useCallback(() => setSelectedMessage(null), []);
+
+  if (loading) return <main className="room-page track-grid"><div className="room-loading" role="status"><span className="spinner spinner--large" /><p className="section-kicker">Joining the room</p><h1>Preparing race context…</h1></div></main>;
+  if (error || !detail || !playback) return <main className="room-page track-grid"><div className="room-state room-state--error room-state--centered" role="alert"><span aria-hidden>!</span><b>Room unavailable</b><p>{error ?? "The room response was incomplete."}</p><div><button className="control-button" type="button" onClick={() => { setLoading(true); setError(null); setReloadKey((value) => value + 1); }}>Try again</button><Link className="control-button" href="/race-rooms">All Race Rooms</Link></div></div></main>;
+
   const { room, agents } = detail;
+  const evidenceAgent = selectedMessage ? agents.find((agent) => agent.id === selectedMessage.agent_id) : undefined;
   return <main className="room-page track-grid">
-    <nav className="room-topbar"><Link href="/race-rooms">← All rooms</Link><span className={`connection ${connected ? "connection--live" : ""}`}>{connected ? "Live stream" : "Reconnecting"}</span><ThemeToggle /></nav>
-    <header className="room-header"><div><p className="section-kicker">{room.season} · Round {room.round_number ?? "—"} · {room.mode}</p><h1>{room.race_name}</h1><p>{room.circuit_name} · {room.country}</p>{room.is_development && <strong className="dev-label">Development room · simulated/test data</strong>}</div><div className="lap-display"><span>Lap</span><b>{room.current_lap ?? "—"}</b><small>/ {room.total_laps ?? "—"}</small></div></header>
-    <div className="room-layout"><aside className="agent-panel"><p className="section-kicker">In this room</p>{agents.map((agent) => <button key={agent.id} onClick={() => setAgentFilter(agentFilter === agent.id ? "all" : agent.id)} className={agentFilter === agent.id ? "selected" : ""}><span className="agent-avatar">{initials(agent.name)}</span><span><b>{agent.name}</b><small>{agent.role}</small></span></button>)}<Diagnostics status={engine} detail={detail} /></aside>
-      <section className="conversation"><div className="playback"><button onClick={() => playback.is_paused ? control({ action: "resume" }) : control({ action: "pause" })}>{playback.is_paused ? "▶ Play" : "Ⅱ Pause"}</button><select aria-label="Playback speed" value={playback.playback_speed} onChange={(event) => control({ action: "speed", playback_speed: Number(event.target.value) })}><option value="0.5">0.5×</option><option value="1">1×</option><option value="2">2×</option><option value="4">4×</option></select><button onClick={async () => setPlayback((await startRoomReplay(slug)).playback)}>Restart replay</button><span>Sequence {playback.current_sequence}</span></div>
-        <div className="feed-filters"><select value={topicFilter} onChange={(event) => setTopicFilter(event.target.value)} aria-label="Filter by topic"><option value="all">All topics</option>{TOPICS.map((topic) => <option key={topic} value={topic}>{topic.replaceAll("_", " ")}</option>)}</select><label>Lap <input type="number" min="1" max={room.total_laps ?? undefined} value={lap} onChange={(event) => setLap(event.target.value)} /></label>{lap && <button onClick={() => control({ action: "seek", lap_number: Number(lap) })}>Jump to lap</button>}<span>{visible.length} messages</span></div>
-        <div className="message-feed">{visible.map((message) => <MessageCard key={message.id} message={message} agent={agents.find((agent) => agent.id === message.agent_id)} slug={slug} />)}{!visible.length && <div className="room-state"><b>The room is quiet here.</b><p>Change the filters or wait for a significant race moment.</p></div>}</div>
-      </section></div>
+    <nav className="room-topbar" aria-label="Room navigation"><Link href="/race-rooms"><span aria-hidden>←</span> All Race Rooms</Link><div className="room-topbar__identity"><span className="rooms-brand"><i className="brand-mark" /> APEX ARENA</span><span aria-hidden>·</span><b>{room.race_name}</b></div><div className="room-topbar__actions"><span className={`connection connection--${connection}`} role="status"><span aria-hidden />{connection === "live" ? "Stream connected" : connection === "connecting" ? "Connecting" : connection === "reconnecting" ? "Reconnecting" : "Stream degraded"}</span><ThemeToggle /></div></nav>
+    <header className="room-header"><div><div className="room-header__meta"><span>{room.season} season</span><span>Round {room.round_number ?? "—"}</span><span>{room.session_type}</span><span className={`status status--${room.status}`}>{room.status}</span></div><h1>{room.race_name}</h1><p>{room.official_name}</p><p>{room.circuit_name} · {room.country}</p>{room.is_development && <strong className="dev-label"><span aria-hidden>◆</span> Development room · deterministic simulated data</strong>}</div><div className="lap-display"><span>Replay lap</span><b>{playback.current_lap ?? room.current_lap ?? "—"}</b><small>/ {room.total_laps ?? "—"}</small></div></header>
+    <div className="sticky-playback"><PlaybackControls room={room} playback={playback} busy={controlBusy} error={controlError} onReplay={runReplay} onControl={runControl} /></div>
+    <div className="room-layout">
+      <AgentRoster agents={agents} selectedAgent={selectedAgent} onSelectAgent={setSelectedAgent} />
+      <MessageTimeline messages={messages} agents={agents} selectedAgent={selectedAgent} totalLaps={room.total_laps} hasMore={nextCursor !== null} loadingMore={loadingMore} onSelectedAgentChange={setSelectedAgent} onLoadMore={loadMore} onInspectEvidence={setSelectedMessage} />
+      <RoomContext slug={slug} detail={detail} playback={playback} />
+    </div>
+    <EvidenceDrawer slug={slug} message={selectedMessage} agent={evidenceAgent} onClose={closeEvidence} />
   </main>;
 }
