@@ -30,8 +30,8 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
 
     application = FastAPI(
         title="Apex Arena API",
-        version="0.1.0",
-        description="Day 2 unified live and replay race engine for the 2026 season.",
+        version="1.0.0",
+        description="Unified live and replay Formula racing intelligence for the 2026 season.",
         lifespan=lifespan,
     )
     application.add_middleware(

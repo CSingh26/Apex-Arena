@@ -77,7 +77,7 @@ async function replayRoom(request: APIRequestContext): Promise<{ event: EventWee
       },
     };
   }
-  throw new Error("The Day 4 smoke test needs at least one completed replay-ready session");
+  throw new Error("The production smoke test needs at least one completed replay-ready session");
 }
 
 async function expectNoHorizontalOverflow(page: Page): Promise<void> {

@@ -37,3 +37,8 @@ blob-report/
 # Runtime files
 *.log
 tmp/
+
+# Private planning documents
+.private/
+docs/day-2*.md
+docs/day-4*.md

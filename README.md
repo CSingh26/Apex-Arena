@@ -211,7 +211,6 @@ Published images receive semantic-version, major/minor, major, `latest`, and com
 ## Project documentation
 
 - [Day 3: Race Rooms and evidence architecture](docs/day-3-race-rooms.md)
-- [Day 4: Session-aware 2026 catalog](docs/day-4-session-rooms.md)
 - [Live race operations and failure states](docs/live-race-operations.md)
 - [Agent conversation experience](docs/arena-chat-experience.md)
 

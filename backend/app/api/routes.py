@@ -89,7 +89,7 @@ async def health(services: Services) -> HealthResponse:
         jolpica=ComponentHealth(status="configured", detail="2026 calendar provider configured"),
         ai=ComponentHealth(
             status="enabled" if settings.ai_enabled and not settings.ai_kill_switch else "disabled",
-            detail="Day 2 exposes configuration only; AI reactions are not running",
+            detail="AI configuration is available; automated reactions are not running",
         ),
     )
 

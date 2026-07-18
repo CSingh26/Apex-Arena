@@ -2652,7 +2652,7 @@ body {
 @media (max-width: 900px) { .next-session__layout { grid-template-columns: 1fr; }.countdown { max-width: 620px; }.next-session footer { flex-direction: column; gap: 4px; } }
 @media (max-width: 520px) { .next-session { border-radius: 18px; }.countdown { gap: 6px; }.countdown > div { padding: 15px 4px; border-radius: 11px; }.countdown strong { font-size: 27px; }.countdown span { font-size: 8px; }.next-session__copy h2 { font-size: 44px; } }
 
-/* Day 4 — grouped session rooms and unified navigation */
+/* Grouped session rooms and unified navigation */
 .nav-menu-open {
   overflow: hidden;
 }

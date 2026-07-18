@@ -56,7 +56,7 @@ const upcomingSprint = weekend({ event_id: "belgium-2026", event_slug: "belgian-
   session({ session_type: "QUALIFYING", display_name: "Qualifying", scheduled_start: "2099-07-25T14:00:00Z", actual_start: null, status: "scheduled", room_slug: null, room_eligible: false, eligibility: "future_read_only", replay_available: false, results_available: false }),
   session({ scheduled_start: "2099-07-26T13:00:00Z", actual_start: null, status: "scheduled", room_slug: null, room_eligible: false, eligibility: "future_read_only", replay_available: false, results_available: false }),
 ] });
-const validationWeekend = weekend({ event_id: "validation", event_slug: "day4-validation-room", event_name: "Day 4 Validation Room", is_development: true });
+const validationWeekend = weekend({ event_id: "validation", event_slug: "private-validation-room", event_name: "Private Validation Room", is_development: true });
 
 describe("RaceRoomsIndex", () => {
   beforeEach(() => {

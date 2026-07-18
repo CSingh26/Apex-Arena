@@ -4,7 +4,7 @@
 
 This guide describes the Race Rooms implementation as it exists on the Day 3 branch. It is both
 an architecture reference and a local operator runbook. The provider ingestion, normalized event
-sequence, race-state reducer, snapshots, and Redis boundary are the Day 1/Day 2 foundation; Day 3
+sequence, race-state reducer, snapshots, and Redis boundary form the engine foundation; Day 3
 adds a durable room catalog, replay coordinator, grounded specialist discussion, evidence APIs,
 room-specific SSE, and the Race Rooms interface.
 
@@ -468,7 +468,7 @@ duplicate messages, overflow, or sticky-control overlap.
 - Replay scheduling, task ownership, trigger cooldown/dedup state, and recent-message repetition
   memory are process-local. Playback is durable, but a running replay is not automatically resumed
   after process restart and multiple API workers are not coordinated.
-- Normalized event sequence allocation and bounded-lateness ordering inherit the Day 2
+- Normalized event sequence allocation and bounded-lateness ordering inherit the engine's
   single-process/distributed-scaling limitations described in the root README.
 - The discussion runtime is deterministic-only. OpenAI environment variables and model metadata
   do not imply that an LLM generator is connected.
@@ -477,7 +477,7 @@ duplicate messages, overflow, or sticky-control overlap.
 - OpenF1 session matching is a date/country/circuit heuristic. `limited_telemetry` means a matching
   historical source exists, not that every desired endpoint has been ingested or is complete.
 - Catalog synchronization creates metadata; historical data ingestion is a separate protected
-  Day 2 workflow. Results-only rooms intentionally have no invented telemetry discussion.
+  workflow. Results-only rooms intentionally have no invented telemetry discussion.
 - Playback state and controls are shared per room, not per viewer. One viewer can pause, seek, or
   restart the replay seen by others.
 - Seek serially reconstructs race state and in-memory discussion state through the target event,
