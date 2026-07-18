@@ -55,6 +55,7 @@ class Settings(BaseSettings):
     openf1_reconnect_base_delay_ms: int = 1000
     openf1_reconnect_max_delay_ms: int = 30000
     openf1_live_auto_connect: bool = False
+    openf1_live_catalog_sync_seconds: int = Field(default=60, ge=15, le=900)
     openf1_live_topics: str = (
         "v1/sessions,v1/drivers,v1/position,v1/intervals,v1/laps,v1/pit,"
         "v1/stints,v1/race_control,v1/weather"
