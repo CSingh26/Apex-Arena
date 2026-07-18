@@ -2660,6 +2660,8 @@ body {
   position: sticky;
   z-index: 50;
   top: 0;
+  width: 100vw;
+  margin-left: calc(50% - 50vw);
   min-height: 70px;
   border-bottom: 1px solid var(--line, var(--landing-line, rgb(126 154 224 / 20%)));
   background: color-mix(in srgb, var(--background) 88%, transparent);
@@ -2668,8 +2670,10 @@ body {
 
 .app-nav__inner {
   display: flex;
-  width: 100%;
+  width: min(1460px, 100%);
   min-height: 70px;
+  margin-inline: auto;
+  padding-inline: 34px;
   align-items: center;
   gap: clamp(18px, 3vw, 42px);
 }
@@ -3503,7 +3507,7 @@ body {
   .app-nav__menu-button { display: block; }
   .app-nav .connection { font-size: 0; }
   .app-nav .connection > span { width: 9px; height: 9px; }
-  .rooms-shell, .room-page, .landing-shell { padding-inline: 18px; }
+  .app-nav__inner, .rooms-shell, .room-page, .landing-shell { padding-inline: 18px; }
   .event-grid, .event-skeletons { grid-template-columns: 1fr; }
   .weekend-countdown { grid-template-columns: 1fr; }
   .weekend-countdown__action { grid-column: auto; }
@@ -3517,7 +3521,7 @@ body {
   .app-nav__brand { font-size: .62rem; letter-spacing: .14em; }
   .app-nav__actions { gap: 7px; }
   .app-nav__menu-button, .app-nav .theme-toggle { width: 38px; height: 38px; }
-  .rooms-shell, .room-page, .landing-shell { padding-inline: 13px; }
+  .app-nav__inner, .rooms-shell, .room-page, .landing-shell { padding-inline: 13px; }
   .rooms-hero { padding-block: 42px; }
   .rooms-hero h1 { font-size: clamp(3.2rem, 18vw, 5rem); }
   .room-controls { padding: 0; overflow: hidden; }
