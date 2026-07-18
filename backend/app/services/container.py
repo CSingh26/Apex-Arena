@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+from contextlib import suppress
 
 from app.core.settings import Settings
 from app.providers.jolpica import JolpicaClient
@@ -32,6 +34,8 @@ from app.storage.repositories import (
     SqlRawEventRepository,
 )
 from app.storage.room_repository import SqlRaceRoomRepository
+
+logger = logging.getLogger(__name__)
 
 
 class AppServices:
@@ -111,8 +115,32 @@ class AppServices:
             max_records_per_endpoint=settings.historical_ingestion_max_records_per_endpoint,
             room_availability=self.room_repository,
         )
+        self._live_catalog_task: asyncio.Task[None] | None = None
+
+    async def start_live_services(self) -> None:
+        """Connect live telemetry and reconcile provider sessions in the background."""
+        await self.openf1_live.connect()
+        if self._live_catalog_task is None or self._live_catalog_task.done():
+            self._live_catalog_task = asyncio.create_task(
+                self._maintain_live_catalog(), name="openf1-live-catalog"
+            )
+
+    async def _maintain_live_catalog(self) -> None:
+        while True:
+            try:
+                await self.rooms.force_sync()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning("Live room catalog refresh failed error=%s", type(exc).__name__)
+            await asyncio.sleep(self.settings.openf1_live_catalog_sync_seconds)
 
     async def close(self) -> None:
+        if self._live_catalog_task is not None:
+            self._live_catalog_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._live_catalog_task
+            self._live_catalog_task = None
         await self.openf1_live.disconnect()
         await self.room_replay.close()
         await asyncio.gather(

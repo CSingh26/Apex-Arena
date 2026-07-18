@@ -22,7 +22,7 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
         configure_logging(settings)
         application.state.services = AppServices(settings)
         if settings.openf1_live_auto_connect:
-            await application.state.services.openf1_live.connect()
+            await application.state.services.start_live_services()
         try:
             yield
         finally:
