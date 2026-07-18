@@ -44,6 +44,57 @@ export type RaceWeekendSession = {
   starts_at: string;
 };
 
+export type SessionRoomType = "QUALIFYING" | "SPRINT_QUALIFYING" | "SPRINT" | "RACE" | string;
+export type EventWeekendStatus = "live" | "completed" | "upcoming";
+export type RoomEligibility =
+  | "eligible_live"
+  | "eligible_historical"
+  | "future_read_only"
+  | "unavailable"
+  | "already_exists"
+  | "provider_pending"
+  | string;
+
+/** A public, session-level summary returned as part of a grouped event weekend. */
+export type EventSessionSummary = {
+  session_type: SessionRoomType;
+  display_name: string;
+  scheduled_start: string;
+  actual_start: string | null;
+  status: string;
+  room_slug: string | null;
+  room_eligible: boolean;
+  eligibility: RoomEligibility;
+  data_availability: SourceAvailability;
+  replay_available: boolean;
+  results_available: boolean;
+};
+
+/** Public Race Rooms index model. One item represents one race weekend. */
+export type RaceRoomEvent = {
+  event_id: string;
+  event_slug: string;
+  meeting_key: string | null;
+  season: number;
+  round: number;
+  event_name: string;
+  circuit_name: string;
+  country: string;
+  weekend_start: string;
+  weekend_end: string;
+  weekend_status: EventWeekendStatus;
+  is_sprint_weekend: boolean;
+  sessions: EventSessionSummary[];
+  is_development?: boolean;
+};
+
+export type RaceRoomEventsResponse = {
+  events: RaceRoomEvent[];
+  total: number;
+  limit: number;
+  offset: number;
+};
+
 export type SeasonCalendarSummary = {
   season_year: number;
   source: string;
@@ -164,6 +215,8 @@ export type RaceRoom = {
   telemetry_quality: string;
   message_count: number; agent_count: number; last_event_at: string | null; created_at: string; updated_at: string;
   is_featured: boolean; is_development: boolean;
+  current_phase?: string | null;
+  phase_boundaries_available?: boolean;
 };
 
 export type AgentProfile = {
@@ -179,6 +232,7 @@ export type RoomMessage = {
   content: string; confidence: "low" | "medium" | "high"; evidence_status: "grounded" | "partial" | "unavailable";
   reply_to_message_id: string | null; trigger_event_id: string | null; trigger_snapshot_id: string | null;
   generated_by: string; model_name: string | null; prompt_version: string; created_at: string;
+  session_phase?: string | null;
 };
 
 export type MessageEvidence = {
@@ -214,6 +268,8 @@ export type PlaybackAction =
   | { action: "pause" | "resume" }
   | { action: "set_speed"; playback_speed: 0.5 | 1 | 2 | 4 | 8 }
   | { action: "seek_to_lap"; lap_number: number }
+  | { action: "seek_to_phase"; phase: string }
+  | { action: "seek_to_session_time"; session_time: number }
   | { action: "seek_to_sequence"; sequence: number };
 export type ReplayResponse = { room: RaceRoom; playback: RoomPlayback };
 export type RoomDiagnostics = {

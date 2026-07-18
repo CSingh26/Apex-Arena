@@ -29,10 +29,9 @@ Server-Sent Events. The current discussion runtime is deterministic and requires
 - PostgreSQL 17 and Redis 7.4 services with health checks and persistent volumes.
 - Alembic migrations for the season catalog plus idempotent `raw_provider_events`, ordered
   `normalized_race_events`, `race_state_snapshots`, and observable `ingestion_runs`.
-- Jolpica 2026 calendar/results client and completed/upcoming/live race classification.
-- Public-first OpenF1 historical REST client for sessions, drivers, position, intervals, laps,
-  pit data, stints, race control, and weather, with one backend-only OAuth retry after a 401 when
-  credentials are configured.
+- Jolpica 2026 calendar/results client with provider-derived standard and Sprint weekend formats.
+- OpenF1 historical REST support for session metadata, drivers, timing, strategy, race control,
+  weather, session results, and starting grids, with bounded retry, throttling, and caching.
 - Backend-only OpenF1 OAuth token acquisition, expiry-aware in-memory caching, TLS MQTT
   subscriptions, reconnect state, and clean shutdown. Missing credentials degrade only live mode.
 - Historical OpenF1 session ingestion through the exact same processor used by MQTT messages.
@@ -41,8 +40,8 @@ Server-Sent Events. The current discussion runtime is deterministic and requires
 - Deterministic race-state reduction with periodic PostgreSQL snapshots.
 - Redis Streams for normalized events, state updates, and live connection status.
 - Reconnect-safe SSE with persisted missed-event recovery and heartbeats.
-- A responsive Race Rooms index and individual conversation view with evidence, filters, lap seek,
-  replay controls, light/dark presentation, and collapsible operational diagnostics.
+- A responsive grouped Race Rooms index and individual conversation view with progressive
+  evidence, session-aware replay controls, light/dark presentation, and secondary diagnostics.
 
 ## Race Rooms architecture
 
@@ -57,13 +56,18 @@ OpenF1/Jolpica -> normalized event -> significance + cooldown/dedup
                               Redis Stream -> recovery-safe SSE -> room timeline
 ```
 
-The catalog derives public 2026 race metadata from Jolpica. Completed races without detailed
-telemetry remain visible with an honest results-only notice; the local fixture room is always
-marked **Development room · simulated/test data**.
+The catalog derives public 2026 event and competitive-session metadata from Jolpica and OpenF1.
+Completed sessions without detailed telemetry remain visible with an honest availability notice;
+future sessions are read-only schedule previews and cannot create rooms as a side effect. The Day 3
+fixture is hidden by default and exists only for tests or an explicitly enabled local fixture.
 
 For the full Day 3 architecture, durable schema, replay/action contract, grounding rules, catalog
 sync workflow, diagnostics policy, validation fixture, and operator checks, see
 [`docs/day-3-race-rooms.md`](./docs/day-3-race-rooms.md).
+
+For the grouped event contract, competitive session identity, eligibility rules, staged historical
+ingestion, qualifying semantics, navigation hierarchy, and controlled backfill procedure, see
+[`docs/day-4-session-rooms.md`](./docs/day-4-session-rooms.md).
 
 ### Agent roster
 
@@ -192,7 +196,10 @@ Optional race-engine configuration:
 - `SSE_HEARTBEAT_SECONDS` and `ENGINE_RECENT_EVENTS_LIMIT` tune client recovery and streaming.
 - `ROOM_TOPIC_COOLDOWN_SECONDS` limits repetitive topic reactions and
   `ROOM_STREAM_BACKLOG_LIMIT` caps persisted SSE recovery per connection.
-- `HISTORICAL_INGESTION_ENABLED` and `DEBUG_INGESTION_ENABLED` gate replay ingestion.
+- `DEVELOPMENT_FIXTURE_ENABLED` exposes the deterministic Day 3 fixture only in local/test
+  environments; it defaults to `false` and must remain off in public deployments.
+- `HISTORICAL_INGESTION_ENABLED` and `DEBUG_INGESTION_ENABLED` gate replay ingestion. The
+  `HISTORICAL_PROVIDER_*` values bound provider retries, pacing, and process-local cache lifetime.
 - `INTERNAL_API_KEY` is required by the mutating historical-ingestion endpoint.
 - `OPENAI_API_KEY`: no current Race Room code calls OpenAI. The Day 3 discussion runtime is
   deterministic; `AI_ENABLED` reports intended configuration only.
@@ -213,20 +220,22 @@ round-results method for completed races when provider results are available.
 
 ### OpenF1
 
-The historical OpenF1 REST client sends a public request first. If OpenF1 responds with 401 and
-backend credentials are configured, it obtains a cached OAuth token and retries once. Live REST,
-MQTT, and WebSocket access can require an OpenF1 subscription and OAuth token. Credentials and
-token exchange remain backend-only; token values never appear in status responses or logs.
+The historical OpenF1 REST client uses backend-only OAuth when the provider requires it, then
+retries transient rate-limit/server failures with bounded exponential backoff. Requests are paced
+and identical successful reads use a bounded in-process cache. Live REST, MQTT, and WebSocket
+access can require an OpenF1 subscription. Credentials and token exchange remain backend-only;
+token values never appear in status responses or logs.
 
 `OpenF1LiveClient` opens MQTT over TLS when live auto-connect is enabled and credentials are
 present. It subscribes to configured `v1/*` topics, forwards dictionary payloads to the unified
 processor, publishes safe connection state, and reconnects with bounded backoff. Provider tokens
 and credentials never reach the browser, response bodies, or logs.
 
-`HistoricalOpenF1Adapter` fetches selected categories for one OpenF1 session, caps records per
-endpoint, sorts them by provider event time, and passes them through the same processor. The
-mutating trigger is disabled unless both historical and debug ingestion are enabled and a private
-internal key is configured.
+`HistoricalOpenF1Adapter` ingests one session through metadata, timing, strategy, context, and
+classification stages; caps records per endpoint; isolates endpoint failures; and passes records
+through the same idempotent processor. High-frequency car/location data is opt-in. The mutating
+trigger is disabled unless both historical and debug ingestion are enabled and a private internal
+key is configured.
 
 ## API endpoints
 
@@ -241,6 +250,7 @@ internal key is configured.
 | `GET /api/v1/sessions/{session_key}/state` | Current in-memory or latest snapshotted race state |
 | `GET /api/v1/stream/sessions/{session_key}` | SSE event, state, and live-status stream with recovery |
 | `GET /api/v1/race-rooms` | Paginated room catalog with season, status, and search filters |
+| `GET /api/v1/race-rooms/events` | Grouped live, completed, and upcoming event weekends with competitive sessions |
 | `POST /api/v1/race-rooms/sync` | Internal-key-protected calendar/session metadata refresh |
 | `GET /api/v1/race-rooms/{slug}` | Room metadata, agent roster, playback, and data notice |
 | `GET /api/v1/race-rooms/{slug}/messages` | Cursor/filter based persistent discussion history |
@@ -248,7 +258,7 @@ internal key is configured.
 | `GET /api/v1/race-rooms/{slug}/stream` | Missed-message recovery followed by live room SSE |
 | `GET /api/v1/race-rooms/{slug}/diagnostics` | Development/debug-gated safe Pipeline Diagnostics |
 | `POST /api/v1/race-rooms/{slug}/replay` | Start, restart, or resume an available replay |
-| `POST /api/v1/race-rooms/{slug}/playback` | Pause, resume, speed, sequence, or lap seek |
+| `POST /api/v1/race-rooms/{slug}/playback` | Pause, resume, speed, sequence, lap, phase, or session-time seek |
 | `POST /api/v1/race-rooms/{slug}/generate` | Internal-key-protected discussion generation |
 | `POST /api/v1/debug/ingest-historical-session` | Internal-key-protected historical ingestion trigger |
 | `GET /api/v1/debug/config` | Non-secret runtime metadata and feature flags |
@@ -318,8 +328,8 @@ ports to the containers' standard ports; application code needs no changes.
   still receive a later sequence number.
 - On process restart, state loads the latest periodic snapshot; events after that snapshot are not
   yet replayed automatically into the reducer.
-- Historical ingestion fetches endpoint payloads in one request per category and is intended as an
-  internal Day 2 tool, not a public job queue.
+- Historical ingestion and provider caching are process-local orchestration, not a distributed job
+  queue; completed run summaries remain durable in PostgreSQL.
 - SSE is the only client streaming transport today. Live MQTT depends on valid OpenF1 subscription
   credentials and is deliberately disabled by default.
 - Past rooms can only discuss telemetry that has actually been ingested; results-only rooms do not
@@ -329,9 +339,9 @@ ports to the containers' standard ports; application code needs no changes.
   not automatically resumed after a backend restart or coordinated between multiple API workers.
 - The current Race Room generator is deterministic-only. The persisted model fields reserve an
   audit boundary for a future validated LLM path; configuring an API key does not activate one.
-- Session matching is metadata-only. Replay seeking serially rebuilds state/discussion through the
-  target event while retaining persisted history; use Restart to delete and regenerate the room's
-  conversation from a clean timeline.
+- Ambiguous provider matches and uncertain qualifying phase boundaries remain unresolved instead
+  of being guessed. Replay seeking serially rebuilds state/discussion through the target event
+  while retaining persisted history; use Restart to regenerate from a clean timeline.
 
 ## Next direction
 

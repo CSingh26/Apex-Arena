@@ -91,8 +91,13 @@ class Settings(BaseSettings):
     room_stream_backlog_limit: int = Field(default=250, ge=1, le=1000)
     room_replay_interval_seconds: float = Field(default=0.6, ge=0.05, le=10)
     room_diagnostics_enabled: bool = False
+    development_fixture_enabled: bool = False
     historical_ingestion_enabled: bool = True
     historical_ingestion_max_records_per_endpoint: int = Field(default=5000, ge=1, le=50000)
+    historical_provider_retry_attempts: int = Field(default=3, ge=1, le=6)
+    historical_provider_retry_base_delay_ms: int = Field(default=100, ge=0, le=5000)
+    historical_provider_min_interval_ms: int = Field(default=25, ge=0, le=5000)
+    historical_provider_cache_ttl_seconds: int = Field(default=900, ge=0, le=86400)
     debug_ingestion_enabled: bool = True
 
     enable_live_rooms: bool = True

@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, s
 from fastapi.responses import StreamingResponse
 
 from app.api.room_schemas import (
+    EventWeekendListResponse,
     MessageEvidenceResponse,
     PlaybackRequest,
     RaceRoomDetailResponse,
@@ -26,9 +27,15 @@ from app.domain.rooms import (
     MessageType,
     RoomMode,
     RoomStatus,
+    SessionType,
     SourceAvailability,
+    WeekendStatus,
 )
 from app.services.container import AppServices
+from app.services.room_eligibility import (
+    RoomActionUnavailableError,
+    RoomEligibilityService,
+)
 from app.services.room_replay import ReplayUnavailableError
 
 logger = logging.getLogger(__name__)
@@ -47,7 +54,28 @@ async def require_room(slug: str, services: AppServices):
     room = await services.room_repository.get_room(slug)
     if room is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Race room not found")
+    runtime_settings = getattr(services, "settings", None)
+    app_env = getattr(runtime_settings, "app_env", "test")
+    fixture_access = app_env == "test" or (
+        app_env == "local" and bool(getattr(runtime_settings, "development_fixture_enabled", False))
+    )
+    if room.is_development and not fixture_access:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Race room not found")
+    try:
+        _eligibility_service(services).require_room_action(room, action="open")
+    except RoomActionUnavailableError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     return room
+
+
+def _eligibility_service(services: AppServices) -> RoomEligibilityService:
+    configured = getattr(services, "room_eligibility", None)
+    if isinstance(configured, RoomEligibilityService):
+        return configured
+    configured = getattr(services.rooms, "eligibility", None)
+    return (
+        configured if isinstance(configured, RoomEligibilityService) else RoomEligibilityService()
+    )
 
 
 def require_internal_key(services: AppServices, supplied: str | None) -> None:
@@ -82,7 +110,42 @@ async def list_race_rooms(
         limit=limit,
         offset=offset,
     )
-    return RaceRoomListResponse(rooms=rooms, total=total, limit=limit, offset=offset)
+    public_rooms = [room for room in rooms if not room.is_development]
+    total = max(0, total - (len(rooms) - len(public_rooms)))
+    return RaceRoomListResponse(
+        rooms=public_rooms,
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.get("/events", response_model=EventWeekendListResponse)
+async def list_event_weekends(
+    services: Services,
+    season: int | None = Query(default=None, ge=2023, le=2100),
+    event_status: Annotated[WeekendStatus | None, Query(alias="status")] = None,
+    session_type: Annotated[SessionType | None, Query()] = None,
+    is_sprint_weekend: bool | None = Query(default=None),
+    search: str | None = Query(default=None, max_length=100),
+    limit: int = Query(default=30, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+) -> EventWeekendListResponse:
+    events, total = await services.rooms.grouped_events(
+        season=season,
+        status=event_status,
+        session_type=session_type,
+        is_sprint_weekend=is_sprint_weekend,
+        search=search,
+        limit=limit,
+        offset=offset,
+    )
+    return EventWeekendListResponse(
+        events=events,
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
 
 
 @router.post("/sync", response_model=dict[str, int])
@@ -214,6 +277,10 @@ async def start_replay(
     payload: ReplayRequest | None = None,
 ) -> ReplayResponse:
     room = await require_room(room_slug, services)
+    try:
+        _eligibility_service(services).require_room_action(room, action="replay")
+    except RoomActionUnavailableError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     action = payload.action if payload is not None else "start"
     try:
         if action == "resume":
@@ -235,6 +302,10 @@ async def change_playback(
 ) -> ReplayResponse:
     room = await require_room(room_slug, services)
     try:
+        _eligibility_service(services).require_room_action(room, action="replay")
+    except RoomActionUnavailableError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    try:
         if payload.action == "pause":
             playback = await services.room_replay.pause(room)
         elif payload.action == "resume":
@@ -245,6 +316,12 @@ async def change_playback(
         elif payload.action == "seek_to_lap":
             assert payload.lap_number is not None
             playback = await services.room_replay.seek_to_lap(room, payload.lap_number)
+        elif payload.action == "seek_to_phase":
+            assert payload.phase is not None
+            playback = await services.room_replay.seek_to_phase(room, payload.phase)
+        elif payload.action == "seek_to_session_time":
+            assert payload.session_time is not None
+            playback = await services.room_replay.seek_to_session_time(room, payload.session_time)
         else:
             assert payload.sequence is not None
             playback = await services.room_replay.seek_to_sequence(room, payload.sequence)
@@ -328,6 +405,10 @@ async def generate_room(
 ) -> RoomGenerationResponse:
     require_internal_key(services, internal_api_key)
     room = await require_room(room_slug, services)
+    try:
+        _eligibility_service(services).require_room_action(room, action="generate")
+    except RoomActionUnavailableError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     if room.session_key is None:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,

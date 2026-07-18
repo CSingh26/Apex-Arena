@@ -7,6 +7,7 @@ import type {
   SessionStateResponse,
   MessageEvidenceResponse,
   RaceRoomDetailResponse,
+  RaceRoomEventsResponse,
   RaceRoomListResponse,
   RoomMessagesResponse,
   PlaybackAction,
@@ -86,6 +87,10 @@ export function sessionStreamUrl(sessionKey: string, lastSequenceNumber: number)
 
 export function getRaceRooms(params: URLSearchParams, signal?: AbortSignal): Promise<RaceRoomListResponse> {
   return request<RaceRoomListResponse>(`/api/v1/race-rooms?${params}`, signal);
+}
+
+export function getRaceRoomEvents(params: URLSearchParams, signal?: AbortSignal): Promise<RaceRoomEventsResponse> {
+  return request<RaceRoomEventsResponse>(`/api/v1/race-rooms/events?${params}`, signal);
 }
 
 export function getRaceRoom(slug: string, signal?: AbortSignal): Promise<RaceRoomDetailResponse> {

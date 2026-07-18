@@ -20,7 +20,9 @@ from app.domain.rooms import (
     RoomMessage,
 )
 from app.services.discussion_triggers import DiscussionTrigger, DiscussionTriggerEvaluator
+from app.services.driver_identity import DriverIdentityResolver
 from app.services.race_state import RaceState
+from app.services.session_semantics import is_qualifying_session
 from app.storage.room_repository import SqlRaceRoomRepository
 
 logger = logging.getLogger(__name__)
@@ -67,6 +69,10 @@ class GroundingContextBuilder:
         if state is not None:
             evidence["race_status"] = state.status
             evidence["race_current_lap"] = state.current_lap
+            if state.session_type is not None:
+                evidence["session_type"] = state.session_type
+            if state.current_phase is not None:
+                evidence["session_phase"] = state.current_phase
             relevant = {
                 driver: driver_state.model_dump(mode="json")
                 for driver, driver_state in state.drivers.items()
@@ -103,6 +109,8 @@ class GroundingValidator:
         supplied_drivers = {str(driver) for driver in context.evidence.get("driver_numbers", [])}
         mentioned_drivers = set(re.findall(r"\bDriver (\d+)\b", message.content))
         if not mentioned_drivers <= supplied_drivers:
+            return False
+        if context.evidence.get("resolved_driver_name") and mentioned_drivers:
             return False
         compound = str(context.evidence.get("compound") or "").casefold()
         mentioned_compounds = {
@@ -153,6 +161,19 @@ class GroundingValidator:
         return []
 
 
+class PublicMessageShaper:
+    """Small deterministic guardrail for concise, audience-friendly copy."""
+
+    max_characters = 420
+
+    def shape(self, content: str) -> str:
+        compact = " ".join(content.split())
+        if len(compact) <= self.max_characters:
+            return compact
+        shortened = compact[: self.max_characters - 1].rsplit(" ", 1)[0]
+        return shortened.rstrip(".,;:") + "…"
+
+
 class DeterministicRoomGenerator:
     """Specialist templates that can only state values present in grounded context."""
 
@@ -168,14 +189,19 @@ class DeterministicRoomGenerator:
     ) -> GeneratedRoomMessage:
         context = context or GroundingContextBuilder().build(event, None)
         evidence = context.evidence
-        driver = event.driver_numbers[0] if event.driver_numbers else None
+        driver_number = event.driver_numbers[0] if event.driver_numbers else None
+        driver = DriverIdentityResolver.public_label(evidence, driver_number)
         lap = event.lap_number
+        qualifying = is_qualifying_session(
+            evidence.get("normalized_session_type") or evidence.get("session_type")
+        )
+        phase = evidence.get("session_phase")
         base_keys = ["event_type", "event_sequence"]
         if host_summary:
             return self._message(
                 MessageType.SUMMARY,
-                "The confirmed race-control event changes the current phase. The room agrees "
-                "on the event itself; its duration and strategic effect remain uncertain.",
+                "The session has changed phase. We know what happened, but we need more timing "
+                "data before judging the wider effect.",
                 Confidence.MEDIUM,
                 EvidenceStatus.PARTIAL,
                 "A major race phase changed.",
@@ -184,10 +210,14 @@ class DeterministicRoomGenerator:
         if reply_to is not None:
             return self._reply(event, agent_id, context)
         if event.event_type in {RaceEventType.SESSION_START, RaceEventType.RACE_START}:
+            start_detail = (
+                "The first timed laps will show who is safe and who is at risk."
+                if qualifying
+                else "The first timing samples will show how the pace and gaps are developing."
+            )
             return self._message(
                 MessageType.OBSERVATION,
-                "The session start is confirmed. The room will wait for timing samples before "
-                "drawing conclusions about pace or strategy.",
+                f"The session has started. {start_detail}",
                 Confidence.HIGH,
                 EvidenceStatus.GROUNDED,
                 "The session started.",
@@ -198,20 +228,36 @@ class DeterministicRoomGenerator:
             if trend is not None:
                 return self._message(
                     MessageType.ANALYSIS,
-                    f"Driver {driver}'s supplied representative-lap sample improves by "
-                    f"{abs(float(trend)):.2f} seconds. That is a measured pace trend, but its "
-                    "strategic value still depends on gaps and traffic.",
+                    f"{driver} is about {abs(float(trend)):.2f} seconds quicker across the recent "
+                    "representative laps. That improvement matters, although traffic and gaps "
+                    "will decide whether it changes the outcome.",
                     Confidence.HIGH,
                     EvidenceStatus.GROUNDED,
                     "The representative-lap sample contains a pace trend.",
                     ["driver_numbers", "pace_trend_seconds", "representative_laps"],
                 )
             duration = evidence.get("lap_duration")
-            duration_text = f" in {duration} seconds" if duration is not None else ""
+            duration_text = (
+                f" in {self._format_seconds(duration)} seconds" if duration is not None else ""
+            )
+            if qualifying:
+                phase_text = f" in {phase}" if phase else ""
+                return self._message(
+                    MessageType.OBSERVATION,
+                    f"{driver} completed a timed lap{phase_text}{duration_text}. It gives us a "
+                    "new benchmark, but the available data does not yet confirm whether the "
+                    "driver is safe from elimination.",
+                    Confidence.MEDIUM,
+                    EvidenceStatus.PARTIAL,
+                    "A qualifying lap was completed.",
+                    ["driver_numbers", "event_type"]
+                    + (["session_phase"] if phase else [])
+                    + (["lap_duration"] if duration is not None else []),
+                )
             return self._message(
                 MessageType.OBSERVATION,
-                f"Driver {driver} completed lap {lap}{duration_text}. No broader pace trend is "
-                "established by one lap.",
+                f"{driver} completed lap {lap}{duration_text}. One lap alone is not enough to "
+                "show a lasting pace trend.",
                 Confidence.MEDIUM,
                 EvidenceStatus.PARTIAL,
                 "A lap was completed.",
@@ -219,17 +265,19 @@ class DeterministicRoomGenerator:
             )
         if event.event_type == RaceEventType.PIT_STOP:
             duration = evidence.get("pit_duration") or evidence.get("duration")
-            fact = f"Driver {driver} made a recorded pit stop"
+            fact = f"{driver} made a recorded pit stop"
             if lap is not None:
                 fact += f" on lap {lap}"
             keys = ["driver_numbers", "event_type"]
             if duration is not None:
-                fact += f" with a recorded duration of {duration} seconds"
-                keys.append("pit_duration")
+                fact += f" with a recorded duration of {self._format_seconds(duration)} seconds"
+                keys.append(
+                    "pit_duration" if evidence.get("pit_duration") is not None else "duration"
+                )
             return self._message(
                 MessageType.ANALYSIS,
-                fact + ". Tyre life and undercut outcome remain uncertain until the next position "
-                "sample.",
+                fact + ". The position after the stop will show whether it gained time; the "
+                "outcome and remaining tyre life remain uncertain for now.",
                 Confidence.HIGH,
                 EvidenceStatus.GROUNDED,
                 "A pit stop was recorded.",
@@ -238,11 +286,11 @@ class DeterministicRoomGenerator:
         if event.event_type == RaceEventType.TYRE_CHANGE:
             compound = evidence.get("compound")
             text = (
-                f"Driver {driver}'s supplied stint update records {compound} tyres. "
-                "The compound is confirmed, but future stint length is not."
+                f"{driver} is now recorded on {compound} tyres. The tyre choice is confirmed, "
+                "but we cannot yet know how long the stint will last."
                 if compound
-                else f"Driver {driver} has a tyre-change event without compound data. "
-                "Strategy impact cannot yet be assessed."
+                else f"{driver} changed tyres, but the compound is missing. We cannot yet judge "
+                "how that choice will affect the session."
             )
             keys = ["driver_numbers", "event_type"] + (["compound"] if compound else [])
             return self._message(
@@ -255,12 +303,16 @@ class DeterministicRoomGenerator:
             )
         if event.event_type == RaceEventType.FASTEST_LAP:
             duration = evidence.get("lap_duration")
-            detail = f" at {duration} seconds" if duration is not None else ""
+            detail = f" at {self._format_seconds(duration)} seconds" if duration is not None else ""
             keys = ["driver_numbers", "event_type"] + (["lap_duration"] if duration else [])
+            consequence = (
+                f"That can move the elimination line in {phase}."
+                if qualifying and phase
+                else "One peak lap does not yet prove sustainable race pace."
+            )
             return self._message(
                 MessageType.ANALYSIS,
-                f"Driver {driver} set the supplied fastest-lap marker{detail}. One peak lap does "
-                "not establish sustainable race pace.",
+                f"{driver} set the quickest recorded lap{detail}. {consequence}",
                 Confidence.HIGH,
                 EvidenceStatus.GROUNDED,
                 "A fastest-lap event was supplied.",
@@ -270,9 +322,19 @@ class DeterministicRoomGenerator:
             position = evidence.get("position")
             update = f" to P{position}" if position is not None else ""
             keys = ["driver_numbers", "event_type"] + (["position"] if position else [])
+            if qualifying:
+                return self._message(
+                    MessageType.ANALYSIS,
+                    f"{driver} has moved{update} in the qualifying order. This changes the "
+                    "elimination picture, but it does not represent an on-track pass.",
+                    Confidence.MEDIUM,
+                    EvidenceStatus.GROUNDED,
+                    "The qualifying order changed.",
+                    keys,
+                )
             return self._message(
                 MessageType.ANALYSIS,
-                f"Driver {driver} has a confirmed position update{update}. The record confirms "
+                f"{driver} has a confirmed position update{update}. The record confirms "
                 "track position; only an explicit overtake event establishes an on-track pass.",
                 Confidence.HIGH
                 if event.event_type == RaceEventType.OVERTAKE
@@ -309,12 +371,48 @@ class DeterministicRoomGenerator:
         if event.event_type == RaceEventType.RETIREMENT:
             return self._message(
                 MessageType.OBSERVATION,
-                f"Driver {driver} is recorded as retired. The supplied event does not establish "
-                "a cause.",
+                f"{driver} is recorded as retired. The supplied event does not establish a cause.",
                 Confidence.HIGH,
                 EvidenceStatus.GROUNDED,
                 "A retirement was recorded.",
                 ["driver_numbers", "event_type"],
+            )
+        if event.event_type == RaceEventType.QUALIFYING_PHASE:
+            phase_text = str(phase or "the next qualifying phase")
+            return self._message(
+                MessageType.SUMMARY,
+                f"{phase_text} is now under way. Drivers need a valid lap before the phase ends; "
+                "the slowest will not progress.",
+                Confidence.HIGH if phase else Confidence.MEDIUM,
+                EvidenceStatus.GROUNDED if phase else EvidenceStatus.PARTIAL,
+                "The qualifying phase changed.",
+                base_keys + (["session_phase"] if phase else []),
+            )
+        if event.event_type == RaceEventType.LAP_DELETED:
+            return self._message(
+                MessageType.OBSERVATION,
+                f"{driver}'s lap time has been deleted. That lap no longer helps the driver's "
+                "qualifying position, so another valid attempt may be needed.",
+                Confidence.HIGH,
+                EvidenceStatus.GROUNDED,
+                "A lap time was deleted.",
+                ["driver_numbers", "event_type"],
+            )
+        if event.event_type == RaceEventType.SESSION_RESULT:
+            position = evidence.get("position")
+            result_text = f" finished P{position}" if position is not None else " has a result"
+            consequence = (
+                "This sets the starting order for the next competitive session."
+                if qualifying
+                else "This is the recorded final classification."
+            )
+            return self._message(
+                MessageType.SUMMARY,
+                f"{driver}{result_text}. {consequence}",
+                Confidence.HIGH,
+                EvidenceStatus.GROUNDED,
+                "A final session result was supplied.",
+                ["driver_numbers", "event_type"] + (["position"] if position is not None else []),
             )
         if event.event_type == RaceEventType.SESSION_FINISH:
             return self._message(
@@ -328,8 +426,8 @@ class DeterministicRoomGenerator:
             )
         return self._message(
             MessageType.UNCERTAINTY,
-            f"A {event.event_type.value.replace('_', ' ').lower()} event was recorded. The "
-            "available data is insufficient for a stronger conclusion.",
+            "A new session update was recorded. The available data is not detailed enough for "
+            "a stronger conclusion yet.",
             Confidence.LOW,
             EvidenceStatus.PARTIAL,
             "An event was recorded.",
@@ -339,6 +437,19 @@ class DeterministicRoomGenerator:
     def _reply(
         self, event: NormalizedRaceEvent, agent_id: str, context: GroundingContext
     ) -> GeneratedRoomMessage:
+        qualifying = is_qualifying_session(
+            context.evidence.get("normalized_session_type") or context.evidence.get("session_type")
+        )
+        if qualifying:
+            return self._message(
+                MessageType.REPLY,
+                "The timing update is real, but the consequence depends on the remaining runs "
+                "and whether the driver can complete another valid lap.",
+                Confidence.MEDIUM,
+                EvidenceStatus.PARTIAL,
+                "Qualifying timing supports a narrow conclusion.",
+                ["event_type"],
+            )
         if agent_id == "theo-voss" and event.event_type == RaceEventType.POSITION_CHANGE:
             return self._message(
                 MessageType.DISAGREEMENT,
@@ -380,6 +491,14 @@ class DeterministicRoomGenerator:
         )
 
     @staticmethod
+    def _format_seconds(value: object) -> str:
+        try:
+            formatted = f"{float(value):.2f}"
+        except (TypeError, ValueError):
+            return str(value)
+        return formatted.rstrip("0").rstrip(".")
+
+    @staticmethod
     def _message(
         message_type: MessageType,
         content: str,
@@ -412,6 +531,7 @@ class RaceRoomDiscussionEngine:
         self.generator = DeterministicRoomGenerator()
         self.validator = GroundingValidator()
         self.context_builder = GroundingContextBuilder()
+        self.message_shaper = PublicMessageShaper()
         self.metrics = DiscussionMetrics()
         self._locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         self._recent_content: dict[str, deque[str]] = defaultdict(lambda: deque(maxlen=50))
@@ -501,6 +621,9 @@ class RaceRoomDiscussionEngine:
             reply_to=reply_to,
             host_summary=host_summary,
         )
+        generated = generated.model_copy(
+            update={"content": self.message_shaper.shape(generated.content)}
+        )
         fingerprint = " ".join(generated.content.lower().split())
         if fingerprint in self._recent_content[str(room_id)] or not self.validator.validate(
             generated, context
@@ -518,6 +641,10 @@ class RaceRoomDiscussionEngine:
                 if agent_id == "mira-vale"
                 and event.event_type == RaceEventType.LAP_COMPLETED
                 and "pace_trend_seconds" in context.evidence
+                and not is_qualifying_session(
+                    context.evidence.get("normalized_session_type")
+                    or context.evidence.get("session_type")
+                )
                 else trigger.topic
             ),
             message_type=generated.message_type,
@@ -527,7 +654,7 @@ class RaceRoomDiscussionEngine:
             reply_to_message_id=reply_to.id if reply_to else None,
             trigger_event_id=event.id,
             generated_by="deterministic",
-            prompt_version="rooms-v2",
+            prompt_version="rooms-v3",
         )
         self._recent_content[str(room_id)].append(fingerprint)
         return message

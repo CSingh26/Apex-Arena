@@ -9,14 +9,17 @@ from sqlalchemy.dialects.postgresql import insert
 
 from app.domain.rooms import (
     AgentProfile,
+    IngestionStatus,
     MessageEvidence,
     MessageTopic,
     MessageType,
     RaceRoom,
+    RoomEligibilityStatus,
     RoomMessage,
     RoomMode,
     RoomPlaybackState,
     RoomStatus,
+    SourceAvailability,
 )
 from app.storage.database import Database
 from app.storage.models import (
@@ -48,8 +51,12 @@ class SqlRaceRoomRepository:
 
     async def upsert_room(self, room: RaceRoom, agent_ids: list[str]) -> RaceRoom:
         values = room.model_dump(exclude={"created_at", "updated_at"})
+        values["event_slug"] = room.event_slug or room.slug.rsplit("-", 1)[0]
+        values["session_type"] = room.session_type.value
         values["status"] = room.status.value
         values["mode"] = room.mode.value
+        values["eligibility_status"] = room.eligibility_status.value
+        values["ingestion_status"] = room.ingestion_status.value
         values["source_availability"] = room.source_availability.value
         values["agent_count"] = len(agent_ids)
         dynamic_fields = {
@@ -64,9 +71,24 @@ class SqlRaceRoomRepository:
         update_values["session_key"] = func.coalesce(
             values.get("session_key"), RaceRoomRecord.session_key
         )
-        for field in ("status", "mode", "source_availability", "telemetry_quality"):
+        preserve_provider_state = or_(
+            RaceRoomRecord.message_count > 0,
+            RaceRoomRecord.ingestion_status.in_(
+                [IngestionStatus.READY.value, IngestionStatus.PARTIAL.value]
+            ),
+        )
+        for field in (
+            "status",
+            "mode",
+            "source_availability",
+            "telemetry_quality",
+            "eligibility_status",
+            "ingestion_status",
+            "replay_available",
+            "results_available",
+        ):
             update_values[field] = case(
-                (RaceRoomRecord.message_count > 0, getattr(RaceRoomRecord, field)),
+                (preserve_provider_state, getattr(RaceRoomRecord, field)),
                 else_=values[field],
             )
         async with self.database.session_factory() as session:
@@ -108,8 +130,23 @@ class SqlRaceRoomRepository:
         sort: str = "race_date_desc",
         limit: int = 20,
         offset: int = 0,
+        include_development: bool = False,
+        include_unavailable: bool = False,
     ) -> tuple[list[RaceRoom], int]:
         filters = []
+        if not include_development:
+            filters.append(RaceRoomRecord.is_development.is_(False))
+        if not include_unavailable:
+            filters.append(
+                RaceRoomRecord.status.not_in(
+                    [
+                        RoomStatus.PENDING.value,
+                        RoomStatus.INGESTING.value,
+                        RoomStatus.UNAVAILABLE.value,
+                        RoomStatus.FAILED.value,
+                    ]
+                )
+            )
         if season is not None:
             filters.append(RaceRoomRecord.season == season)
         if status is not None:
@@ -166,6 +203,42 @@ class SqlRaceRoomRepository:
                 if record is not None
                 else None
             )
+
+    async def update_ingestion_availability(
+        self,
+        *,
+        session_key: str,
+        ingestion_status: IngestionStatus,
+        source_availability: SourceAvailability,
+        replay_available: bool,
+        results_available: bool,
+        telemetry_quality: str,
+    ) -> bool:
+        """Apply provider-derived availability to the already matched session room."""
+
+        room_ready = source_availability is not SourceAvailability.UNAVAILABLE
+        async with self.database.session_factory() as session:
+            result = await session.execute(
+                update(RaceRoomRecord)
+                .where(RaceRoomRecord.session_key == session_key)
+                .values(
+                    ingestion_status=ingestion_status.value,
+                    source_availability=source_availability.value,
+                    replay_available=replay_available,
+                    results_available=results_available,
+                    telemetry_quality=telemetry_quality,
+                    status=(RoomStatus.READY.value if room_ready else RoomStatus.UNAVAILABLE.value),
+                    mode=RoomMode.ARCHIVED.value if room_ready else RoomMode.REPLAY.value,
+                    eligibility_status=(
+                        RoomEligibilityStatus.ELIGIBLE_HISTORICAL.value
+                        if room_ready
+                        else RoomEligibilityStatus.UNAVAILABLE.value
+                    ),
+                    updated_at=datetime.now(UTC),
+                )
+            )
+            await session.commit()
+            return bool(result.rowcount)
 
     async def get_agents(self, room_id: UUID) -> list[AgentProfile]:
         statement = (

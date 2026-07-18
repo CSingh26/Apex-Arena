@@ -11,6 +11,7 @@ from fastapi import HTTPException
 
 from app.api.room_routes import (
     change_playback,
+    list_event_weekends,
     list_race_rooms,
     message_evidence,
     race_room_detail,
@@ -31,7 +32,9 @@ from app.domain.rooms import (
     RoomMode,
     RoomPlaybackState,
     RoomStatus,
+    SessionType,
     SourceAvailability,
+    WeekendStatus,
 )
 from app.services.discussion import DiscussionMetrics
 from app.services.race_state import RaceState
@@ -98,7 +101,9 @@ def route_services(room: RaceRoom) -> SimpleNamespace:
             resume=AsyncMock(return_value=playback),
             set_speed=AsyncMock(return_value=playback),
             seek_to_lap=AsyncMock(return_value=playback),
+            seek_to_phase=AsyncMock(return_value=playback),
             seek_to_sequence=AsyncMock(return_value=playback),
+            seek_to_session_time=AsyncMock(return_value=playback),
         ),
         settings=SimpleNamespace(
             app_env="test",
@@ -109,7 +114,7 @@ def route_services(room: RaceRoom) -> SimpleNamespace:
 
 @pytest.mark.asyncio
 async def test_room_catalog_forwards_mode_search_sort_and_pagination() -> None:
-    room = api_room()
+    room = api_room().model_copy(update={"is_development": False})
     services = route_services(room)
 
     response = await list_race_rooms(
@@ -134,6 +139,92 @@ async def test_room_catalog_forwards_mode_search_sort_and_pagination() -> None:
         limit=12,
         offset=3,
     )
+
+
+@pytest.mark.asyncio
+async def test_public_room_catalog_defensively_excludes_validation_fixture() -> None:
+    room = api_room()
+    services = route_services(room)
+
+    response = await list_race_rooms(
+        services,
+        season=2026,
+        room_status=None,
+        mode=None,
+        search=None,
+        sort="race_date_desc",
+        limit=20,
+        offset=0,
+    )
+
+    assert response.rooms == []
+    assert response.total == 0
+
+
+@pytest.mark.asyncio
+async def test_grouped_event_catalog_forwards_authoritative_filters() -> None:
+    room = api_room()
+    services = route_services(room)
+    services.rooms.grouped_events = AsyncMock(return_value=([], 0))
+
+    response = await list_event_weekends(
+        services,
+        season=2026,
+        event_status=WeekendStatus.COMPLETED,
+        session_type=SessionType.SPRINT,
+        is_sprint_weekend=True,
+        search="Spa",
+        limit=12,
+        offset=3,
+    )
+
+    assert response.events == []
+    assert response.total == 0
+    services.rooms.grouped_events.assert_awaited_once_with(
+        season=2026,
+        status=WeekendStatus.COMPLETED,
+        session_type=SessionType.SPRINT,
+        is_sprint_weekend=True,
+        search="Spa",
+        limit=12,
+        offset=3,
+    )
+
+
+@pytest.mark.asyncio
+async def test_public_detail_hides_development_fixture_outside_explicit_test_mode() -> None:
+    room = api_room()
+    services = route_services(room)
+    services.settings.app_env = "staging"
+
+    with pytest.raises(HTTPException) as error:
+        await race_room_detail(room.slug, services)
+
+    assert error.value.status_code == 404
+    services.room_repository.get_agents.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_future_placeholder_room_is_rejected_before_replay_starts() -> None:
+    room = api_room(source_availability=SourceAvailability.UNAVAILABLE).model_copy(
+        update={
+            "slug": "2027-future-grand-prix-race",
+            "is_development": False,
+            "scheduled_start": datetime(2027, 7, 18, 12, tzinfo=UTC),
+            "status": RoomStatus.PENDING,
+            "mode": RoomMode.REPLAY,
+            "session_key": None,
+            "replay_available": False,
+        }
+    )
+    services = route_services(room)
+
+    with pytest.raises(HTTPException) as error:
+        await start_replay(room.slug, services, ReplayRequest())
+
+    assert error.value.status_code == 409
+    assert "has not started" in str(error.value.detail)
+    services.room_replay.start.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -275,6 +366,12 @@ async def test_replay_route_dispatches_explicit_actions(
         ({"action": "resume"}, "resume", None),
         ({"action": "set_speed", "playback_speed": 4}, "set_speed", 4),
         ({"action": "seek_to_lap", "lap_number": 8}, "seek_to_lap", 8),
+        ({"action": "seek_to_phase", "phase": "Q2"}, "seek_to_phase", "Q2"),
+        (
+            {"action": "seek_to_session_time", "session_time": 932.5},
+            "seek_to_session_time",
+            932.5,
+        ),
         (
             {"action": "seek_to_sequence", "sequence": 12},
             "seek_to_sequence",
@@ -285,7 +382,7 @@ async def test_replay_route_dispatches_explicit_actions(
 async def test_playback_route_dispatches_each_control(
     payload: dict[str, object],
     method: str,
-    expected: int | None,
+    expected: int | float | str | None,
 ) -> None:
     room = api_room()
     services = route_services(room)

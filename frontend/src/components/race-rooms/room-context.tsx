@@ -64,22 +64,24 @@ export function RoomContext({ slug, detail, playback }: RoomContextProps) {
   };
 
   return <>
-    <button ref={triggerRef} className="mobile-context-trigger control-button" type="button" aria-expanded={contextOpen} aria-controls="race-context-sheet" onClick={() => setContextOpen(true)}>Race context &amp; data <span aria-hidden>↑</span></button>
-    {contextOpen && <button className="context-backdrop" type="button" aria-label="Close race context" onClick={() => setContextOpen(false)} />}
+    <button ref={triggerRef} className="mobile-context-trigger control-button" type="button" aria-expanded={contextOpen} aria-controls="race-context-sheet" onClick={() => setContextOpen(true)}>Session details <span aria-hidden>↑</span></button>
+    {contextOpen && <button className="context-backdrop" type="button" aria-label="Close session details" onClick={() => setContextOpen(false)} />}
     <aside ref={sheetRef} id="race-context-sheet" className={`context-column ${contextOpen ? "context-column--open" : ""}`} aria-labelledby="race-context-title" role={contextOpen && compactViewport ? "dialog" : undefined} aria-modal={contextOpen && compactViewport || undefined} aria-hidden={compactViewport && !contextOpen || undefined} inert={compactViewport && !contextOpen || undefined}>
-    <button ref={closeRef} className="context-close icon-button" type="button" aria-label="Close race context" onClick={() => setContextOpen(false)}>×</button>
+    <button ref={closeRef} className="context-close icon-button" type="button" aria-label="Close session details" onClick={() => setContextOpen(false)}>×</button>
     <section className="context-card">
-      <p className="section-kicker">Room context</p><h2 id="race-context-title">Race data</h2>
+      <p className="section-kicker">At a glance</p><h2 id="race-context-title">Session details</h2>
       <dl className="context-list">
         <div><dt>Session</dt><dd>{room.session_type}</dd></div>
-        <div><dt>Mode</dt><dd>{room.mode}</dd></div>
         <div><dt>Room status</dt><dd><span className={`status status--${room.status}`}>{room.status}</span></dd></div>
         <div><dt>Coverage</dt><dd>{room.source_availability.replaceAll("_", " ")}</dd></div>
-        <div><dt>Telemetry quality</dt><dd>{room.telemetry_quality.replaceAll("_", " ")}</dd></div>
-        <div><dt>Current event</dt><dd>#{playback.current_event_sequence}</dd></div>
         <div><dt>Last activity</dt><dd>{formatDate(room.last_event_at)}</dd></div>
       </dl>
       <p className="data-notice">{detail.data_notice}</p>
+      <details className="room-context-technical"><summary>Technical details</summary><dl className="context-list">
+        <div><dt>Mode</dt><dd>{room.mode}</dd></div>
+        <div><dt>Telemetry quality</dt><dd>{room.telemetry_quality.replaceAll("_", " ")}</dd></div>
+        <div><dt>Current event</dt><dd>#{playback.current_event_sequence}</dd></div>
+      </dl></details>
       {room.is_development && <p className="fixture-notice"><b>Validation fixture</b><span>This room uses deterministic synthetic race data. It does not represent a real event or championship result.</span></p>}
     </section>
     {detail.diagnostics_available && <details className="diagnostics-card" onToggle={(event) => { if (event.currentTarget.open) loadDiagnostics(); }}>
