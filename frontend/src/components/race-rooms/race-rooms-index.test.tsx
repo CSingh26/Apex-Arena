@@ -65,6 +65,12 @@ describe("RaceRoomsIndex", () => {
     getRaceRoomEvents.mockResolvedValue({ events: [upcomingSprint, completedLater, validationWeekend, liveWeekend, weekend()], total: 4, limit: 100, offset: 0 });
   });
 
+  it("uses the themed race loader while the schedule is pending", () => {
+    getRaceRoomEvents.mockReturnValue(new Promise(() => undefined));
+    render(<RaceRoomsIndex />);
+    expect(screen.getByRole("status", { name: "Mapping the 2026 race grid" })).toBeVisible();
+  });
+
   it("renders three grouped categories, concise session actions, and excludes validation fixtures", async () => {
     render(<RaceRoomsIndex />);
     expect(screen.getByRole("heading", { name: "Race Rooms" })).toBeVisible();

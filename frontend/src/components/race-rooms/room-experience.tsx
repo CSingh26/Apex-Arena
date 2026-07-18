@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { AppNavigation } from "@/components/navigation/app-navigation";
+import { ApexRaceLoader } from "@/components/loading/apex-race-loader";
 import { AgentRoster } from "@/components/race-rooms/agent-roster";
 import { CircuitOutline } from "@/components/race-rooms/circuit-outline";
 import { EvidenceDrawer } from "@/components/race-rooms/evidence-drawer";
@@ -143,7 +144,7 @@ export function RoomExperience({ slug }: { slug: string }) {
 
   const closeEvidence = useCallback(() => setSelectedMessage(null), []);
 
-  if (loading) return <main className="room-page track-grid"><div className="room-loading" role="status"><span className="spinner spinner--large" /><p className="section-kicker">Joining the room</p><h1>Preparing race context…</h1></div></main>;
+  if (loading) return <main className="room-page track-grid"><ApexRaceLoader label="Joining the race room" /></main>;
   if (error || !detail || !playback) return <main className="room-page track-grid"><div className="room-state room-state--error room-state--centered" role="alert"><span aria-hidden>!</span><b>Room unavailable</b><p>{error ?? "The room response was incomplete."}</p><div><button className="control-button" type="button" onClick={() => { setLoading(true); setError(null); setReloadKey((value) => value + 1); }}>Try again</button><Link className="control-button" href="/race-rooms">All Race Rooms</Link></div></div></main>;
 
   const { room, agents } = detail;

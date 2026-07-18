@@ -3699,7 +3699,6 @@ body {
 .message-feed::-webkit-scrollbar { width: 8px; }
 .message-feed::-webkit-scrollbar-track { background: color-mix(in srgb, var(--panel) 80%, transparent); }
 .message-feed::-webkit-scrollbar-thumb { border-radius: 999px; background: linear-gradient(var(--apex-coral), var(--apex-violet)); }
-}
 
 .message {
   position: relative;
@@ -3895,6 +3894,7 @@ body {
 .apex-race-loader > p { margin: 0; color: var(--muted); font: 700 .61rem var(--font-mono), monospace; letter-spacing: .09em; text-transform: uppercase; }
 .apex-race-loader--compact { min-height: 150px; }
 .apex-race-loader--compact .apex-race-loader__stage { width: 180px; }
+.route-loading { width: min(1460px, 100%); min-height: 100vh; margin-inline: auto; padding-inline: 34px; }
 
 @keyframes apex-track-charge { to { stroke-dashoffset: -100; } }
 @keyframes apex-mark-pulse { 0%, 100% { opacity: .72; transform: scale(.96); } 50% { opacity: 1; transform: scale(1.04); } }

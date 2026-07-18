@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { AppNavigation } from "@/components/navigation/app-navigation";
+import { ApexRaceLoader } from "@/components/loading/apex-race-loader";
 import { CircuitOutline } from "@/components/race-rooms/circuit-outline";
 import { getRaceRoomEvents } from "@/lib/api";
 import type { EventSessionSummary, EventWeekendStatus, RaceRoomEvent } from "@/lib/types";
@@ -270,7 +271,7 @@ export function RaceRoomsIndex() {
       </div>
     </section>
     <div className="results-summary" aria-live="polite"><span>{refreshing ? "Refreshing weekends…" : `${total} ${total === 1 ? "weekend" : "weekends"}`}</span>{filtersActive && <span>Grouped results</span>}</div>
-    {loading && <div className="event-skeletons" role="status" aria-label="Loading race weekends"><span /><span /><span /></div>}
+    {loading && <ApexRaceLoader label="Mapping the 2026 race grid" compact />}
     {error && <div className="room-state room-state--error" role="alert"><b>Schedule unavailable</b><p>{error}</p><button className="control-button" type="button" onClick={() => setRetryKey((value) => value + 1)}>Try again</button></div>}
     {!loading && !error && <div className="event-categories">
       <WeekendCountdown events={events} now={now} onPreview={openPreview} />
