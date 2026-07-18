@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 
 OPENF1_ENDPOINTS = frozenset(
     {
+        "meetings",
         "sessions",
         "drivers",
         "position",
@@ -35,8 +36,13 @@ OPENF1_ENDPOINTS = frozenset(
         "stints",
         "race_control",
         "weather",
+        "session_result",
+        "starting_grid",
+        "car_data",
+        "location",
     }
 )
+OPENF1_HIGH_FREQUENCY_ENDPOINTS = frozenset({"car_data", "location"})
 FILTER_PATTERN = re.compile(r"^[a-z][a-z0-9_]*(?:<=|>=|<|>)?$")
 
 
@@ -52,6 +58,11 @@ class OpenF1RestClient:
         settings: Settings,
         client: httpx.AsyncClient | None = None,
         token_provider: Callable[[], Awaitable[str]] | None = None,
+        *,
+        retry_attempts: int | None = None,
+        retry_base_delay_seconds: float | None = None,
+        min_request_interval_seconds: float | None = None,
+        cache_ttl_seconds: float | None = None,
     ) -> None:
         self.base_url = settings.openf1_rest_base_url
         self._owns_client = client is None
@@ -61,6 +72,33 @@ class OpenF1RestClient:
             headers={"Accept": "application/json", "User-Agent": "Apex-Arena/0.1"},
         )
         self.token_provider = token_provider
+        self.retry_attempts = max(
+            1,
+            retry_attempts
+            if retry_attempts is not None
+            else settings.historical_provider_retry_attempts,
+        )
+        self.retry_base_delay_seconds = max(
+            0.0,
+            retry_base_delay_seconds
+            if retry_base_delay_seconds is not None
+            else settings.historical_provider_retry_base_delay_ms / 1000,
+        )
+        self.min_request_interval_seconds = max(
+            0.0,
+            min_request_interval_seconds
+            if min_request_interval_seconds is not None
+            else settings.historical_provider_min_interval_ms / 1000,
+        )
+        self.cache_ttl_seconds = max(
+            0.0,
+            cache_ttl_seconds
+            if cache_ttl_seconds is not None
+            else settings.historical_provider_cache_ttl_seconds,
+        )
+        self._next_request_at = 0.0
+        self._request_lock = asyncio.Lock()
+        self._cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 
     @property
     def status(self) -> dict[str, Any]:
@@ -92,19 +130,72 @@ class OpenF1RestClient:
             if value is not None:
                 params[key] = value
 
-        response = await self.client.get(endpoint, params=params)
-        if response.status_code == 401 and self.token_provider is not None:
-            token = await self.token_provider()
-            response = await self.client.get(
-                endpoint,
-                params=params,
-                headers={"Authorization": f"Bearer {token}"},
-            )
+        cache_key = json.dumps([endpoint, sorted(params.items())], separators=(",", ":"))
+        now = time.monotonic()
+        if len(self._cache) >= 512:
+            self._cache = {key: value for key, value in self._cache.items() if value[0] > now}
+            if len(self._cache) >= 512:
+                oldest = min(self._cache, key=lambda key: self._cache[key][0])
+                self._cache.pop(oldest, None)
+        cached = self._cache.get(cache_key)
+        if cached is not None and cached[0] > now:
+            return [dict(row) for row in cached[1]]
+
+        response: httpx.Response | None = None
+        last_request_error: httpx.RequestError | None = None
+        for attempt in range(self.retry_attempts):
+            await self._throttle()
+            try:
+                response = await self.client.get(endpoint, params=params)
+                if response.status_code == 401 and self.token_provider is not None:
+                    token = await self.token_provider()
+                    await self._throttle()
+                    response = await self.client.get(
+                        endpoint,
+                        params=params,
+                        headers={"Authorization": f"Bearer {token}"},
+                    )
+            except httpx.RequestError as exc:
+                last_request_error = exc
+                if attempt + 1 >= self.retry_attempts:
+                    raise
+                await asyncio.sleep(self._retry_delay(attempt))
+                continue
+            if response.status_code not in {429, 500, 502, 503, 504}:
+                break
+            if attempt + 1 >= self.retry_attempts:
+                break
+            retry_after = response.headers.get("Retry-After")
+            try:
+                server_delay = float(retry_after) if retry_after is not None else 0.0
+            except ValueError:
+                server_delay = 0.0
+            await asyncio.sleep(max(server_delay, self._retry_delay(attempt)))
+
+        if response is None:
+            assert last_request_error is not None
+            raise last_request_error
         response.raise_for_status()
         data = response.json()
-        if not isinstance(data, list):
+        if not isinstance(data, list) or not all(isinstance(row, dict) for row in data):
             raise ProviderPayloadError("OpenF1 returned an unexpected response shape")
-        return data
+        rows = [dict(row) for row in data]
+        if self.cache_ttl_seconds:
+            self._cache[cache_key] = (time.monotonic() + self.cache_ttl_seconds, rows)
+        return [dict(row) for row in rows]
+
+    async def _throttle(self) -> None:
+        async with self._request_lock:
+            delay = self._next_request_at - time.monotonic()
+            if delay > 0:
+                await asyncio.sleep(delay)
+            self._next_request_at = time.monotonic() + self.min_request_interval_seconds
+
+    def _retry_delay(self, attempt: int) -> float:
+        return min(5.0, self.retry_base_delay_seconds * (2**attempt))
+
+    async def meetings(self, **filters: Any) -> list[dict[str, Any]]:
+        return await self._get("meetings", filters)
 
     async def sessions(self, **filters: Any) -> list[dict[str, Any]]:
         return await self._get("sessions", filters)
@@ -132,6 +223,18 @@ class OpenF1RestClient:
 
     async def weather(self, **filters: Any) -> list[dict[str, Any]]:
         return await self._get("weather", filters)
+
+    async def session_result(self, **filters: Any) -> list[dict[str, Any]]:
+        return await self._get("session_result", filters)
+
+    async def starting_grid(self, **filters: Any) -> list[dict[str, Any]]:
+        return await self._get("starting_grid", filters)
+
+    async def car_data(self, **filters: Any) -> list[dict[str, Any]]:
+        return await self._get("car_data", filters)
+
+    async def location(self, **filters: Any) -> list[dict[str, Any]]:
+        return await self._get("location", filters)
 
 
 class OpenF1AuthUnavailable(RuntimeError):

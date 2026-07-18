@@ -29,6 +29,7 @@ from app.api.streaming import session_event_stream
 from app.domain.models import MeetingLifecycleStatus
 from app.providers.jolpica import JolpicaPayloadError
 from app.services.container import AppServices
+from app.services.historical import HistoricalIngestionError
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -235,7 +236,7 @@ async def ingest_historical_session(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=str(exc),
         ) from exc
-    except httpx.HTTPError as exc:
+    except (httpx.HTTPError, HistoricalIngestionError) as exc:
         logger.warning("Historical OpenF1 provider unavailable: %s", type(exc).__name__)
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
