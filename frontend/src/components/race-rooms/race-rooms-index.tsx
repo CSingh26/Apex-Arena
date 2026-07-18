@@ -7,6 +7,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { AppNavigation } from "@/components/navigation/app-navigation";
 import { ApexRaceLoader } from "@/components/loading/apex-race-loader";
 import { CircuitOutline } from "@/components/race-rooms/circuit-outline";
+import { appRoutes } from "@/lib/app-paths";
 import { getRaceRoomEvents } from "@/lib/api";
 import type { EventSessionSummary, EventWeekendStatus, RaceRoomEvent } from "@/lib/types";
 
@@ -91,7 +92,7 @@ function SessionAction({ event, session, onPreview }: { event: RaceRoomEvent; se
   </>;
 
   if (canOpenRoom && session.room_slug) {
-    return <Link className="event-session" href={`/race-rooms/${session.room_slug}`} aria-label={`Open ${event.event_name} ${session.display_name}`}>{content}</Link>;
+    return <Link className="event-session" href={appRoutes.room(session.room_slug)} aria-label={`Open ${event.event_name} ${session.display_name}`}>{content}</Link>;
   }
   return <button className="event-session event-session--preview" type="button" onClick={() => onPreview(event, session)} aria-label={`View schedule for ${event.event_name} ${session.display_name}`}>{content}</button>;
 }
@@ -128,7 +129,7 @@ function WeekendCountdown({ events, now, onPreview }: { events: RaceRoomEvent[];
   return <section className="weekend-countdown" aria-labelledby="next-live-session-title">
     <div className="weekend-countdown__copy"><p><span className={live ? "live-pulse" : "signal-pulse"} />{live ? "Live now" : "Next live session"}</p><h2 id="next-live-session-title">{session.display_name}</h2><span>{event.event_name} · {event.circuit_name}</span><time dateTime={session.scheduled_start}>{formatDate(session.scheduled_start, true)}</time></div>
     {live ? <div className="weekend-countdown__live"><strong>On air</strong><span>The session is underway</span></div> : <div className="weekend-countdown__clock" aria-label={`Countdown to ${event.event_name} ${session.display_name}`}>{Object.entries(remaining).map(([unit, value]) => <span key={unit}><b>{String(value).padStart(2, "0")}</b><small>{unit}</small></span>)}</div>}
-    {canOpen && session.room_slug ? <Link className="weekend-countdown__action" href={`/race-rooms/${session.room_slug}`}>Join the room <span aria-hidden>→</span></Link> : <button className="weekend-countdown__action" type="button" onClick={() => onPreview(event, session)}>View session details <span aria-hidden>→</span></button>}
+    {canOpen && session.room_slug ? <Link className="weekend-countdown__action" href={appRoutes.room(session.room_slug)}>Join the room <span aria-hidden>→</span></Link> : <button className="weekend-countdown__action" type="button" onClick={() => onPreview(event, session)}>View session details <span aria-hidden>→</span></button>}
   </section>;
 }
 

@@ -61,7 +61,7 @@ const validationWeekend = weekend({ event_id: "validation", event_slug: "private
 describe("RaceRoomsIndex", () => {
   beforeEach(() => {
     getRaceRoomEvents.mockClear();
-    window.history.replaceState(null, "", "/race-rooms");
+    window.history.replaceState(null, "", "/rooms");
     getRaceRoomEvents.mockResolvedValue({ events: [upcomingSprint, completedLater, validationWeekend, liveWeekend, weekend()], total: 4, limit: 100, offset: 0 });
   });
 
@@ -85,7 +85,7 @@ describe("RaceRoomsIndex", () => {
     expect(completed).not.toBeNull();
     const headings = within(completed as HTMLElement).getAllByRole("heading", { level: 3 });
     expect(headings.map((heading) => heading.textContent)).toEqual(["Australian Grand Prix", "Japanese Grand Prix"]);
-    expect(within(completed as HTMLElement).getByRole("link", { name: /Open Australian Grand Prix Qualifying/ })).toHaveAttribute("href", "/race-rooms/australian-grand-prix-qualifying");
+    expect(within(completed as HTMLElement).getByRole("link", { name: /Open Australian Grand Prix Qualifying/ })).toHaveAttribute("href", "/rooms/australian-grand-prix-qualifying");
     expect(within(completed as HTMLElement).getByRole("img", { name: "Australian Grand Prix 2026 circuit layout" })).toBeVisible();
 
     const sprintCard = screen.getByRole("heading", { name: "Belgian Grand Prix" }).closest("article");

@@ -80,12 +80,14 @@ services:
       args:
         NEXT_PUBLIC_APP_NAME: ${NEXT_PUBLIC_APP_NAME:-Apex Arena}
         NEXT_PUBLIC_APP_URL: ${NEXT_PUBLIC_APP_URL:-http://localhost:3417}
-        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8764}
+        NEXT_PUBLIC_APP_BASE_PATH: ${NEXT_PUBLIC_APP_BASE_PATH:-}
     restart: unless-stopped
     environment:
       NODE_ENV: production
       HOSTNAME: 0.0.0.0
       PORT: 3000
+      APP_BASE_PATH: ${NEXT_PUBLIC_APP_BASE_PATH:-}
+      INTERNAL_BACKEND_URL: http://backend:8000
     ports:
       - "${FRONTEND_PORT:-3417}:3000"
     depends_on:
@@ -97,7 +99,7 @@ services:
           "CMD",
           "node",
           "-e",
-          "fetch('http://127.0.0.1:3000').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))",
+          "fetch('http://127.0.0.1:3000'+(process.env.APP_BASE_PATH||'')).then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))",
         ]
       interval: 10s
       timeout: 5s

@@ -15,11 +15,10 @@ import type {
   ReplayResponse,
   RoomDiagnostics,
 } from "@/lib/types";
-
-const API_URL = (process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000").replace(/\/$/, "");
+import { apiPath } from "@/lib/app-paths";
 
 async function request<T>(path: string, signal?: AbortSignal): Promise<T> {
-  const response = await fetch(`${API_URL}${path}`, {
+  const response = await fetch(apiPath(path), {
     headers: { Accept: "application/json" },
     signal,
   });
@@ -30,7 +29,7 @@ async function request<T>(path: string, signal?: AbortSignal): Promise<T> {
 }
 
 async function mutate<T>(path: string, body?: object): Promise<T> {
-  const response = await fetch(`${API_URL}${path}`, {
+  const response = await fetch(apiPath(path), {
     method: "POST",
     headers: { Accept: "application/json", "Content-Type": "application/json" },
     body: body ? JSON.stringify(body) : undefined,
@@ -54,11 +53,11 @@ export function getHealth(signal?: AbortSignal): Promise<HealthResponse> {
 }
 
 export function getSeason(signal?: AbortSignal): Promise<SeasonCalendarSummary> {
-  return request<SeasonCalendarSummary>("/api/v1/season/2026", signal);
+  return request<SeasonCalendarSummary>("/season/2026", signal);
 }
 
 export function getEngineStatus(signal?: AbortSignal): Promise<EngineStatus> {
-  return request<EngineStatus>("/api/v1/engine/status", signal);
+  return request<EngineStatus>("/engine/status", signal);
 }
 
 export function getSessionEvents(
@@ -66,7 +65,7 @@ export function getSessionEvents(
   signal?: AbortSignal,
 ): Promise<SessionEventsResponse> {
   return request<SessionEventsResponse>(
-    `/api/v1/sessions/${encodeURIComponent(sessionKey)}/events`,
+    `/sessions/${encodeURIComponent(sessionKey)}/events`,
     signal,
   );
 }
@@ -76,49 +75,47 @@ export function getSessionState(
   signal?: AbortSignal,
 ): Promise<SessionStateResponse> {
   return request<SessionStateResponse>(
-    `/api/v1/sessions/${encodeURIComponent(sessionKey)}/state`,
+    `/sessions/${encodeURIComponent(sessionKey)}/state`,
     signal,
   );
 }
 
 export function sessionStreamUrl(sessionKey: string, lastSequenceNumber: number): string {
-  return `${API_URL}/api/v1/stream/sessions/${encodeURIComponent(sessionKey)}?last_sequence_number=${lastSequenceNumber}`;
+  return apiPath(`/stream/sessions/${encodeURIComponent(sessionKey)}?last_sequence_number=${lastSequenceNumber}`);
 }
 
 export function getRaceRooms(params: URLSearchParams, signal?: AbortSignal): Promise<RaceRoomListResponse> {
-  return request<RaceRoomListResponse>(`/api/v1/race-rooms?${params}`, signal);
+  return request<RaceRoomListResponse>(`/rooms?${params}`, signal);
 }
 
 export function getRaceRoomEvents(params: URLSearchParams, signal?: AbortSignal): Promise<RaceRoomEventsResponse> {
-  return request<RaceRoomEventsResponse>(`/api/v1/race-rooms/events?${params}`, signal);
+  return request<RaceRoomEventsResponse>(`/weekends?${params}`, signal);
 }
 
 export function getRaceRoom(slug: string, signal?: AbortSignal): Promise<RaceRoomDetailResponse> {
-  return request<RaceRoomDetailResponse>(`/api/v1/race-rooms/${encodeURIComponent(slug)}`, signal);
+  return request<RaceRoomDetailResponse>(`/rooms/${encodeURIComponent(slug)}`, signal);
 }
 
 export function getRoomMessages(slug: string, query = "", signal?: AbortSignal): Promise<RoomMessagesResponse> {
-  return request<RoomMessagesResponse>(`/api/v1/race-rooms/${encodeURIComponent(slug)}/messages${query ? `?${query}` : ""}`, signal);
+  return request<RoomMessagesResponse>(`/rooms/${encodeURIComponent(slug)}/messages${query ? `?${query}` : ""}`, signal);
 }
 
 export function getMessageEvidence(slug: string, id: string): Promise<MessageEvidenceResponse> {
-  return request<MessageEvidenceResponse>(`/api/v1/race-rooms/${encodeURIComponent(slug)}/messages/${id}/evidence`);
+  return request<MessageEvidenceResponse>(`/rooms/${encodeURIComponent(slug)}/messages/${id}/evidence`);
 }
 
 export function updateRoomPlayback(slug: string, body: PlaybackAction): Promise<ReplayResponse> {
-  return mutate(`/api/v1/race-rooms/${encodeURIComponent(slug)}/playback`, body);
+  return mutate(`/rooms/${encodeURIComponent(slug)}/playback`, body);
 }
 
 export function startRoomReplay(slug: string, action: ReplayAction): Promise<ReplayResponse> {
-  return mutate(`/api/v1/race-rooms/${encodeURIComponent(slug)}/replay`, { action });
+  return mutate(`/rooms/${encodeURIComponent(slug)}/replay`, { action });
 }
 
 export function getRoomDiagnostics(slug: string, signal?: AbortSignal): Promise<RoomDiagnostics> {
-  return request<RoomDiagnostics>(`/api/v1/race-rooms/${encodeURIComponent(slug)}/diagnostics`, signal);
+  return request<RoomDiagnostics>(`/rooms/${encodeURIComponent(slug)}/diagnostics`, signal);
 }
 
 export function roomStreamUrl(slug: string, afterSequence = 0): string {
-  return `${API_URL}/api/v1/race-rooms/${encodeURIComponent(slug)}/stream?after_sequence=${afterSequence}`;
+  return apiPath(`/rooms/${encodeURIComponent(slug)}/stream?after_sequence=${afterSequence}`);
 }
-
-export { API_URL };
