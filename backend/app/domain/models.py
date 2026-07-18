@@ -58,6 +58,11 @@ class Season(BaseModel):
     meetings: list[RaceMeeting] = Field(default_factory=list)
 
 
+class RaceWeekendSession(BaseModel):
+    name: str
+    starts_at: datetime
+
+
 class RaceMeeting(BaseModel):
     id: UUID = Field(default_factory=uuid4)
     season_year: int
@@ -72,6 +77,7 @@ class RaceMeeting(BaseModel):
     status: MeetingLifecycleStatus
     is_target: bool = False
     source_url: str | None = None
+    sessions: list[RaceWeekendSession] = Field(default_factory=list)
 
 
 class Session(BaseModel):

@@ -42,6 +42,10 @@ def calendar_payload() -> dict[str, object]:
                         },
                         "date": "2026-07-19",
                         "time": "13:00:00Z",
+                        "FirstPractice": {"date": "2026-07-17", "time": "11:30:00Z"},
+                        "SprintQualifying": {"date": "2026-07-17", "time": "15:30:00Z"},
+                        "Sprint": {"date": "2026-07-18", "time": "10:00:00Z"},
+                        "Qualifying": {"date": "2026-07-18", "time": "14:00:00Z"},
                     },
                 ]
             }
@@ -67,6 +71,14 @@ async def test_calendar_normalization_highlights_spa(settings: Settings) -> None
     assert races[1].status == MeetingLifecycleStatus.UPCOMING
     assert races[1].is_target is True
     assert races[1].circuit_name == "Circuit de Spa-Francorchamps"
+    assert [session.name for session in races[1].sessions] == [
+        "Practice 1",
+        "Sprint Qualifying",
+        "Sprint",
+        "Qualifying",
+        "Race",
+    ]
+    assert races[1].sessions[-1].starts_at == races[1].race_start
     await http_client.aclose()
 
 

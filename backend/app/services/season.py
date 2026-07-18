@@ -6,11 +6,21 @@ from datetime import UTC, datetime, timedelta
 from uuid import NAMESPACE_URL, uuid5
 
 from app.core.settings import Settings
-from app.domain.models import MeetingLifecycleStatus, RaceMeeting
+from app.domain.models import MeetingLifecycleStatus, RaceMeeting, RaceWeekendSession
 from app.providers.jolpica import JolpicaClient
 
 
 class SeasonService:
+    SESSION_FIELDS = (
+        ("FirstPractice", "Practice 1"),
+        ("SecondPractice", "Practice 2"),
+        ("ThirdPractice", "Practice 3"),
+        ("SprintQualifying", "Sprint Qualifying"),
+        ("SprintShootout", "Sprint Qualifying"),
+        ("Sprint", "Sprint"),
+        ("Qualifying", "Qualifying"),
+    )
+
     def __init__(self, settings: Settings, jolpica: JolpicaClient) -> None:
         self.settings = settings
         self.jolpica = jolpica
@@ -67,7 +77,25 @@ class SeasonService:
             status=status,
             is_target=is_target,
             source_url=str(race["url"]) if race.get("url") else None,
+            sessions=self._sessions(race, race_start),
         )
+
+    def _sessions(self, race: dict[str, object], race_start: datetime) -> list[RaceWeekendSession]:
+        sessions: list[RaceWeekendSession] = []
+        seen: set[tuple[str, datetime]] = set()
+        for field, name in self.SESSION_FIELDS:
+            value = race.get(field)
+            if not isinstance(value, dict) or not value.get("date"):
+                continue
+            starts_at = datetime.fromisoformat(
+                f"{value['date']}T{value.get('time') or '00:00:00Z'}".replace("Z", "+00:00")
+            )
+            key = (name, starts_at)
+            if key not in seen:
+                sessions.append(RaceWeekendSession(name=name, starts_at=starts_at))
+                seen.add(key)
+        sessions.append(RaceWeekendSession(name="Race", starts_at=race_start))
+        return sorted(sessions, key=lambda session: session.starts_at)
 
     @staticmethod
     def _slug(value: str) -> str:
