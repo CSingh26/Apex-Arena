@@ -111,6 +111,11 @@ Availability is derived from records actually fetched and normalized:
 Session discovery by itself does **not** mean telemetry is available. After ingestion, the adapter
 updates the matched room's ingestion status, data availability, result flag, and replay flag.
 
+For live weekends, authenticated MQTT intake and the catalog reconciler are separate safeguards:
+the former receives provider events, while the latter binds a newly published session key to its
+scheduled room every 60 seconds. Neither path creates telemetry when the provider has not exposed
+the session. Operational checks are documented in `docs/live-race-operations.md`.
+
 ### Provider matching
 
 Jolpica weekends and OpenF1 sessions are matched using season, race date, normalized country,

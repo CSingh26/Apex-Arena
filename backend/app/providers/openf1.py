@@ -389,7 +389,10 @@ class OpenF1LiveClient:
             self.settings.openf1_mqtt_port,
             keepalive=60,
         )
-        if result != mqtt.MQTT_ERR_SUCCESS:
+        # Paho 2.x returns ``None`` when async connection setup is accepted;
+        # older/test clients return MQTT_ERR_SUCCESS (0). Both mean the
+        # network loop should start and deliver the eventual CONNACK callback.
+        if result not in {None, mqtt.MQTT_ERR_SUCCESS}:
             await self._set_state(
                 LiveConnectionState.ERROR,
                 f"MQTT connect setup failed with code {result}",

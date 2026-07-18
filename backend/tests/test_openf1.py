@@ -39,8 +39,8 @@ class FakeMqttClient:
     def reconnect_delay_set(self, **_: Any) -> None:
         return None
 
-    def connect_async(self, host: str, port: int, keepalive: int) -> int:
-        return 0
+    def connect_async(self, host: str, port: int, keepalive: int) -> None:
+        return None
 
     def loop_start(self) -> None:
         self.started = True

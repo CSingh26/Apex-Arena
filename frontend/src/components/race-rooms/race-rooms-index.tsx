@@ -42,7 +42,9 @@ function availabilityLabel(session: EventSessionSummary): string {
   if (session.data_availability === "limited_telemetry") return "Some timing data missing";
   if (session.data_availability === "timing_only") return "Timing data only";
   if (session.data_availability === "telemetry") return "Telemetry available";
-  if (session.data_availability === "unavailable") return "OpenF1 data unavailable";
+  if (session.data_availability === "unavailable" && session.status === "scheduled") return "Live feed arms at session start";
+  if (session.data_availability === "unavailable" && session.status === "completed") return "Provider data not published yet";
+  if (session.data_availability === "unavailable") return "Waiting for the live provider feed";
   if (session.status === "ingesting" || session.status === "provider_pending") return "Session data is being prepared";
   return "Schedule confirmed";
 }

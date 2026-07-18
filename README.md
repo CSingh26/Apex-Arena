@@ -231,6 +231,13 @@ present. It subscribes to configured `v1/*` topics, forwards dictionary payloads
 processor, publishes safe connection state, and reconnects with bounded backoff. Provider tokens
 and credentials never reach the browser, response bodies, or logs.
 
+When live auto-connect is enabled, a background catalog reconciler refreshes Jolpica/OpenF1 every
+`OPENF1_LIVE_CATALOG_SYNC_SECONDS` (60 seconds by default). This binds a newly published provider
+session key to the scheduled Race Room without a manual sync. MQTT then feeds position, interval,
+lap, pit, stint, race-control, weather, driver, and session messages through the same idempotent
+engine used for replay. See [`docs/live-race-operations.md`](docs/live-race-operations.md) for the
+race-day checklist and honest provider limitations.
+
 `HistoricalOpenF1Adapter` ingests one session through metadata, timing, strategy, context, and
 classification stages; caps records per endpoint; isolates endpoint failures; and passes records
 through the same idempotent processor. High-frequency car/location data is opt-in. The mutating
@@ -330,8 +337,9 @@ ports to the containers' standard ports; application code needs no changes.
   yet replayed automatically into the reducer.
 - Historical ingestion and provider caching are process-local orchestration, not a distributed job
   queue; completed run summaries remain durable in PostgreSQL.
-- SSE is the only client streaming transport today. Live MQTT depends on valid OpenF1 subscription
-  credentials and is deliberately disabled by default.
+- SSE is the browser streaming transport. Backend live MQTT depends on valid OpenF1 subscription
+  credentials and `OPENF1_LIVE_AUTO_CONNECT=true`; the checked-in example enables it, while a
+  deployment can still opt out explicitly.
 - Past rooms can only discuss telemetry that has actually been ingested; results-only rooms do not
   invent lap, tyre, radio, or classification detail.
 - Playback state is persistent and shared per room, rather than private to each viewer.
