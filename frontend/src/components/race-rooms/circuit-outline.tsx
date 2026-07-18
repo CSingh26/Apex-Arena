@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
+import Image from "next/image";
 
 type CircuitOutlineProps = {
   circuitName: string;
@@ -6,30 +7,49 @@ type CircuitOutlineProps = {
   compact?: boolean;
 };
 
-const CIRCUIT_PATHS: Array<[RegExp, string]> = [
-  [/spa|francorchamps/i, "M20 82 C31 69 41 49 51 25 C57 12 68 15 72 29 L82 58 C86 68 77 77 65 70 L49 60 C41 55 34 64 37 73 C41 85 31 93 20 82 Z"],
-  [/silverstone/i, "M15 58 L31 42 L40 18 L51 27 L65 22 L82 31 L72 47 L87 60 L73 82 L56 73 L43 87 L25 80 L31 65 Z"],
-  [/monza/i, "M20 77 L29 22 C31 14 42 12 47 20 L54 35 L79 27 C88 25 91 37 84 43 L65 58 L79 77 C84 84 76 91 68 87 L49 77 L32 88 C25 92 18 85 20 77 Z"],
-  [/monaco/i, "M17 73 C22 56 22 35 38 25 C50 17 62 20 68 29 C75 39 64 46 54 42 C46 39 41 47 47 55 L74 75 C82 82 75 91 65 87 L44 78 C35 74 29 87 20 83 C16 81 15 77 17 73 Z"],
-  [/suzuka/i, "M17 65 C25 45 41 27 61 24 C79 21 88 36 78 48 C68 60 48 47 40 57 C31 68 51 83 68 75 C78 70 87 78 80 86 C70 96 50 91 37 82 L17 68 Z"],
-  [/miami/i, "M16 73 L24 25 L41 18 L52 35 L78 26 L86 42 L70 54 L84 76 L69 87 L49 72 L29 87 Z"],
-  [/hungaroring/i, "M19 69 C20 42 34 21 58 20 C78 20 88 36 78 49 C70 59 55 49 47 59 C39 69 55 78 70 73 C82 69 88 81 78 88 C60 99 36 89 19 73 Z"],
+// Layouts are pinned from julesr0y/f1-circuits-svg v2026.2.1 (CC BY 4.0).
+// Each identifier below is the repository's layout tagged for the 2026 season.
+const CIRCUIT_ASSETS: Array<[RegExp, string]> = [
+  [/albert park|melbourne/i, "melbourne-2"],
+  [/bahrain|sakhir/i, "bahrain-1"],
+  [/shanghai/i, "shanghai-1"],
+  [/suzuka/i, "suzuka-2"],
+  [/miami/i, "miami-1"],
+  [/gilles villeneuve|montreal/i, "montreal-6"],
+  [/monaco|monte carlo/i, "monaco-6"],
+  [/catalunya|barcelona/i, "catalunya-6"],
+  [/spielberg|red bull ring/i, "spielberg-3"],
+  [/silverstone/i, "silverstone-8"],
+  [/spa|francorchamps/i, "spa-francorchamps-4"],
+  [/hungaroring|budapest/i, "hungaroring-3"],
+  [/zandvoort/i, "zandvoort-5"],
+  [/monza/i, "monza-7"],
+  [/madring|madrid/i, "madring-1"],
+  [/baku/i, "baku-1"],
+  [/marina bay|singapore/i, "marina-bay-4"],
+  [/americas|austin|cota/i, "austin-1"],
+  [/hermanos rodr.guez|mexico city/i, "mexico-city-3"],
+  [/jos. carlos pace|interlagos|s.o paulo/i, "interlagos-2"],
+  [/las vegas/i, "las-vegas-1"],
+  [/lusail|losail|qatar/i, "lusail-1"],
+  [/yas marina|abu dhabi/i, "yas-marina-2"],
+  [/jeddah/i, "jeddah-1"],
 ];
 
-const DEFAULT_PATH = "M16 67 C22 38 40 18 65 22 C84 25 90 43 76 55 L63 66 L81 78 C88 84 81 92 72 88 L48 78 L30 88 C21 93 13 84 16 67 Z";
-
-export function circuitPath(circuitName: string): string {
-  return CIRCUIT_PATHS.find(([pattern]) => pattern.test(circuitName))?.[1] ?? DEFAULT_PATH;
+export function circuitAssetId(circuitName: string): string | null {
+  return CIRCUIT_ASSETS.find(([pattern]) => pattern.test(circuitName))?.[1] ?? null;
 }
 
 export function CircuitOutline({ circuitName, eventName, compact = false }: CircuitOutlineProps) {
-  const label = `${eventName ?? circuitName} circuit outline`;
-  return <div className={compact ? "circuit-outline circuit-outline--compact" : "circuit-outline"}>
-    <svg viewBox="0 0 100 100" role="img" aria-label={label}>
-      <path className="circuit-outline__shadow" d={circuitPath(circuitName)} pathLength="100" />
-      <path className="circuit-outline__track" d={circuitPath(circuitName)} pathLength="100" />
-      <circle className="circuit-outline__start" cx="20" cy="82" r="3" />
-    </svg>
-    {!compact && <span><i /> Circuit trace</span>}
+  const assetId = circuitAssetId(circuitName);
+  const label = `${eventName ?? circuitName} 2026 circuit layout`;
+  const className = compact ? "circuit-outline circuit-outline--compact" : "circuit-outline";
+
+  return <div className={className}>
+    {assetId ? <div className="circuit-outline__art" role="img" aria-label={label}>
+      <Image className="circuit-outline__asset circuit-outline__asset--dark" src={`/circuits/2026/white-outline/${assetId}.svg`} alt="" fill sizes={compact ? "96px" : "210px"} unoptimized />
+      <Image className="circuit-outline__asset circuit-outline__asset--light" src={`/circuits/2026/black-outline/${assetId}.svg`} alt="" fill sizes={compact ? "96px" : "210px"} unoptimized />
+    </div> : <div className="circuit-outline__unavailable" role="img" aria-label={`${label} unavailable`}>Layout unavailable</div>}
+    {!compact && <span title="Circuit artwork by Jules Roy, CC BY 4.0"><i /> 2026 circuit trace</span>}
   </div>;
 }

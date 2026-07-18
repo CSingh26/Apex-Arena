@@ -3858,15 +3858,15 @@ body {
   pointer-events: none;
 }
 
-.circuit-outline svg { width: 100%; overflow: visible; }
-.circuit-outline path { fill: none; stroke-linecap: round; stroke-linejoin: round; }
-.circuit-outline__shadow { stroke: rgb(2 6 23 / 45%); stroke-width: 10; }
-.circuit-outline__track { stroke: currentColor; stroke-width: 3.2; filter: drop-shadow(0 0 9px rgb(81 229 212 / 45%)); }
-.circuit-outline__start { fill: var(--apex-coral); stroke: var(--foreground); stroke-width: 1.5; filter: drop-shadow(0 0 5px var(--apex-coral)); }
+.circuit-outline__art { position: relative; width: 100%; aspect-ratio: 1; filter: drop-shadow(0 0 10px rgb(81 229 212 / 35%)); }
+.circuit-outline__asset { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
+.circuit-outline__asset--light { display: none; }
+[data-theme="light"] .circuit-outline__asset--dark { display: none; }
+[data-theme="light"] .circuit-outline__asset--light { display: block; }
+.circuit-outline__unavailable { display: grid; width: 100%; aspect-ratio: 1; place-items: center; border: 1px dashed currentColor; border-radius: 50%; color: var(--muted); font: 700 .5rem var(--font-mono), monospace; text-align: center; text-transform: uppercase; }
 .circuit-outline > span { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font: 700 .52rem var(--font-mono), monospace; letter-spacing: .08em; text-transform: uppercase; }
 .circuit-outline > span i { width: 14px; height: 2px; background: currentColor; }
 .circuit-outline--compact { width: 96px; opacity: .85; }
-.circuit-outline--compact .circuit-outline__track { stroke-width: 4; }
 
 .apex-race-loader {
   display: grid;
