@@ -34,6 +34,8 @@ Server-Sent Events. The current discussion runtime is deterministic and requires
   weather, session results, and starting grids, with bounded retry, throttling, and caching.
 - Backend-only OpenF1 OAuth token acquisition, expiry-aware in-memory caching, TLS MQTT
   subscriptions, reconnect state, and clean shutdown. Missing credentials degrade only live mode.
+- Arena-style statistical debate with stable agent lanes, an independently scrollable chat,
+  evidence-linked counterpoints, a session timeline, circuit traces, and an original Apex loader.
 - Historical OpenF1 session ingestion through the exact same processor used by MQTT messages.
 - Deterministic raw and normalized deduplication, a configurable event-time ordering buffer, and
   monotonic per-session sequence numbers within one application process.
@@ -243,6 +245,9 @@ classification stages; caps records per endpoint; isolates endpoint failures; an
 through the same idempotent processor. High-frequency car/location data is opt-in. The mutating
 trigger is disabled unless both historical and debug ingestion are enabled and a private internal
 key is configured.
+
+The presentation and grounding rules for the current conversation experience are documented in
+[`docs/arena-chat-experience.md`](docs/arena-chat-experience.md).
 
 ## API endpoints
 
