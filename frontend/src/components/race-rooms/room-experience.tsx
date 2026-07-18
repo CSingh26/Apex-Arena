@@ -6,6 +6,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { AppNavigation } from "@/components/navigation/app-navigation";
 import { AgentRoster } from "@/components/race-rooms/agent-roster";
+import { CircuitOutline } from "@/components/race-rooms/circuit-outline";
 import { EvidenceDrawer } from "@/components/race-rooms/evidence-drawer";
 import { MessageTimeline } from "@/components/race-rooms/message-timeline";
 import { PlaybackControls } from "@/components/race-rooms/playback-controls";
@@ -153,7 +154,7 @@ export function RoomExperience({ slug }: { slug: string }) {
   return <main className="room-page track-grid">
     <AppNavigation contextLabel={`${room.race_name} · ${room.session_type}`} connection={connection} />
     <Link className="room-breadcrumb" href="/race-rooms"><span aria-hidden>←</span> All Race Rooms</Link>
-    <header className="room-header"><div><div className="room-header__meta"><span>Round {room.round_number ?? "—"}</span><span>{room.session_type.replaceAll("_", " ")}</span><span className={`status status--${room.status}`}>{room.status}</span></div><h1>{room.race_name}</h1><p>{room.circuit_name} · {room.country}</p></div><div className="session-progress"><span>{progressLabel}</span><b>{progressValue}</b>{!qualifying && room.total_laps != null && <small>/ {room.total_laps}</small>}</div></header>
+    <header className="room-header"><div><div className="room-header__meta"><span>Round {room.round_number ?? "—"}</span><span>{room.session_type.replaceAll("_", " ")}</span><span className={`status status--${room.status}`}>{room.status}</span></div><h1>{room.race_name}</h1><p>{room.circuit_name} · {room.country}</p></div><CircuitOutline circuitName={room.circuit_name} eventName={room.race_name} /><div className="session-progress"><span>{progressLabel}</span><b>{progressValue}</b>{!qualifying && room.total_laps != null && <small>/ {room.total_laps}</small>}</div></header>
     <div className="sticky-playback"><PlaybackControls room={room} playback={playback} busy={controlBusy} error={controlError} onReplay={runReplay} onControl={runControl} /></div>
     <AgentRoster agents={agents} selectedAgent={selectedAgent} onSelectAgent={setSelectedAgent} />
     <div className="room-layout">

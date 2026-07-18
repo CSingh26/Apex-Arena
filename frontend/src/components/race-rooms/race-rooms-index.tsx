@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { AppNavigation } from "@/components/navigation/app-navigation";
+import { CircuitOutline } from "@/components/race-rooms/circuit-outline";
 import { getRaceRoomEvents } from "@/lib/api";
 import type { EventSessionSummary, EventWeekendStatus, RaceRoomEvent } from "@/lib/types";
 
@@ -103,7 +104,7 @@ function EventCard({ event, onPreview }: { event: RaceRoomEvent; onPreview: Open
         <h3 id={`event-${event.event_id}`}>{event.event_name}</h3>
         <p>{event.circuit_name} · {event.country}</p>
       </div>
-      <div className="event-card__date"><b>{formatDate(event.weekend_start)}</b><span>{event.weekend_status === "completed" ? "Weekend complete" : event.weekend_status === "live" ? "This weekend" : "Scheduled"}</span></div>
+      <div className="event-card__side"><CircuitOutline circuitName={event.circuit_name} eventName={event.event_name} compact /><div className="event-card__date"><b>{formatDate(event.weekend_start)}</b><span>{event.weekend_status === "completed" ? "Weekend complete" : event.weekend_status === "live" ? "This weekend" : "Scheduled"}</span></div></div>
     </header>
     <div className="event-card__sessions" aria-label={`${event.event_name} sessions`}>
       {sessions.map((session) => <SessionAction event={event} session={session} onPreview={onPreview} key={`${event.event_id}-${session.session_type}`} />)}

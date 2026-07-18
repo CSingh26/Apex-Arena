@@ -80,6 +80,7 @@ describe("RaceRoomsIndex", () => {
     const headings = within(completed as HTMLElement).getAllByRole("heading", { level: 3 });
     expect(headings.map((heading) => heading.textContent)).toEqual(["Australian Grand Prix", "Japanese Grand Prix"]);
     expect(within(completed as HTMLElement).getByRole("link", { name: /Open Australian Grand Prix Qualifying/ })).toHaveAttribute("href", "/race-rooms/australian-grand-prix-qualifying");
+    expect(within(completed as HTMLElement).getByRole("img", { name: "Australian Grand Prix circuit outline" })).toBeVisible();
 
     const sprintCard = screen.getByRole("heading", { name: "Belgian Grand Prix" }).closest("article");
     expect(sprintCard).not.toBeNull();
