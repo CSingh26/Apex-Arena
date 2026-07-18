@@ -28,6 +28,75 @@ class RoomMode(StrEnum):
     DEVELOPMENT = "development"
 
 
+class SessionType(StrEnum):
+    """Stable session identities used across providers and public APIs.
+
+    The database table deliberately remains named ``race_rooms`` for compatibility,
+    but every persisted row now represents one competitive weekend session.
+    """
+
+    QUALIFYING = "QUALIFYING"
+    SPRINT_QUALIFYING = "SPRINT_QUALIFYING"
+    SPRINT = "SPRINT"
+    RACE = "RACE"
+
+    @classmethod
+    def from_provider_name(cls, value: str) -> SessionType | None:
+        normalized = " ".join(value.strip().replace("_", " ").replace("-", " ").casefold().split())
+        if normalized in {"sprint qualifying", "sprint shootout", "sprint qualification"}:
+            return cls.SPRINT_QUALIFYING
+        if normalized in {"sprint", "sprint race"}:
+            return cls.SPRINT
+        if normalized in {"qualifying", "qualification"}:
+            return cls.QUALIFYING
+        if normalized in {"race", "grand prix"}:
+            return cls.RACE
+        return None
+
+    @property
+    def display_name(self) -> str:
+        return {
+            SessionType.QUALIFYING: "Qualifying",
+            SessionType.SPRINT_QUALIFYING: "Sprint Qualifying",
+            SessionType.SPRINT: "Sprint",
+            SessionType.RACE: "Race",
+        }[self]
+
+
+class RoomEligibilityStatus(StrEnum):
+    ELIGIBLE_LIVE = "eligible_live"
+    ELIGIBLE_HISTORICAL = "eligible_historical"
+    FUTURE_READ_ONLY = "future_read_only"
+    UNAVAILABLE = "unavailable"
+    ALREADY_EXISTS = "already_exists"
+    PROVIDER_PENDING = "provider_pending"
+
+
+class IngestionStatus(StrEnum):
+    PENDING = "pending"
+    MATCHING = "matching"
+    FETCHING = "fetching"
+    NORMALIZING = "normalizing"
+    READY = "ready"
+    PARTIAL = "partial"
+    FAILED = "failed"
+    UNAVAILABLE = "unavailable"
+
+
+class WeekendStatus(StrEnum):
+    LIVE = "live"
+    COMPLETED = "completed"
+    UPCOMING = "upcoming"
+
+
+class PublicSessionStatus(StrEnum):
+    LIVE = "live"
+    COMPLETED = "completed"
+    UPCOMING = "upcoming"
+    PROVIDER_PENDING = "provider_pending"
+    UNAVAILABLE = "unavailable"
+
+
 class SourceAvailability(StrEnum):
     TELEMETRY = "telemetry"
     LIMITED = "limited_telemetry"
@@ -94,6 +163,8 @@ class AgentProfile(BaseModel):
 class RaceRoom(BaseModel):
     id: UUID = Field(default_factory=uuid4)
     slug: str
+    event_slug: str | None = None
+    meeting_key: str | None = None
     session_key: str | None = None
     season: int
     round_number: int | None = None
@@ -102,14 +173,21 @@ class RaceRoom(BaseModel):
     circuit_name: str
     country: str
     country_code: str | None = None
-    session_type: str = "Race"
+    session_type: SessionType = SessionType.RACE
     scheduled_start: datetime
     actual_start: datetime | None = None
+    weekend_start: datetime | None = None
+    weekend_end: datetime | None = None
+    is_sprint_weekend: bool = False
     status: RoomStatus
     mode: RoomMode
+    eligibility_status: RoomEligibilityStatus = RoomEligibilityStatus.PROVIDER_PENDING
+    ingestion_status: IngestionStatus = IngestionStatus.PENDING
     current_lap: int | None = None
     total_laps: int | None = None
     source_availability: SourceAvailability
+    replay_available: bool = False
+    results_available: bool = False
     telemetry_quality: str = "unknown"
     message_count: int = 0
     agent_count: int = 0
@@ -118,6 +196,36 @@ class RaceRoom(BaseModel):
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     is_featured: bool = False
     is_development: bool = False
+
+
+class SessionRoomSummary(BaseModel):
+    session_type: SessionType
+    display_name: str
+    scheduled_start: datetime
+    actual_start: datetime | None = None
+    status: PublicSessionStatus
+    room_slug: str | None = None
+    room_eligible: bool = False
+    eligibility: RoomEligibilityStatus
+    data_availability: SourceAvailability = SourceAvailability.UNAVAILABLE
+    replay_available: bool = False
+    results_available: bool = False
+
+
+class EventWeekend(BaseModel):
+    event_id: UUID
+    event_slug: str
+    meeting_key: str | None = None
+    season: int
+    round: int
+    event_name: str
+    circuit_name: str
+    country: str
+    weekend_start: datetime
+    weekend_end: datetime
+    weekend_status: WeekendStatus
+    is_sprint_weekend: bool
+    sessions: list[SessionRoomSummary] = Field(default_factory=list)
 
 
 class RaceRoomAgent(BaseModel):

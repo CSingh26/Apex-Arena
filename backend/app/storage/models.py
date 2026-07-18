@@ -219,10 +219,26 @@ class AgentProfileRecord(Base, TimestampMixin):
 
 class RaceRoomRecord(Base, TimestampMixin):
     __tablename__ = "race_rooms"
-    __table_args__ = (Index("ix_race_rooms_season_round", "season", "round_number"),)
+    __table_args__ = (
+        UniqueConstraint(
+            "season",
+            "round_number",
+            "session_type",
+            name="uq_race_rooms_event_session",
+        ),
+        UniqueConstraint("session_key", name="uq_race_rooms_provider_session_key"),
+        Index("ix_race_rooms_season_round", "season", "round_number"),
+        Index("ix_race_rooms_event_slug", "event_slug"),
+        Index("ix_race_rooms_meeting_key", "meeting_key"),
+        Index("ix_race_rooms_session_type", "session_type"),
+        Index("ix_race_rooms_eligibility_status", "eligibility_status"),
+        Index("ix_race_rooms_ingestion_status", "ingestion_status"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     slug: Mapped[str] = mapped_column(String(180), unique=True, index=True)
+    event_slug: Mapped[str] = mapped_column(String(180))
+    meeting_key: Mapped[str | None] = mapped_column(String(80), nullable=True)
     session_key: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
     season: Mapped[int] = mapped_column(Integer, index=True)
     round_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -231,14 +247,21 @@ class RaceRoomRecord(Base, TimestampMixin):
     circuit_name: Mapped[str] = mapped_column(String(180))
     country: Mapped[str] = mapped_column(String(100))
     country_code: Mapped[str | None] = mapped_column(String(3), nullable=True)
-    session_type: Mapped[str] = mapped_column(String(60), default="Race")
+    session_type: Mapped[str] = mapped_column(String(60), default="RACE")
     scheduled_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     actual_start: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    weekend_start: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    weekend_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    is_sprint_weekend: Mapped[bool] = mapped_column(Boolean, default=False)
     status: Mapped[str] = mapped_column(String(30), index=True)
     mode: Mapped[str] = mapped_column(String(30), index=True)
+    eligibility_status: Mapped[str] = mapped_column(String(30), default="provider_pending")
+    ingestion_status: Mapped[str] = mapped_column(String(30), default="pending")
     current_lap: Mapped[int | None] = mapped_column(Integer, nullable=True)
     total_laps: Mapped[int | None] = mapped_column(Integer, nullable=True)
     source_availability: Mapped[str] = mapped_column(String(40))
+    replay_available: Mapped[bool] = mapped_column(Boolean, default=False)
+    results_available: Mapped[bool] = mapped_column(Boolean, default=False)
     telemetry_quality: Mapped[str] = mapped_column(String(30), default="unknown")
     message_count: Mapped[int] = mapped_column(Integer, default=0)
     agent_count: Mapped[int] = mapped_column(Integer, default=0)
