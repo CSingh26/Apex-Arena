@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-import { RaceRoomsIndex } from "@/components/race-rooms/race-rooms-index";
+import { LandingPage } from "@/components/landing/landing-page";
 
 export default function Home() {
-  return <RaceRoomsIndex />;
+  return <LandingPage />;
 }
