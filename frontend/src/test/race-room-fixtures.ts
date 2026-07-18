@@ -21,7 +21,39 @@ export const room: RaceRoom = {
 
 export const playback: RoomPlayback = { room_id: room.id, current_event_sequence: 0, current_message_sequence: 0, current_lap: 0, playback_speed: 1, is_paused: true, started_at: null, updated_at: createdAt };
 
-export const detail: RaceRoomDetailResponse = { room, agents, playback, data_notice: "Detailed normalized telemetry is available.", diagnostics_available: true };
+export const detail: RaceRoomDetailResponse = {
+  room,
+  agents,
+  playback,
+  circuit: {
+    circuit_name: "Apex Validation Circuit",
+    records: [
+      { label: "Circuit length", value: "5.891 km", detail: null },
+      { label: "First Grand Prix", value: "1950", detail: null },
+      { label: "Race lap record", value: "1:27.097", detail: "Max Verstappen · 2020" },
+    ],
+    facts: [
+      "The circuit began life as an airfield perimeter road.",
+      "Its fastest sequence rewards aerodynamic confidence.",
+    ],
+    source_url: "https://www.formula1.com/en/racing/2026/great-britain",
+  },
+  weather: {
+    available: true,
+    sampled_at: "2026-07-17T10:02:00Z",
+    air_temperature_c: 22.5,
+    track_temperature_c: 34.1,
+    rainfall: false,
+    humidity_percent: 71,
+    pressure_mbar: 1008.2,
+    wind_speed_mps: 3.4,
+    wind_direction_degrees: 247,
+    source: "OpenF1",
+    notice: "Latest weather sample published by OpenF1 for this session.",
+  },
+  data_notice: "Detailed normalized telemetry is available.",
+  diagnostics_available: true,
+};
 
 export function message(overrides: Partial<RoomMessage> = {}): RoomMessage {
   return {

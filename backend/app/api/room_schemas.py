@@ -6,6 +6,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, model_validator
 
+from app.domain.circuits import CircuitIntelligence, SessionWeather
 from app.domain.rooms import (
     AgentProfile,
     EventWeekend,
@@ -36,6 +37,8 @@ class RaceRoomDetailResponse(BaseModel):
     room: RaceRoom
     agents: list[AgentProfile]
     playback: RoomPlaybackState
+    circuit: CircuitIntelligence
+    weather: SessionWeather
     data_notice: str
     diagnostics_available: bool = False
 

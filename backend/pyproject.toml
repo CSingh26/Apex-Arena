@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "apex-arena-backend"
-version = "0.1.0"
+version = "1.0.0"
 description = "Live-data foundation for the Apex Arena Formula racing fan simulation."
 readme = { text = "Apex Arena FastAPI live-data and race-engine backend.", content-type = "text/markdown" }
 requires-python = ">=3.12"

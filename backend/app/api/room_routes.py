@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 from __future__ import annotations
 
+import asyncio
 import hmac
 import logging
 from typing import Annotated, Literal
@@ -169,8 +170,12 @@ async def sync_race_room_catalog(
 @router.get("/{room_slug}", response_model=RaceRoomDetailResponse)
 async def race_room_detail(room_slug: str, services: Services) -> RaceRoomDetailResponse:
     room = await require_room(room_slug, services)
-    agents = await services.room_repository.get_agents(room.id)
-    playback = await services.room_repository.get_playback(room.id)
+    circuit = services.circuit_intelligence.for_circuit(room.circuit_name)
+    agents, playback, weather = await asyncio.gather(
+        services.room_repository.get_agents(room.id),
+        services.room_repository.get_playback(room.id),
+        services.circuit_weather.for_session(room.session_key),
+    )
     notices = {
         SourceAvailability.TELEMETRY: "Detailed normalized telemetry is available.",
         SourceAvailability.LIMITED: "Some telemetry is incomplete; conclusions are qualified.",
@@ -186,6 +191,8 @@ async def race_room_detail(room_slug: str, services: Services) -> RaceRoomDetail
         room=room,
         agents=agents,
         playback=playback,
+        circuit=circuit,
+        weather=weather,
         data_notice=notices[room.source_availability],
         diagnostics_available=(
             services.settings.app_env != "production" or services.settings.room_diagnostics_enabled

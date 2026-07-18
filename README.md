@@ -1,377 +1,238 @@
-<!-- SPDX-License-Identifier: AGPL-3.0-only -->
+<div align="center">
 
 # Apex Arena
 
-Apex Arena is a public Formula racing fan-simulation platform. Version 0.1 is intentionally
-limited to the 2026 season: completed weekends become replay/archive candidates, and the Belgian
-Grand Prix at Spa-Francorchamps is the first live target.
+### Formula racing, interpreted live.
 
-The product centers on **Race Rooms**: persistent, event-grounded conversations between five
-distinct analysis agents. Live MQTT and historical REST records enter one idempotent race engine;
-significant normalized events become compact discussion chains that reach browsers over resilient
-Server-Sent Events. The current discussion runtime is deterministic and requires no LLM provider.
+**A public 2026-season fan experience where five specialist AI agents turn race data into an evidence-linked conversation.**
 
-## Repository layout
+[![Version](https://img.shields.io/badge/version-1.0.0-ff5d78?style=flat-square)](https://github.com/CSingh26/Apex-Arena/releases/tag/v1.0.0)
+[![Verify and publish](https://github.com/CSingh26/Apex-Arena/actions/workflows/release.yml/badge.svg)](https://github.com/CSingh26/Apex-Arena/actions/workflows/release.yml)
+[![Backend image](https://img.shields.io/badge/GHCR-backend-51e5d4?style=flat-square&logo=docker)](https://github.com/CSingh26/Apex-Arena/pkgs/container/apex-arena-backend)
+[![Frontend image](https://img.shields.io/badge/GHCR-frontend-6d8cff?style=flat-square&logo=docker)](https://github.com/CSingh26/Apex-Arena/pkgs/container/apex-arena-frontend)
+[![License](https://img.shields.io/badge/license-AGPL--3.0--only-a779ff?style=flat-square)](LICENSE)
 
-```text
-.
-├── backend/             FastAPI, provider clients, domain/storage models, tests
-├── frontend/            Next.js operational dashboard
-├── docker-compose.yml   Local PostgreSQL and Redis
-├── .env.example         Shared local environment contract
-└── LICENSE              GNU AGPL v3 full text
-```
+</div>
 
-## Race engine capabilities
+![Apex Arena landing experience](docs/images/apex-arena-home.jpg)
 
-- Typed, startup-validated settings with masked database, Redis, API-key, password, and token
-  fields.
-- PostgreSQL 17 and Redis 7.4 services with health checks and persistent volumes.
-- Alembic migrations for the season catalog plus idempotent `raw_provider_events`, ordered
-  `normalized_race_events`, `race_state_snapshots`, and observable `ingestion_runs`.
-- Jolpica 2026 calendar/results client with provider-derived standard and Sprint weekend formats.
-- OpenF1 historical REST support for session metadata, drivers, timing, strategy, race control,
-  weather, session results, and starting grids, with bounded retry, throttling, and caching.
-- Backend-only OpenF1 OAuth token acquisition, expiry-aware in-memory caching, TLS MQTT
-  subscriptions, reconnect state, and clean shutdown. Missing credentials degrade only live mode.
-- Arena-style statistical debate with stable agent lanes, an independently scrollable chat,
-  evidence-linked counterpoints, a session timeline, circuit traces, and an original Apex loader.
-- Historical OpenF1 session ingestion through the exact same processor used by MQTT messages.
-- Deterministic raw and normalized deduplication, a configurable event-time ordering buffer, and
-  monotonic per-session sequence numbers within one application process.
-- Deterministic race-state reduction with periodic PostgreSQL snapshots.
-- Redis Streams for normalized events, state updates, and live connection status.
-- Reconnect-safe SSE with persisted missed-event recovery and heartbeats.
-- A responsive grouped Race Rooms index and individual conversation view with progressive
-  evidence, session-aware replay controls, light/dark presentation, and secondary diagnostics.
+## The race is more than a timing screen
 
-## Race Rooms architecture
+Apex Arena follows Formula racing as a living argument. It unifies timing, telemetry,
+race-control, strategy, and session data into a single ordered story, then gives five defined
+specialists room to interpret it. They make calls, challenge assumptions, revise positions, and
+show the evidence behind every grounded claim.
 
-```text
-OpenF1/Jolpica -> normalized event -> significance + cooldown/dedup
-                                         |
-                                         v
-                         grounded primary -> optional reply -> Nova summary
-                                         |
-                    PostgreSQL messages + evidence + playback
-                                         |
-                              Redis Stream -> recovery-safe SSE -> room timeline
-```
+The result feels closer to a great post-race debrief unfolding in real time than a conventional
+dashboard.
 
-The catalog derives public 2026 event and competitive-session metadata from Jolpica and OpenF1.
-Completed sessions without detailed telemetry remain visible with an honest availability notice;
-future sessions are read-only schedule previews and cannot create rooms as a side effect. The Day 3
-fixture is hidden by default and exists only for tests or an explicitly enabled local fixture.
+## What makes Apex Arena different
 
-For the full Day 3 architecture, durable schema, replay/action contract, grounding rules, catalog
-sync workflow, diagnostics policy, validation fixture, and operator checks, see
-[`docs/day-3-race-rooms.md`](./docs/day-3-race-rooms.md).
+- **Five analytical perspectives** — strategy, telemetry, racecraft, history, and moderation.
+- **Opinionated but accountable debate** — agents take positions while separating facts from
+  inference and uncertainty.
+- **Evidence on demand** — every supported message can expose its trigger, source metrics,
+  confidence, and data-quality notes.
+- **Live and replay rooms** — follow an active session or revisit an archived weekend through the
+  same conversation model.
+- **Session-aware 2026 calendar** — qualifying, sprint qualifying, sprint, and race rooms are
+  grouped into complete Grand Prix weekends.
+- **Accurate circuit artwork** — 2026 layouts are sourced from Jules Roy's
+  [f1-circuits-svg](https://github.com/julesr0y/f1-circuits-svg) archive.
+- **Circuit intelligence** — every 2026 venue carries records, historical context, and memorable
+  facts from the official Formula 1 circuit guides.
+- **Live track conditions** — OpenF1 session weather brings air and track temperature, rainfall,
+  humidity, pressure, wind speed, and wind direction into the room.
+- **Transparent data quality** — unavailable or partial provider data is labelled; Apex Arena does
+  not invent telemetry.
+- **Dark and light themes** — a vibrant, responsive interface designed for desktop and mobile.
 
-For the grouped event contract, competitive session identity, eligibility rules, staged historical
-ingestion, qualifying semantics, navigation hierarchy, and controlled backfill procedure, see
-[`docs/day-4-session-rooms.md`](./docs/day-4-session-rooms.md).
+## The 2026 season, session by session
 
-### Agent roster
+![Apex Arena Race Rooms catalog](docs/images/apex-arena-race-rooms.jpg)
 
-| Agent | Role | Primary lens |
+The Race Rooms catalog turns the season into an editorial archive. A live-session countdown leads
+into the current weekend, completed events open into evidence-linked replays, and future sessions
+remain visible without pretending provider data already exists.
+
+Visitors can filter by:
+
+- Grand Prix, circuit, or country
+- live, completed, or upcoming weekends
+- qualifying, sprint qualifying, sprint, or race
+- standard and sprint-weekend formats
+
+## Inside a Race Room
+
+![Apex Arena circuit records and OpenF1 weather](docs/images/apex-arena-room-intelligence.jpg)
+
+Each room brings together four connected surfaces:
+
+1. **Session conversation** — a scrollable, reply-aware debate between the agents.
+2. **Conversation map** — key moments arranged across the session timeline.
+3. **Track dossier** — circuit length, first Grand Prix, race lap record, and venue facts.
+4. **OpenF1 conditions** — the latest session weather sample, with a clear provider status.
+
+The circuit and weather panels are deliberately resilient. Historical and live sessions show the
+latest OpenF1 sample when it is available. Future sessions retain the panel and explain when the
+provider has not published data. A weather-provider interruption never takes the race room offline.
+
+## Meet the room
+
+| Agent | Lens | What they bring to the debate |
 | --- | --- | --- |
-| Mira Vale | Strategist | Pit windows, tyres, neutralisations |
-| Theo Voss | Telemetry analyst | Pace, intervals, measured trends |
-| Lena Cross | Racecraft analyst | Position changes, incidents, overtakes |
-| Arjun Reyes | Historian | Session context and championship framing |
-| Nova | Host | Opens, moderates, qualifies, and summarizes |
+| **Mira Vale** | Race strategy | Pit windows, tyre life, traffic, undercuts, and strategic trade-offs |
+| **Theo Voss** | Telemetry | Lap deltas, sector trends, consistency, and measured pace claims |
+| **Lena Cross** | Racecraft | Overtakes, defensive driving, incidents, and track-position battles |
+| **Arjun Reyes** | Championship history | Season form, circuit precedent, records, and historical context |
+| **Nova** | Room host | Moderation, evidence quality, uncertainty, and room verdicts |
 
-Profiles are typed in `backend/app/services/room_agents.py` and seeded idempotently. Add an agent by
-defining a complete `AgentProfile`, adding it to `DEFAULT_ROOM_AGENTS`, and creating a migration if
-its persistent shape requires new fields. Every claim must cite normalized evidence or explicitly
-state that the required detail is unavailable.
+Agents have explicit specialties, speaking styles, supported topics, confidence rules, and evidence
+standards. Replies are first-class messages: agreement, disagreement, correction, questions, and
+summaries remain visible as relationships rather than a flat comment feed.
 
-## Unified race engine
+## Circuit intelligence and weather
 
-```text
-OpenF1 MQTT live ─────┐
-                     ├─> raw persistence -> normalize -> deduplicate -> event-time order
-OpenF1 REST replay ──┘                                           |
-                                                                 v
-                         PostgreSQL events <- sequence -> race state -> snapshots
-                                                           |
-                                                           v
-                                      Redis event/state/status Streams -> SSE -> dashboard
-```
+Apex Arena V1 ships a verified dossier for every circuit in its 22-event 2026 catalog. Circuit
+profiles include:
 
-Both adapters create the same `RawEventInput`. Replay records are marked `is_replay`, but they do
-not bypass persistence, deduplication, ordering, state reduction, or Redis publication. Raw payloads
-are retained as JSONB for traceability and are never written to application logs.
+- circuit length
+- first Formula 1 Grand Prix
+- current race lap record and holder
+- two venue-specific facts
+- a link to the official Formula 1 circuit guide
 
-## Prerequisites
+Weather is fetched through the OpenF1 `/v1/weather` endpoint using the room's session key. The
+backend selects the latest sample and safely normalizes:
 
-- Docker with Compose
-- Python 3.12 or newer
-- Node.js 20.9 or newer and npm
-
-## Local setup
-
-1. Create the private local environment file:
-
-   ```bash
-   cp .env.example .env
-   ```
-
-2. Replace both `change-me` values with the same local PostgreSQL password. Never commit `.env`.
-
-3. Start only PostgreSQL and Redis for manual development:
-
-   ```bash
-   docker compose up -d --wait postgres redis
-   ```
-
-4. Install and migrate the backend:
-
-   ```bash
-   cd backend
-   python3 -m venv .venv
-   source .venv/bin/activate
-   pip install -e '.[dev]'
-   alembic upgrade head
-   uvicorn app.main:app --reload --port 8000
-   ```
-
-5. In another terminal, install and start the frontend:
-
-   ```bash
-   cd frontend
-   npm install
-   npm run dev
-   ```
-
-6. Open [http://localhost:3000](http://localhost:3000). API docs are available at
-   [http://localhost:8000/docs](http://localhost:8000/docs).
-
-### Full Docker stack
-
-To build and run the frontend, backend, PostgreSQL, and Redis entirely in Docker:
-
-```bash
-docker compose up -d --build --wait
-```
-
-Compose runs database migrations before starting the API. The published application ports come
-from `FRONTEND_PORT` and `BACKEND_PORT`; their browser-facing URLs must match `FRONTEND_URL`,
-`BACKEND_URL`, `NEXT_PUBLIC_APP_URL`, `NEXT_PUBLIC_API_URL`, and `CORS_ALLOWED_ORIGINS`.
-
-Inspect or stop the stack with:
-
-```bash
-docker compose ps
-docker compose logs -f backend frontend
-docker compose down
-```
-
-The Next.js config reads only `NEXT_PUBLIC_APP_NAME`, `NEXT_PUBLIC_APP_URL`, and
-`NEXT_PUBLIC_API_URL` from the root `.env`. Backend secrets are not copied into browser code.
-
-If the default ports are already occupied, change `POSTGRES_PORT` and `REDIS_PORT` and update the
-matching ports in `DATABASE_URL` and `REDIS_URL` for that local run.
-
-## Environment contract
-
-Required for the local backend runtime:
-
-- `DATABASE_URL` and `POSTGRES_PASSWORD` (the embedded URL password must match)
-- `REDIS_URL`
-- `SEASON_YEAR=2026` while `SEASON_ONLY_MODE=true`
-
-Required by Docker Compose, with safe defaults except the password:
-
-- `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_PORT`
-- `REDIS_PORT`
-
-Optional race-engine configuration:
-
-- `OPENF1_USERNAME` and `OPENF1_PASSWORD`: required for authenticated live MQTT and available to
-  the historical REST client for one OAuth retry if a public request returns 401. The first
-  historical request is still sent without credentials.
-- `OPENF1_LIVE_AUTO_CONNECT`: opt into MQTT connection during API startup; defaults to `false`.
-- `OPENF1_LIVE_TOPICS`, reconnect delays, and maximum attempts configure the live adapter.
-- `EVENT_ORDERING_BUFFER_MS`, `EVENT_DEDUP_TTL_SECONDS`, and
-  `RACE_STATE_SNAPSHOT_EVERY_N_EVENTS` tune the processing pipeline.
-- `SSE_HEARTBEAT_SECONDS` and `ENGINE_RECENT_EVENTS_LIMIT` tune client recovery and streaming.
-- `ROOM_TOPIC_COOLDOWN_SECONDS` limits repetitive topic reactions and
-  `ROOM_STREAM_BACKLOG_LIMIT` caps persisted SSE recovery per connection.
-- `DEVELOPMENT_FIXTURE_ENABLED` exposes the deterministic Day 3 fixture only in local/test
-  environments; it defaults to `false` and must remain off in public deployments.
-- `HISTORICAL_INGESTION_ENABLED` and `DEBUG_INGESTION_ENABLED` gate replay ingestion. The
-  `HISTORICAL_PROVIDER_*` values bound provider retries, pacing, and process-local cache lifetime.
-- `INTERNAL_API_KEY` is required by the mutating historical-ingestion endpoint.
-- `OPENAI_API_KEY`: no current Race Room code calls OpenAI. The Day 3 discussion runtime is
-  deterministic; `AI_ENABLED` reports intended configuration only.
-- `JWT_SECRET`, `SESSION_SECRET`, and `ADMIN_DASHBOARD_PASSWORD` remain reserved for later work.
-- Sentry DSNs and production URLs: reserved for later deployment work.
-
-See [.env.example](./.env.example) for the complete, standardized variable set and feature flags.
-The application never logs passwords, provider tokens, API keys, Redis URLs, or full database
-URLs. Health/debug responses contain only safe hosts, ports, and enabled/readiness states.
-
-## Provider behavior
-
-### Jolpica
-
-`GET /api/v1/season/2026` retrieves the current calendar from Jolpica and normalizes round, race,
-circuit, location, start time, lifecycle state, and target metadata. The client also exposes a
-round-results method for completed races when provider results are available.
-
-### OpenF1
-
-The historical OpenF1 REST client uses backend-only OAuth when the provider requires it, then
-retries transient rate-limit/server failures with bounded exponential backoff. Requests are paced
-and identical successful reads use a bounded in-process cache. Live REST, MQTT, and WebSocket
-access can require an OpenF1 subscription. Credentials and token exchange remain backend-only;
-token values never appear in status responses or logs.
-
-`OpenF1LiveClient` opens MQTT over TLS when live auto-connect is enabled and credentials are
-present. It subscribes to configured `v1/*` topics, forwards dictionary payloads to the unified
-processor, publishes safe connection state, and reconnects with bounded backoff. Provider tokens
-and credentials never reach the browser, response bodies, or logs.
-
-When live auto-connect is enabled, a background catalog reconciler refreshes Jolpica/OpenF1 every
-`OPENF1_LIVE_CATALOG_SYNC_SECONDS` (60 seconds by default). This binds a newly published provider
-session key to the scheduled Race Room without a manual sync. MQTT then feeds position, interval,
-lap, pit, stint, race-control, weather, driver, and session messages through the same idempotent
-engine used for replay. See [`docs/live-race-operations.md`](docs/live-race-operations.md) for the
-race-day checklist and honest provider limitations.
-
-`HistoricalOpenF1Adapter` ingests one session through metadata, timing, strategy, context, and
-classification stages; caps records per endpoint; isolates endpoint failures; and passes records
-through the same idempotent processor. High-frequency car/location data is opt-in. The mutating
-trigger is disabled unless both historical and debug ingestion are enabled and a private internal
-key is configured.
-
-The presentation and grounding rules for the current conversation experience are documented in
-[`docs/arena-chat-experience.md`](docs/arena-chat-experience.md).
-
-## API endpoints
-
-| Endpoint | Purpose |
+| Measurement | Display |
 | --- | --- |
-| `GET /health` | Safe app, database, Redis, provider, live-auth, and AI status |
-| `GET /api/v1/season/2026` | Normalized 2026 calendar summary |
-| `GET /api/v1/openf1/status` | Historical REST configuration and live-auth readiness |
-| `GET /api/v1/live/status` | Live mode, credential, token-cache, and connection state |
-| `GET /api/v1/engine/status` | Dependency health, engine counts, sequence, live, and ingestion status |
-| `GET /api/v1/sessions/{session_key}/events` | Persisted normalized session events after a sequence |
-| `GET /api/v1/sessions/{session_key}/state` | Current in-memory or latest snapshotted race state |
-| `GET /api/v1/stream/sessions/{session_key}` | SSE event, state, and live-status stream with recovery |
-| `GET /api/v1/race-rooms` | Paginated room catalog with season, status, and search filters |
-| `GET /api/v1/race-rooms/events` | Grouped live, completed, and upcoming event weekends with competitive sessions |
-| `POST /api/v1/race-rooms/sync` | Internal-key-protected calendar/session metadata refresh |
-| `GET /api/v1/race-rooms/{slug}` | Room metadata, agent roster, playback, and data notice |
-| `GET /api/v1/race-rooms/{slug}/messages` | Cursor/filter based persistent discussion history |
-| `GET /api/v1/race-rooms/{slug}/messages/{id}/evidence` | Traceable source evidence for one message |
-| `GET /api/v1/race-rooms/{slug}/stream` | Missed-message recovery followed by live room SSE |
-| `GET /api/v1/race-rooms/{slug}/diagnostics` | Development/debug-gated safe Pipeline Diagnostics |
-| `POST /api/v1/race-rooms/{slug}/replay` | Start, restart, or resume an available replay |
-| `POST /api/v1/race-rooms/{slug}/playback` | Pause, resume, speed, sequence, lap, phase, or session-time seek |
-| `POST /api/v1/race-rooms/{slug}/generate` | Internal-key-protected discussion generation |
-| `POST /api/v1/debug/ingest-historical-session` | Internal-key-protected historical ingestion trigger |
-| `GET /api/v1/debug/config` | Non-secret runtime metadata and feature flags |
+| Air temperature | °C |
+| Track temperature | °C |
+| Rainfall | detected / none |
+| Humidity | percent |
+| Atmospheric pressure | mbar |
+| Wind speed | m/s |
+| Wind direction | compass point and degrees |
 
-## Validation
+Provider failures, empty responses, malformed samples, and sessions without a provider key all have
+tested fallback states.
 
-Run the repository checks with:
+## Data architecture
 
-```bash
-cd backend
-.venv/bin/ruff format --check .
-.venv/bin/ruff check .
-.venv/bin/pytest -q
-alembic check
-
-cd ../frontend
-npm run lint
-npm run typecheck
-npm test
-npm run build
-npm audit
-
-cd ..
-docker compose config --quiet
+```mermaid
+flowchart LR
+    A[OpenF1 REST + live feed] --> D[Ingestion and normalization]
+    B[Jolpica season calendar] --> C[Session catalog]
+    C --> D
+    D --> E[(PostgreSQL event archive)]
+    D --> F[(Redis event bus)]
+    E --> G[Race state + replay engine]
+    F --> G
+    G --> H[Discussion engine]
+    H --> I[Evidence-linked Race Room API]
+    I --> J[Next.js fan experience]
 ```
 
-With the services running, smoke-test the API using:
+### Backend
 
-```bash
-cd frontend
-E2E_BASE_URL=http://localhost:3000 \
-E2E_API_URL=http://localhost:8000 \
-npm run test:e2e
-cd ..
-```
+- FastAPI and Pydantic contracts
+- asynchronous SQLAlchemy with PostgreSQL
+- Redis-backed event streaming
+- OpenF1 REST and MQTT provider clients
+- Jolpica season-calendar synchronization
+- deterministic normalization, ordering, and deduplication
+- race-state snapshots and replay coordination
+- evidence-linked multi-agent discussion engine
 
-Then run the direct API smoke checks:
+### Frontend
 
-```bash
-curl --fail http://localhost:8000/health
-curl --fail http://localhost:8000/api/v1/season/2026
-curl --fail http://localhost:8000/api/v1/openf1/status
-curl --fail http://localhost:8000/api/v1/live/status
-curl --fail http://localhost:8000/api/v1/engine/status
+- Next.js App Router
+- React and TypeScript
+- accessible, theme-aware component system
+- live Server-Sent Events room updates
+- grouped session catalog and countdown experience
+- replay controls, message filters, evidence drawer, and conversation map
+- official 2026 circuit artwork with responsive rendering
 
-# Replace 9839 with a selected OpenF1 session key.
-curl --fail http://localhost:8000/api/v1/sessions/9839/events
-curl --fail http://localhost:8000/api/v1/sessions/9839/state
-curl --no-buffer http://localhost:8000/api/v1/stream/sessions/9839
+## Data integrity principles
 
-# Mutates local data and requires INTERNAL_API_KEY in the private .env.
-curl --fail -X POST http://localhost:8000/api/v1/debug/ingest-historical-session \
-  -H "Content-Type: application/json" \
-  -H "X-Internal-API-Key: ${INTERNAL_API_KEY}" \
-  --data '{"session_key":"9839","endpoints":["laps","position","race_control"]}'
-```
+Apex Arena is designed around a simple rule: **the interface must never sound more certain than the
+data**.
 
-For the documented alternate local ports, set `POSTGRES_PORT=55432` with port `55432` in
-`DATABASE_URL`, and `REDIS_PORT=56379` with port `56379` in `REDIS_URL`. Compose maps those host
-ports to the containers' standard ports; application code needs no changes.
+- Raw provider events are preserved before normalization.
+- Normalized events have stable ordering and deduplication keys.
+- Messages carry confidence and evidence-availability states.
+- Partial telemetry narrows agent conclusions.
+- Results-only rooms do not manufacture lap-by-lap analysis.
+- Development fixtures are visibly labelled and never presented as real championship data.
+- Provider outages degrade individual panels rather than the entire experience.
 
-## Known limitations
+## Public API surface
 
-- Per-session sequence allocation is process-local and should move to a database or distributed
-  allocator before horizontally scaling API workers.
-- The ordering buffer tolerates bounded lateness; records later than the configured watermark can
-  still receive a later sequence number.
-- On process restart, state loads the latest periodic snapshot; events after that snapshot are not
-  yet replayed automatically into the reducer.
-- Historical ingestion and provider caching are process-local orchestration, not a distributed job
-  queue; completed run summaries remain durable in PostgreSQL.
-- SSE is the browser streaming transport. Backend live MQTT depends on valid OpenF1 subscription
-  credentials and `OPENF1_LIVE_AUTO_CONNECT=true`; the checked-in example enables it, while a
-  deployment can still opt out explicitly.
-- Past rooms can only discuss telemetry that has actually been ingested; results-only rooms do not
-  invent lap, tyre, radio, or classification detail.
-- Playback state is persistent and shared per room, rather than private to each viewer.
-- Replay scheduling and discussion cooldown/dedup memory are process-local; a running replay is
-  not automatically resumed after a backend restart or coordinated between multiple API workers.
-- The current Race Room generator is deterministic-only. The persisted model fields reserve an
-  audit boundary for a future validated LLM path; configuring an API key does not activate one.
-- Ambiguous provider matches and uncertain qualifying phase boundaries remain unresolved instead
-  of being guessed. Replay seeking serially rebuilds state/discussion through the target event
-  while retaining persisted history; use Restart to regenerate from a clean timeline.
+The V1 API is organized around stable public resources:
 
-## Next direction
+| Area | Responsibility |
+| --- | --- |
+| Health | application and dependency readiness |
+| Calendar | authoritative 2026 season summary |
+| Event weekends | grouped Grand Prix and session catalog |
+| Race rooms | room metadata, circuit dossier, weather, and playback state |
+| Messages | filtered conversation and pagination |
+| Evidence | source metrics, trigger events, and data-quality flags |
+| Streaming | live room messages and session events over SSE |
+| Replay | start, pause, resume, speed, lap, phase, and sequence control |
 
-Move sequence allocation and playback scheduling to distributed workers before horizontal scale,
-then add authenticated viewer preferences without weakening public read access or evidence rules.
+Interactive API documentation is exposed by the running backend through FastAPI's OpenAPI surface.
 
-## License
+## V1 release pipeline
 
-Copyright (C) 2026 Chaitanya Singh.
+Version `1.0.0` introduces a release gate that keeps unverified images out of GitHub Container
+Registry.
 
-Apex Arena is licensed under the [GNU Affero General Public License v3.0 only](./LICENSE)
-(`AGPL-3.0-only`). Network users must be offered the corresponding source as required by the
-license. See [NOTICE](./NOTICE) and [COPYRIGHT](./COPYRIGHT) for attribution details.
+Every pull request, `main` update, and version tag must pass:
 
-## Unofficial fan project disclaimer
+- backend formatting and lint checks
+- the complete backend test suite
+- frontend linting and TypeScript checks
+- the complete frontend component test suite
+- a production Next.js build
+- production backend and frontend Docker builds
+- critical-vulnerability scans for both images
 
-Apex Arena is an unofficial fan project and is not affiliated with, endorsed by, or associated
-with Formula 1, the FIA, Formula One Management, any racing team, OpenF1, or Jolpica. Formula 1 and
-related marks belong to their respective owners. Provider data and services may be subject to
-separate terms.
+Only a version tag that clears every job can publish. The release workflow produces multi-platform
+`linux/amd64` and `linux/arm64` images:
+
+- `ghcr.io/csingh26/apex-arena-backend`
+- `ghcr.io/csingh26/apex-arena-frontend`
+
+Published images receive semantic-version, major/minor, major, `latest`, and commit-SHA tags.
+
+## Project documentation
+
+- [Day 3: Race Rooms and evidence architecture](docs/day-3-race-rooms.md)
+- [Day 4: Session-aware 2026 catalog](docs/day-4-session-rooms.md)
+- [Live race operations and failure states](docs/live-race-operations.md)
+- [Agent conversation experience](docs/arena-chat-experience.md)
+
+## Attribution
+
+- Timing, telemetry, session, and weather data are provided by
+  [OpenF1](https://openf1.org/).
+- Season calendar metadata is sourced through [Jolpica F1](https://jolpi.ca/).
+- Circuit artwork is adapted from
+  [julesr0y/f1-circuits-svg](https://github.com/julesr0y/f1-circuits-svg), licensed
+  [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
+- Circuit records and venue facts link to the corresponding official
+  [Formula 1](https://www.formula1.com/) circuit guides.
+
+## License and disclaimer
+
+Apex Arena source code is licensed under
+[GNU Affero General Public License v3.0 only](LICENSE). See [NOTICE](NOTICE) and
+[COPYRIGHT](COPYRIGHT) for attribution details.
+
+Apex Arena is an independent, unofficial fan project. It is not affiliated with, endorsed by, or
+sponsored by Formula 1, the FIA, Formula One Management, any team, circuit, broadcaster, or data
+provider. Formula 1, F1, Grand Prix names, team names, circuit names, and related marks belong to
+their respective owners.

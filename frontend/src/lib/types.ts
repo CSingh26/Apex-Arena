@@ -251,8 +251,36 @@ export type RoomPlayback = {
   started_at: string | null;
   updated_at: string;
 };
+export type CircuitRecord = { label: string; value: string; detail: string | null };
+export type CircuitIntelligence = {
+  circuit_name: string;
+  records: CircuitRecord[];
+  facts: string[];
+  source_url: string | null;
+};
+export type SessionWeather = {
+  available: boolean;
+  sampled_at: string | null;
+  air_temperature_c: number | null;
+  track_temperature_c: number | null;
+  rainfall: boolean | null;
+  humidity_percent: number | null;
+  pressure_mbar: number | null;
+  wind_speed_mps: number | null;
+  wind_direction_degrees: number | null;
+  source: string;
+  notice: string;
+};
 export type RaceRoomListResponse = { rooms: RaceRoom[]; total: number; limit: number; offset: number };
-export type RaceRoomDetailResponse = { room: RaceRoom; agents: AgentProfile[]; playback: RoomPlayback; data_notice: string; diagnostics_available: boolean };
+export type RaceRoomDetailResponse = {
+  room: RaceRoom;
+  agents: AgentProfile[];
+  playback: RoomPlayback;
+  circuit: CircuitIntelligence;
+  weather: SessionWeather;
+  data_notice: string;
+  diagnostics_available: boolean;
+};
 export type RoomMessagesResponse = { messages: RoomMessage[]; next_cursor: number | null };
 export type MessageEvidenceResponse = {
   message_id: string;

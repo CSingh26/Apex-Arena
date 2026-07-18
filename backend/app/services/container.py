@@ -8,6 +8,10 @@ from contextlib import suppress
 from app.core.settings import Settings
 from app.providers.jolpica import JolpicaClient
 from app.providers.openf1 import OpenF1AuthService, OpenF1LiveClient, OpenF1RestClient
+from app.services.circuit_intelligence import (
+    CircuitIntelligenceService,
+    CircuitWeatherService,
+)
 from app.services.development_fixture import DevelopmentFixtureService
 from app.services.discussion import RaceRoomDiscussionEngine
 from app.services.discussion_triggers import DiscussionTriggerEvaluator
@@ -50,6 +54,8 @@ class AppServices:
             settings,
             token_provider=self.openf1_auth.get_access_token,
         )
+        self.circuit_intelligence = CircuitIntelligenceService()
+        self.circuit_weather = CircuitWeatherService(self.openf1)
         self.season = SeasonService(settings, self.jolpica)
 
         self.raw_event_repository = SqlRawEventRepository(self.database)

@@ -167,6 +167,10 @@ test("keeps a real historical conversation compact, inspectable, and session-awa
   await expect(page.getByRole("img", { name: /2026 circuit layout/ })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Session conversation" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Session timeline" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Track dossier" })).toBeVisible();
+  await expect(page.locator(".circuit-records > div")).toHaveCount(3);
+  await expect(page.getByRole("heading", { name: "Track weather" })).toBeVisible();
+  await expect(page.locator(".weather-card__notice")).toBeVisible();
   await expect(page.getByTestId("playback-controls")).toBeVisible();
   await expect(page.getByTestId("agent-roster").locator(".agent-profile")).toHaveCount(0);
   await page.getByTestId("agent-roster").getByRole("button", { name: /agents in this room/ }).click();

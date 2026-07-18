@@ -20,6 +20,7 @@ from app.api.room_routes import (
     start_replay,
 )
 from app.api.room_schemas import PlaybackRequest, ReplayRequest
+from app.domain.circuits import SessionWeather
 from app.domain.models import NormalizedRaceEvent, RaceEventType
 from app.domain.rooms import (
     Confidence,
@@ -36,6 +37,7 @@ from app.domain.rooms import (
     SourceAvailability,
     WeekendStatus,
 )
+from app.services.circuit_intelligence import CircuitIntelligenceService
 from app.services.discussion import DiscussionMetrics
 from app.services.race_state import RaceState
 from app.services.room_replay import ReplayUnavailableError
@@ -94,6 +96,14 @@ def route_services(room: RaceRoom) -> SimpleNamespace:
     )
     return SimpleNamespace(
         rooms=SimpleNamespace(ensure_catalog=AsyncMock()),
+        circuit_intelligence=CircuitIntelligenceService(),
+        circuit_weather=SimpleNamespace(
+            for_session=AsyncMock(
+                return_value=SessionWeather(
+                    notice="OpenF1 has not published weather samples for this session yet.",
+                )
+            )
+        ),
         room_repository=room_repository,
         room_replay=SimpleNamespace(
             start=AsyncMock(return_value=playback),
@@ -237,6 +247,9 @@ async def test_room_detail_has_timing_only_notice_and_safe_diagnostics_flag() ->
     assert "Timing data" in response.data_notice
     assert "limited" in response.data_notice
     assert response.diagnostics_available is True
+    assert response.circuit.circuit_name == "Apex Validation Circuit"
+    assert response.weather.available is False
+    services.circuit_weather.for_session.assert_awaited_once_with("day3-session")
 
 
 @pytest.mark.asyncio
