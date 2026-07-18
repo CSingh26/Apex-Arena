@@ -3760,3 +3760,69 @@ body {
   .message--side-left { margin-right: 10px; }
   .message--side-right .message__meta, .message--side-right .message__labels, .message--side-right .message__footer { justify-content: flex-start; }
 }
+
+.conversation-timeline {
+  padding: 18px 22px 24px;
+  border-top: 1px solid var(--line);
+  background: color-mix(in srgb, var(--panel) 92%, var(--apex-violet) 8%);
+}
+
+.conversation-timeline > header {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.conversation-timeline h3 { margin: 4px 0 0; font-size: 1rem; }
+.conversation-timeline > header > span { color: var(--muted); font: 700 .58rem var(--font-mono), monospace; text-transform: uppercase; }
+
+.conversation-timeline__rail {
+  position: relative;
+  height: 82px;
+  margin: 20px 18px 0;
+}
+
+.conversation-timeline__rail > span {
+  position: absolute;
+  top: 13px;
+  right: 0;
+  left: 0;
+  height: 2px;
+  background: linear-gradient(90deg, var(--apex-cyan), var(--apex-violet), var(--apex-coral));
+}
+
+.conversation-timeline__rail button {
+  position: absolute;
+  top: 0;
+  display: grid;
+  min-width: 52px;
+  justify-items: center;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--foreground);
+  cursor: pointer;
+  transform: translateX(-50%);
+}
+
+.conversation-timeline__rail button i {
+  width: 12px;
+  height: 12px;
+  margin-top: 8px;
+  border: 3px solid var(--panel);
+  border-radius: 50%;
+  background: var(--apex-coral);
+  box-shadow: 0 0 0 2px var(--apex-coral), 0 0 16px rgb(255 93 120 / 45%);
+}
+
+.conversation-timeline__rail button b { margin-top: 10px; font: 800 .61rem var(--font-mono), monospace; }
+.conversation-timeline__rail button small { max-width: 76px; overflow: hidden; color: var(--muted); font-size: .5rem; text-overflow: ellipsis; text-transform: uppercase; white-space: nowrap; }
+.conversation-timeline__rail button:hover i, .conversation-timeline__rail button:focus-visible i { background: var(--apex-cyan); box-shadow: 0 0 0 2px var(--apex-cyan), 0 0 18px rgb(81 229 212 / 55%); }
+.conversation-timeline__empty { margin: 16px 0 0; color: var(--muted); font-size: .74rem; }
+
+@media (max-width: 600px) {
+  .conversation-timeline { padding-inline: 14px; }
+  .conversation-timeline__rail { margin-inline: 12px; overflow: visible; }
+  .conversation-timeline__rail button small { display: none; }
+}
