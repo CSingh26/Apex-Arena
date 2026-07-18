@@ -3826,3 +3826,21 @@ body {
   .conversation-timeline__rail { margin-inline: 12px; overflow: visible; }
   .conversation-timeline__rail button small { display: none; }
 }
+
+.circuit-outline {
+  display: grid;
+  width: 180px;
+  justify-items: center;
+  color: var(--apex-cyan);
+  pointer-events: none;
+}
+
+.circuit-outline svg { width: 100%; overflow: visible; }
+.circuit-outline path { fill: none; stroke-linecap: round; stroke-linejoin: round; }
+.circuit-outline__shadow { stroke: rgb(2 6 23 / 45%); stroke-width: 10; }
+.circuit-outline__track { stroke: currentColor; stroke-width: 3.2; filter: drop-shadow(0 0 9px rgb(81 229 212 / 45%)); }
+.circuit-outline__start { fill: var(--apex-coral); stroke: var(--foreground); stroke-width: 1.5; filter: drop-shadow(0 0 5px var(--apex-coral)); }
+.circuit-outline > span { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font: 700 .52rem var(--font-mono), monospace; letter-spacing: .08em; text-transform: uppercase; }
+.circuit-outline > span i { width: 14px; height: 2px; background: currentColor; }
+.circuit-outline--compact { width: 96px; opacity: .85; }
+.circuit-outline--compact .circuit-outline__track { stroke-width: 4; }
