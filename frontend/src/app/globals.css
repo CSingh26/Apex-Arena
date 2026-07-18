@@ -2664,8 +2664,8 @@ body {
   margin-left: calc(50% - 50vw);
   min-height: 70px;
   border-bottom: 1px solid var(--line, var(--landing-line, rgb(126 154 224 / 20%)));
-  background: color-mix(in srgb, var(--background) 88%, transparent);
-  backdrop-filter: blur(22px) saturate(140%);
+  background: transparent;
+  backdrop-filter: none;
 }
 
 .app-nav__inner {
@@ -3605,10 +3605,10 @@ body {
   .message { grid-template-columns: 31px minmax(0, 1fr); padding-inline: 10px; }
 }
 
-[data-theme="light"] .app-nav { background: rgb(247 245 255 / 88%); }
+[data-theme="light"] .app-nav { background: transparent; }
 
 @media (prefers-color-scheme: light) {
-  :root:not([data-theme="dark"]) .app-nav { background: rgb(247 245 255 / 88%); }
+  :root:not([data-theme="dark"]) .app-nav { background: transparent; }
 }
 
 [data-theme="light"] .event-card {
