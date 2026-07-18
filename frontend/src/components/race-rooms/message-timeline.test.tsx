@@ -21,6 +21,7 @@ describe("MessageTimeline", () => {
   it("renders editorial reply relationships and filters by agent, topic, and lap", async () => {
     const user = userEvent.setup();
     render(<TimelineHarness />);
+    expect(screen.getByText("Counterpoint")).toBeVisible();
     expect(screen.getByText(/Replying to Mira Vale/)).toBeVisible();
     expect(screen.getByText("Track position still limits that strategy gain.")).toBeVisible();
 

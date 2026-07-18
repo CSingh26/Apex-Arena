@@ -3454,6 +3454,39 @@ body {
   margin-left: 20px;
 }
 
+.message--disagreement,
+.message--correction,
+.message--question {
+  background: linear-gradient(90deg, rgb(255 93 120 / 7%), transparent 68%);
+}
+
+.message--disagreement .message__body > p,
+.message--correction .message__body > p {
+  font-weight: 540;
+}
+
+.message__labels .message-type {
+  border: 1px solid color-mix(in srgb, currentColor 30%, transparent);
+  background: color-mix(in srgb, currentColor 10%, transparent);
+}
+
+.message__labels .message-type--question {
+  color: var(--apex-gold);
+}
+
+.message__labels .message-type--disagreement,
+.message__labels .message-type--correction {
+  color: var(--apex-coral);
+}
+
+.message__labels .message-type--agreement {
+  color: var(--apex-mint);
+}
+
+.message__labels .message-type--summary {
+  color: var(--apex-violet);
+}
+
 .message__body > p {
   max-width: 760px;
   margin-block: 11px 10px;

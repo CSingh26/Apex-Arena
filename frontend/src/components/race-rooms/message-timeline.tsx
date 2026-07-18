@@ -10,6 +10,18 @@ const TOPICS: MessageTopic[] = ["strategy", "pace", "racecraft", "incident", "ra
 const MESSAGE_TYPES: MessageType[] = ["observation", "analysis", "question", "reply", "agreement", "disagreement", "correction", "summary", "uncertainty_notice"];
 const MAX_RENDERED_MESSAGES = 300;
 
+const MESSAGE_TYPE_LABELS: Record<MessageType, string> = {
+  observation: "Call",
+  analysis: "Read",
+  question: "Challenge",
+  reply: "Reply",
+  agreement: "Backs it",
+  disagreement: "Counterpoint",
+  correction: "Data check",
+  summary: "Room verdict",
+  uncertainty_notice: "Caution",
+};
+
 type TimelineFilters = {
   agent: string;
   topic: string;
@@ -84,7 +96,7 @@ export function MessageTimeline({ messages, agents, selectedAgent, totalLaps, se
           <div className="message__rail"><span className="agent-avatar" aria-hidden>{agent?.avatar_key ?? "AA"}</span><span className="timeline-line" /></div>
           <div className="message__body">
             <header className="message__meta"><strong>{agent?.display_name ?? "Race Room"}</strong><span>{agent?.role ?? "Room voice"}</span><span>{message.session_phase ?? (qualifying ? "Session" : message.lap_number == null ? "Session" : `Lap ${message.lap_number}`)}</span></header>
-            <div className="message__labels"><span>{message.topic.replaceAll("_", " ")}</span>{message.reply_to_message_id && <span className="reply-label">↳ Replying to {parentAgent?.display_name ?? "an earlier message"}</span>}</div>
+            <div className="message__labels"><span className={`message-type message-type--${message.message_type}`}>{MESSAGE_TYPE_LABELS[message.message_type]}</span><span>{message.topic.replaceAll("_", " ")}</span>{message.reply_to_message_id && <span className="reply-label">↳ Replying to {parentAgent?.display_name ?? "an earlier message"}</span>}</div>
             <p>{message.content}</p>
             <footer className="message__footer"><button className="evidence-button" type="button" aria-label={`See the data behind ${agent?.display_name ?? "this"} message`} onClick={() => onInspectEvidence(message)}><span className={`evidence-dot evidence-dot--${message.evidence_status}`} aria-hidden /> See the data <span className="sr-only">Evidence status: {message.evidence_status}. Message time: {roomMessageTime(message)}.</span></button></footer>
           </div>
