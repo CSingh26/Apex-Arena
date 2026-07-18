@@ -3,12 +3,18 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
 from app.domain.models import NormalizedRaceEvent, RaceEventType
 from app.services.raw_events import RawEventInput
+from app.services.session_semantics import (
+    normalize_qualifying_phase,
+    normalize_session_type,
+    phase_result_rows,
+)
 
 ENDPOINT_EVENT_TYPES = {
     "sessions": RaceEventType.SESSION_START,
@@ -19,6 +25,8 @@ ENDPOINT_EVENT_TYPES = {
     "pit": RaceEventType.PIT_STOP,
     "stints": RaceEventType.STINT_UPDATE,
     "weather": RaceEventType.WEATHER_UPDATE,
+    "session_result": RaceEventType.SESSION_RESULT,
+    "starting_grid": RaceEventType.STARTING_GRID,
 }
 
 
@@ -27,7 +35,7 @@ class OpenF1EventNormalizer:
 
     def normalize(self, raw: RawEventInput, raw_event_id: UUID) -> NormalizedRaceEvent:
         endpoint = raw.provider_endpoint.removeprefix("v1/").strip("/")
-        payload = raw.raw_payload
+        payload = self._enrich_payload(endpoint, raw.raw_payload)
         event_type = self._event_type(endpoint, payload)
         event_time = raw.event_time or self._payload_time(payload) or raw.received_at
         if event_time.tzinfo is None:
@@ -71,6 +79,8 @@ class OpenF1EventNormalizer:
         message = str(payload.get("message") or "").upper()
         flag = str(payload.get("flag") or "").upper()
         category = str(payload.get("category") or "").upper()
+        if "LAP TIME" in message and ("DELETED" in message or "INVALIDATED" in message):
+            return RaceEventType.LAP_DELETED
         if "VIRTUAL SAFETY CAR" in message or "VSC" in message:
             return RaceEventType.VIRTUAL_SAFETY_CAR
         if "SAFETY CAR" in message:
@@ -87,7 +97,33 @@ class OpenF1EventNormalizer:
             marker in message for marker in ("FINISH", "CHEQUERED", "ENDED")
         ):
             return RaceEventType.SESSION_FINISH
+        if payload.get("qualifying_phase") is not None and (
+            category == "SESSIONSTATUS" or re.search(r"\b(?:SQ|Q)[123]\b.*\b(?:START|END)", message)
+        ):
+            return RaceEventType.QUALIFYING_PHASE
         return RaceEventType.RACE_CONTROL
+
+    @staticmethod
+    def _enrich_payload(endpoint: str, payload: dict[str, Any]) -> dict[str, Any]:
+        enriched = dict(payload)
+        session_type = normalize_session_type(
+            enriched.get("normalized_session_type")
+            or enriched.get("session_name")
+            or enriched.get("session_type")
+        )
+        if session_type is not None:
+            enriched["normalized_session_type"] = session_type.value
+        phase = normalize_qualifying_phase(
+            enriched.get("session_phase") or enriched.get("qualifying_phase"),
+            session_type,
+        )
+        if phase is not None:
+            enriched["session_phase"] = phase
+        if endpoint == "session_result" and session_type is not None:
+            rows = phase_result_rows(enriched, session_type)
+            if rows:
+                enriched["phase_results"] = rows
+        return enriched
 
     @classmethod
     def _payload_time(cls, payload: dict[str, Any]) -> datetime | None:

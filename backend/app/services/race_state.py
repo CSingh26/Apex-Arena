@@ -17,16 +17,26 @@ from app.domain.models import (
 
 
 class DriverRaceState(BaseModel):
+    full_name: str | None = None
+    broadcast_name: str | None = None
+    team_name: str | None = None
     position: int | None = None
     gap_to_leader: float | str | None = None
     interval: float | str | None = None
     last_lap: dict[str, Any] = Field(default_factory=dict)
     pit_stops: list[dict[str, Any]] = Field(default_factory=list)
     stint: dict[str, Any] = Field(default_factory=dict)
+    best_laps_by_phase: dict[str, float] = Field(default_factory=dict)
+    phase_results: list[dict[str, Any]] = Field(default_factory=list)
+    grid_position: int | None = None
+    final_position: int | None = None
 
 
 class RaceState(BaseModel):
     session_key: str
+    session_type: str | None = None
+    current_phase: str | None = None
+    phase_history: list[str] = Field(default_factory=list)
     status: str = "unknown"
     current_lap: int | None = None
     drivers: dict[str, DriverRaceState] = Field(default_factory=dict)
@@ -34,6 +44,8 @@ class RaceState(BaseModel):
     race_control_feed: list[dict[str, Any]] = Field(default_factory=list)
     race_control_state: dict[str, Any] = Field(default_factory=dict)
     weather: dict[str, Any] = Field(default_factory=dict)
+    starting_grid: list[dict[str, Any]] = Field(default_factory=list)
+    final_classification: list[dict[str, Any]] = Field(default_factory=list)
     last_updated_at: datetime | None = None
     sequence_number: int = 0
     is_replay: bool = False
@@ -127,12 +139,33 @@ class RaceStateEngine:
     def _apply_event(self, state: RaceState, event: NormalizedRaceEvent) -> None:
         payload = event.payload
         event_type = event.event_type
+        normalized_session_type = payload.get("normalized_session_type")
+        if normalized_session_type:
+            state.session_type = str(normalized_session_type)
+        session_phase = payload.get("session_phase")
+        if session_phase:
+            state.current_phase = str(session_phase)
+            if state.current_phase not in state.phase_history:
+                state.phase_history.append(state.current_phase)
         if event.lap_number is not None:
             state.current_lap = max(state.current_lap or 0, event.lap_number)
         if event_type in {RaceEventType.SESSION_START, RaceEventType.RACE_START}:
             state.status = str(payload.get("status") or "started")
         elif event_type == RaceEventType.SESSION_STATUS:
             state.status = str(payload.get("status") or payload.get("message") or "unknown")
+        elif event_type == RaceEventType.QUALIFYING_PHASE:
+            state.status = str(payload.get("status") or "running")
+        elif event_type == RaceEventType.DRIVER_UPDATE:
+            driver = self._driver(state, event)
+            driver.full_name = self._optional_text(
+                payload.get("resolved_driver_name") or payload.get("full_name")
+            )
+            driver.broadcast_name = self._optional_text(
+                payload.get("resolved_broadcast_name") or payload.get("broadcast_name")
+            )
+            driver.team_name = self._optional_text(
+                payload.get("resolved_team_name") or payload.get("team_name")
+            )
         elif event_type == RaceEventType.SESSION_FINISH:
             state.status = "finished"
         elif event_type == RaceEventType.POSITION_SAMPLE:
@@ -146,13 +179,58 @@ class RaceStateEngine:
             lap_number = event.lap_number or self._optional_int(payload.get("lap_number"))
             if lap_number is not None:
                 state.current_lap = max(state.current_lap or 0, lap_number)
-            self._driver(state, event).last_lap = dict(payload)
+            driver = self._driver(state, event)
+            driver.last_lap = dict(payload)
+            duration = self._optional_float(payload.get("lap_duration"))
+            if state.current_phase and duration is not None:
+                previous = driver.best_laps_by_phase.get(state.current_phase)
+                if previous is None or duration < previous:
+                    driver.best_laps_by_phase[state.current_phase] = duration
         elif event_type == RaceEventType.PIT_STOP:
             pit_stop = dict(payload)
             state.pit_stop_history.append(pit_stop)
             self._driver(state, event).pit_stops.append(pit_stop)
         elif event_type == RaceEventType.STINT_UPDATE:
             self._driver(state, event).stint = dict(payload)
+        elif event_type == RaceEventType.LAP_DELETED:
+            self._driver(state, event).last_lap = {
+                **self._driver(state, event).last_lap,
+                "deleted": True,
+                "deletion_message": payload.get("message"),
+            }
+        elif event_type == RaceEventType.SESSION_RESULT:
+            driver = self._driver(state, event)
+            driver.final_position = self._optional_int(payload.get("position"))
+            rows = payload.get("phase_results")
+            if isinstance(rows, list):
+                driver.phase_results = [dict(row) for row in rows if isinstance(row, dict)]
+            result = dict(payload)
+            state.final_classification = [
+                existing
+                for existing in state.final_classification
+                if existing.get("driver_number") != payload.get("driver_number")
+            ]
+            state.final_classification.append(result)
+            state.final_classification.sort(
+                key=lambda row: self._optional_int(row.get("position")) or 10_000
+            )
+        elif event_type == RaceEventType.STARTING_GRID:
+            driver = self._driver(state, event)
+            driver.grid_position = self._optional_int(
+                payload.get("position") or payload.get("grid_position")
+            )
+            grid_row = dict(payload)
+            state.starting_grid = [
+                existing
+                for existing in state.starting_grid
+                if existing.get("driver_number") != payload.get("driver_number")
+            ]
+            state.starting_grid.append(grid_row)
+            state.starting_grid.sort(
+                key=lambda row: (
+                    self._optional_int(row.get("position") or row.get("grid_position")) or 10_000
+                )
+            )
         elif event_type in self.CONTROL_EVENT_TYPES:
             control_event = {
                 "event_type": event_type.value,
@@ -182,6 +260,20 @@ class RaceStateEngine:
             return int(value)
         except (TypeError, ValueError):
             return None
+
+    @staticmethod
+    def _optional_float(value: object) -> float | None:
+        if value is None or isinstance(value, bool):
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _optional_text(value: object) -> str | None:
+        text = " ".join(str(value or "").split())
+        return text or None
 
     async def _persist_snapshot(
         self, state: RaceState, event: NormalizedRaceEvent
