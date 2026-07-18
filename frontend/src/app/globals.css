@@ -3868,3 +3868,38 @@ body {
 .circuit-outline > span i { width: 14px; height: 2px; background: currentColor; }
 .circuit-outline--compact { width: 96px; opacity: .85; }
 .circuit-outline--compact .circuit-outline__track { stroke-width: 4; }
+
+.apex-race-loader {
+  display: grid;
+  min-height: 260px;
+  place-items: center;
+  align-content: center;
+  gap: 14px;
+  color: var(--foreground);
+}
+
+.apex-race-loader__stage {
+  position: relative;
+  width: min(280px, 72vw);
+}
+
+.apex-race-loader svg { display: block; width: 100%; overflow: visible; }
+.apex-race-loader svg path { fill: none; stroke-linecap: round; }
+.apex-race-loader__track-shadow { stroke: rgb(2 6 23 / 42%); stroke-width: 8; }
+.apex-race-loader__track { stroke: url("#apex-loader-gradient"); stroke: var(--apex-cyan); stroke-width: 2.5; stroke-dasharray: 18 82; animation: apex-track-charge 1.8s linear infinite; filter: drop-shadow(0 0 7px rgb(81 229 212 / 55%)); }
+.apex-race-loader__mark { transform-origin: 84px 54px; animation: apex-mark-pulse 1.8s ease-in-out infinite; }
+.apex-race-loader__mark path { fill: var(--apex-coral); stroke: none; filter: drop-shadow(0 0 10px rgb(255 93 120 / 48%)); }
+.apex-race-loader__signal { fill: var(--apex-yellow); filter: drop-shadow(0 0 6px var(--apex-yellow)); animation: apex-signal-pulse .9s ease-in-out infinite alternate; }
+.apex-race-loader__wordmark { position: absolute; top: 50%; left: 50%; font: 900 .72rem/1 var(--font-mono), monospace; letter-spacing: .22em; transform: translate(-45%, 80%); }
+.apex-race-loader__wordmark b { color: var(--apex-coral); }
+.apex-race-loader > p { margin: 0; color: var(--muted); font: 700 .61rem var(--font-mono), monospace; letter-spacing: .09em; text-transform: uppercase; }
+.apex-race-loader--compact { min-height: 150px; }
+.apex-race-loader--compact .apex-race-loader__stage { width: 180px; }
+
+@keyframes apex-track-charge { to { stroke-dashoffset: -100; } }
+@keyframes apex-mark-pulse { 0%, 100% { opacity: .72; transform: scale(.96); } 50% { opacity: 1; transform: scale(1.04); } }
+@keyframes apex-signal-pulse { from { opacity: .35; } to { opacity: 1; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .apex-race-loader__track, .apex-race-loader__mark, .apex-race-loader__signal { animation: none; }
+}
