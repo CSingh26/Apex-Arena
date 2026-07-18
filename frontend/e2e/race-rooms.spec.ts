@@ -45,6 +45,29 @@ async function expectNoHorizontalOverflow(page: Page): Promise<void> {
 
 test.describe.configure({ mode: "serial" });
 
+test("introduces Apex Arena on a responsive, theme-aware landing page", async ({ page }) => {
+  const browserErrors = collectBrowserErrors(page);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/");
+  await expect(page.getByRole("heading", { name: /Every race has a story/ })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Not another timing screen." })).toBeVisible();
+  await expectNoHorizontalOverflow(page);
+
+  const themeToggle = page.locator(".theme-toggle");
+  const initialTheme = await page.locator("html").getAttribute("data-theme");
+  await themeToggle.click();
+  await expect(page.locator("html")).not.toHaveAttribute("data-theme", initialTheme ?? "");
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(page.getByRole("heading", { name: /Every race has a story/ })).toBeVisible();
+  await expect(page.getByRole("link", { name: /Enter Race Rooms/ })).toBeVisible();
+  await expectNoHorizontalOverflow(page);
+  await page.getByRole("link", { name: /Enter Race Rooms/ }).click();
+  await expect(page).toHaveURL(/\/race-rooms$/);
+  await expect(page.getByRole("heading", { name: "Race Rooms" })).toBeVisible();
+  expect(browserErrors).toEqual([]);
+});
+
 test("runs a grounded replay through filtering, evidence, seek, and completion", async ({ page, request }) => {
   const browserErrors = collectBrowserErrors(page);
   await postRoomAction(request, "replay", { action: "restart" });
