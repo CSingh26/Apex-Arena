@@ -38,3 +38,34 @@ def test_2026_only_mode_rejects_another_season() -> None:
             postgres_password="test",
             redis_url="redis://localhost:6379/15",
         )
+
+
+def test_production_rejects_combined_role_and_plaintext_datastores(settings: Settings) -> None:
+    values = settings.model_dump()
+    values.update(
+        app_env="production",
+        app_process_role="all",
+        debug_ingestion_enabled=False,
+        openf1_live_auto_connect=False,
+    )
+    with pytest.raises(ValidationError, match="APP_PROCESS_ROLE=all"):
+        Settings.model_validate(values)
+
+    values["app_process_role"] = "api"
+    with pytest.raises(ValidationError, match="DATABASE_URL must require TLS"):
+        Settings.model_validate(values)
+
+
+def test_production_rejects_api_auto_ingestion(settings: Settings) -> None:
+    values = settings.model_dump()
+    values.update(
+        app_env="production",
+        app_process_role="api",
+        openf1_live_auto_connect=True,
+        debug_ingestion_enabled=False,
+        database_url="postgresql://apex:test-password@localhost:5432/apex_arena?ssl=require",
+        redis_url="rediss://localhost:6379/15",
+    )
+
+    with pytest.raises(ValidationError, match="cannot auto-connect"):
+        Settings.model_validate(values)

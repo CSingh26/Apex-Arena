@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 from typing import Literal
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -21,6 +21,7 @@ class Settings(BaseSettings):
 
     app_name: str = "Apex Arena"
     app_env: Literal["local", "test", "staging", "production"] = "local"
+    app_process_role: Literal["api", "ingestor", "all"] = "api"
     node_env: str = "development"
 
     season_year: int = 2026
@@ -32,7 +33,7 @@ class Settings(BaseSettings):
     backend_url: str = "http://localhost:8000"
     next_public_app_name: str = "Apex Arena"
     next_public_app_url: str = "http://localhost:3000"
-    next_public_api_url: str = "http://localhost:8000"
+    next_public_app_base_path: str = ""
 
     database_url: SecretStr
     postgres_db: str = "apex_arena"
@@ -123,9 +124,9 @@ class Settings(BaseSettings):
     sentry_dsn: SecretStr | None = None
     next_public_sentry_dsn: str | None = None
 
-    production_frontend_url: str = "https://apex.chaitanyasingh.org"
-    production_backend_url: str = "https://api.apex.chaitanyasingh.org"
-    public_base_url: str = "https://apex.chaitanyasingh.org"
+    production_frontend_url: str = "https://chaitanyasingh.org/apex-arena"
+    production_backend_url: str = "https://chaitanyasingh.org/apex-arena/api"
+    public_base_url: str = "https://chaitanyasingh.org/apex-arena"
 
     @field_validator(
         "openf1_username",
@@ -180,7 +181,6 @@ class Settings(BaseSettings):
         "frontend_url",
         "backend_url",
         "next_public_app_url",
-        "next_public_api_url",
         "openf1_rest_base_url",
         "openf1_auth_url",
         "jolpica_base_url",
@@ -207,6 +207,29 @@ class Settings(BaseSettings):
 
         if self.openf1_reconnect_base_delay_ms > self.openf1_reconnect_max_delay_ms:
             raise ValueError("OpenF1 reconnect base delay cannot exceed maximum delay")
+        if self.app_env == "production" and self.app_process_role == "all":
+            raise ValueError("APP_PROCESS_ROLE=all is not allowed in production")
+        if (
+            self.app_env == "production"
+            and self.app_process_role == "api"
+            and self.openf1_live_auto_connect
+        ):
+            raise ValueError(
+                "API processes cannot auto-connect OpenF1 live ingestion in production"
+            )
+        if self.app_env == "production":
+            database_query = parse_qs(urlparse(self.database_url.get_secret_value()).query)
+            database_tls = (database_query.get("ssl") or database_query.get("sslmode") or [""])[0]
+            if database_tls not in {"require", "verify-ca", "verify-full", "true"}:
+                raise ValueError("Production DATABASE_URL must require TLS")
+            if not self.redis_url.get_secret_value().startswith("rediss://"):
+                raise ValueError("Production REDIS_URL must use rediss://")
+            if self.debug_ingestion_enabled:
+                raise ValueError("DEBUG_INGESTION_ENABLED must be false in production")
+            if self.development_fixture_enabled:
+                raise ValueError("DEVELOPMENT_FIXTURE_ENABLED must be false in production")
+            if self.room_diagnostics_enabled:
+                raise ValueError("ROOM_DIAGNOSTICS_ENABLED must be false in production")
         return self
 
     @property
@@ -242,6 +265,7 @@ class Settings(BaseSettings):
         redis = urlparse(self.redis_url.get_secret_value())
         return {
             "environment": self.app_env,
+            "process_role": self.app_process_role,
             "season": self.season_year,
             "database_host": database.hostname,
             "database_port": database.port,

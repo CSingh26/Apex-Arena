@@ -74,6 +74,14 @@ class EventBus:
             maxlen=200,
         )
 
+    async def latest_connection_status(self) -> dict[str, Any] | None:
+        records = await self.redis.xrevrange("apex:live:status", count=1)
+        if not records:
+            return None
+        _, values = records[0]
+        payload = json.loads(values["data"])
+        return payload if isinstance(payload, dict) else None
+
     async def publish_room_message(self, message: RoomMessage) -> str:
         return await self._publish(
             self.room_stream(str(message.room_id)),

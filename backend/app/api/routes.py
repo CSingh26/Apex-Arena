@@ -9,7 +9,7 @@ from typing import Annotated
 
 import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from app.api.schemas import (
     AppHealth,
@@ -45,6 +45,69 @@ Services = Annotated[AppServices, Depends(get_services)]
 @router.get("/", include_in_schema=False)
 async def root() -> dict[str, str]:
     return {"name": "Apex Arena API", "docs": "/docs", "health": "/health"}
+
+
+@router.get("/health/live")
+async def health_live(services: Services) -> dict[str, object]:
+    """Cheap process liveness probe; it deliberately avoids network dependencies."""
+    return {
+        "status": "alive",
+        "role": services.settings.app_process_role,
+        "checked_at": datetime.now(UTC).isoformat(),
+    }
+
+
+@router.get("/health/ready", response_model=None)
+async def health_ready(services: Services) -> JSONResponse:
+    """Dependency-aware readiness probe suitable for traffic admission."""
+    database_result, redis_result = await asyncio.gather(
+        services.database.health_check(),
+        services.redis.health_check(),
+    )
+    database_ok, _ = database_result
+    redis_ok, _ = redis_result
+    ready = database_ok and redis_ok
+    return JSONResponse(
+        status_code=status.HTTP_200_OK if ready else status.HTTP_503_SERVICE_UNAVAILABLE,
+        content={
+            "status": "ready" if ready else "not_ready",
+            "role": services.settings.app_process_role,
+            "dependencies": {
+                "database": "ready" if database_ok else "unavailable",
+                "redis": "ready" if redis_ok else "unavailable",
+            },
+            "checked_at": datetime.now(UTC).isoformat(),
+        },
+    )
+
+
+@router.get("/health/provider", response_model=None)
+async def health_provider(services: Services) -> JSONResponse:
+    """Report the latest OpenF1 ingestion state without exposing credentials or tokens."""
+    provider: dict[str, object] | None
+    source = "local_process"
+    if services.settings.app_process_role == "api":
+        source = "redis_status_stream"
+        try:
+            provider = await services.event_bus.latest_connection_status()
+        except Exception:
+            provider = None
+    else:
+        provider = services.openf1_live.status()
+
+    state = str((provider or {}).get("connection_state") or "unknown").upper()
+    healthy = not services.settings.live_mode_enabled or state in {"CONNECTED", "DISABLED"}
+    return JSONResponse(
+        status_code=status.HTTP_200_OK if healthy else status.HTTP_503_SERVICE_UNAVAILABLE,
+        content={
+            "status": "ready" if healthy else "degraded",
+            "source": source,
+            "connection_state": state,
+            "current_session_key": (provider or {}).get("current_session_key"),
+            "last_event_at": str((provider or {}).get("last_event_at") or "") or None,
+            "checked_at": datetime.now(UTC).isoformat(),
+        },
+    )
 
 
 @router.get("/health", response_model=HealthResponse)

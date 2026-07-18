@@ -37,6 +37,33 @@ def test_health_reports_dependency_and_live_degradation(settings: Settings) -> N
     assert "password" not in response.text.lower()
 
 
+def test_health_probes_separate_liveness_readiness_and_provider(settings: Settings) -> None:
+    app = create_app(settings)
+    with TestClient(app) as client:
+        services = app.state.services
+        services.database.health_check = AsyncMock(return_value=(True, "connected"))
+        services.redis.health_check = AsyncMock(return_value=(False, "unavailable"))
+        services.event_bus.latest_connection_status = AsyncMock(
+            return_value={
+                "connection_state": "CONNECTED",
+                "current_session_key": "spa-race",
+                "last_event_at": "2026-07-19T12:00:00Z",
+            }
+        )
+
+        live_response = client.get("/health/live")
+        ready_response = client.get("/health/ready")
+        provider_response = client.get("/health/provider")
+
+    assert live_response.status_code == 200
+    assert live_response.json()["role"] == "api"
+    assert ready_response.status_code == 503
+    assert ready_response.json()["dependencies"]["redis"] == "unavailable"
+    assert provider_response.status_code == 200
+    assert provider_response.json()["connection_state"] == "CONNECTED"
+    assert "credentials" not in provider_response.text.lower()
+
+
 def test_season_endpoint_returns_target_summary(settings: Settings) -> None:
     app = create_app(settings)
     spa = RaceMeeting(
@@ -169,7 +196,17 @@ def test_debug_config_is_available_outside_production(settings: Settings) -> Non
 
 def test_debug_config_is_hidden_in_production_without_flag(settings: Settings) -> None:
     hardened = Settings.model_validate(
-        {**settings.model_dump(), "app_env": "production", "room_diagnostics_enabled": False}
+        {
+            **settings.model_dump(),
+            "app_env": "production",
+            "room_diagnostics_enabled": False,
+            "debug_ingestion_enabled": False,
+            "openf1_live_auto_connect": False,
+            "database_url": (
+                "postgresql://apex:test-password@localhost:5432/apex_arena?ssl=require"
+            ),
+            "redis_url": "rediss://localhost:6379/15",
+        }
     )
     with TestClient(create_app(hardened)) as client:
         response = client.get("/api/v1/debug/config")
