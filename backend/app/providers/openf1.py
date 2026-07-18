@@ -45,7 +45,7 @@ class ProviderPayloadError(RuntimeError):
 
 
 class OpenF1RestClient:
-    """Historical OpenF1 REST client. Historical endpoints do not require auth."""
+    """Historical REST client that starts public and retries a 401 with backend OAuth."""
 
     def __init__(
         self,

@@ -50,6 +50,7 @@ class RaceRoomService:
             if not self._foundation_ready and self.fixture is not None:
                 await self.repository.upsert_room(self._development_room(), agent_ids)
                 await self.fixture.seed()
+                await self._retire_legacy_fixture()
                 self._foundation_ready = True
             try:
                 meetings = await self.season.calendar(self.season_year)
@@ -88,6 +89,7 @@ class RaceRoomService:
             if self.fixture is not None:
                 await self.repository.upsert_room(self._development_room(), agent_ids)
                 await self.fixture.seed()
+                await self._retire_legacy_fixture()
                 self._foundation_ready = True
                 count += 1
             meetings = await self.season.calendar(self.season_year)
@@ -100,6 +102,11 @@ class RaceRoomService:
             self._catalog_ready = True
             self._retry_after = 0.0
             return count + len(meetings)
+
+    async def _retire_legacy_fixture(self) -> None:
+        cleanup = getattr(self.repository, "delete_empty_development_room", None)
+        if cleanup is not None:
+            await cleanup("development-day2-validation")
 
     @staticmethod
     def _slug(value: str) -> str:

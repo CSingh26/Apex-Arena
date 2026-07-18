@@ -61,6 +61,8 @@ class FakeRoomRepository:
         self.status_updates: list[tuple[RoomStatus, int | None]] = []
         self.reset_count = 0
         self.message_sequence = 0
+        self.event_message_sequences: dict[int, int] = {}
+        self.event_message_queries: list[tuple[str, int]] = []
         self.terminal_status = asyncio.Event()
 
     async def get_playback(self, room_id: UUID) -> RoomPlaybackState:
@@ -116,10 +118,29 @@ class FakeRoomRepository:
         assert room_id == self.room.id
         self.reset_count += 1
         self.message_sequence = 0
+        self.event_message_sequences.clear()
 
     async def max_message_sequence(self, room_id: UUID) -> int:
         assert room_id == self.room.id
         return self.message_sequence
+
+    async def max_message_sequence_for_event(
+        self,
+        room_id: UUID,
+        session_key: str,
+        target_sequence: int,
+    ) -> int:
+        assert room_id == self.room.id
+        assert session_key == self.room.session_key
+        self.event_message_queries.append((session_key, target_sequence))
+        return max(
+            (
+                message_sequence
+                for event_sequence, message_sequence in self.event_message_sequences.items()
+                if event_sequence <= target_sequence
+            ),
+            default=0,
+        )
 
 
 class FakeEventRepository:
@@ -173,12 +194,24 @@ class FakeDiscussion:
         self.failure = failure
         self.consumed: list[int] = []
         self.resets: list[tuple[str, str]] = []
+        self.block_on_sequence: int | None = None
+        self.consume_started = asyncio.Event()
+        self.consume_release = asyncio.Event()
+        self._blocked_once = False
 
     async def consume(self, event: NormalizedRaceEvent) -> None:
         if self.failure is not None:
             raise self.failure
         self.consumed.append(event.sequence_number)
-        self.rooms.message_sequence += 1
+        if self.block_on_sequence == event.sequence_number and not self._blocked_once:
+            self._blocked_once = True
+            self.consume_started.set()
+            await self.consume_release.wait()
+        if event.sequence_number not in self.rooms.event_message_sequences:
+            self.rooms.message_sequence += 1
+            self.rooms.event_message_sequences[event.sequence_number] = (
+                self.rooms.message_sequence
+            )
 
     def reset_session(self, session_key: str, room_id: str) -> None:
         self.resets.append((session_key, room_id))
@@ -331,7 +364,7 @@ async def test_pause_prevents_consumption_until_resume_then_completes() -> None:
 @pytest.mark.asyncio
 async def test_speed_and_seek_controls_update_durable_playback_and_publish() -> None:
     room = replay_room()
-    replay, rooms, _, _, _, bus = coordinator(
+    replay, rooms, _, discussion, race_state, bus = coordinator(
         room,
         [replay_event(3, 2), replay_event(7, 5)],
     )
@@ -342,10 +375,64 @@ async def test_speed_and_seek_controls_update_durable_playback_and_publish() -> 
 
     assert speed.playback_speed == 4
     assert by_sequence.current_event_sequence == 6
+    assert by_sequence.current_message_sequence == 1
+    assert by_sequence.current_lap == 2
     assert by_lap.current_event_sequence == 6
+    assert by_lap.current_message_sequence == 1
     assert by_lap.current_lap == 5
     assert rooms.playback.current_event_sequence == 6
+    assert rooms.event_message_queries == [
+        ("day3-session", 6),
+        ("day3-session", 6),
+    ]
+    assert discussion.consumed == [3, 3]
+    assert discussion.resets == [
+        ("day3-session", str(room.id)),
+        ("day3-session", str(room.id)),
+    ]
+    assert race_state.consumed == [3, 3]
+    assert race_state.resets == ["day3-session", "day3-session"]
     assert len(bus.states) == 3
+
+
+@pytest.mark.asyncio
+async def test_running_replay_and_seek_are_serialized_into_one_coherent_state() -> None:
+    room = replay_room()
+    replay, rooms, _, discussion, race_state, _ = coordinator(
+        room,
+        [
+            replay_event(1, 1),
+            replay_event(2, 2),
+            replay_event(3, 3),
+            replay_event(4, 4),
+        ],
+        interval=1,
+    )
+    discussion.block_on_sequence = 1
+
+    await replay.start(room)
+    await asyncio.wait_for(discussion.consume_started.wait(), timeout=1)
+    seek_task = asyncio.create_task(replay.seek_to_sequence(room, 3))
+    await asyncio.sleep(0)
+
+    assert seek_task.done() is False
+    assert rooms.playback.current_event_sequence == 0
+
+    discussion.consume_release.set()
+    sought = await asyncio.wait_for(seek_task, timeout=1)
+    paused = await replay.pause(rooms.room)
+
+    assert sought.current_event_sequence == 3
+    assert sought.current_message_sequence == 3
+    assert sought.current_lap == 3
+    assert paused.current_event_sequence == 3
+    assert paused.is_paused is True
+    assert discussion.consumed == [1, 1, 2, 3]
+    assert race_state.consumed == [1, 1, 2, 3]
+    assert race_state.resets == ["day3-session"]
+    assert rooms.event_message_queries == [("day3-session", 3)]
+    assert 4 not in discussion.consumed
+    await replay.close()
 
 
 @pytest.mark.asyncio
@@ -359,6 +446,23 @@ async def test_speed_and_seek_controls_reject_values_outside_available_range() -
         await replay.seek_to_sequence(room, 8)
     with pytest.raises(ReplayUnavailableError, match="lap"):
         await replay.seek_to_lap(room, 4)
+
+
+@pytest.mark.asyncio
+async def test_seeking_completed_room_before_finish_transitions_it_to_paused() -> None:
+    room = replay_room().model_copy(update={"status": RoomStatus.COMPLETED})
+    replay, rooms, _, _, _, bus = coordinator(
+        room,
+        [replay_event(1, 1), replay_event(2, 2), replay_event(3, 3)],
+    )
+
+    playback = await replay.seek_to_sequence(room, 2)
+
+    assert playback.current_event_sequence == 2
+    assert playback.current_message_sequence == 2
+    assert rooms.room.status is RoomStatus.PAUSED
+    assert rooms.status_updates == [(RoomStatus.PAUSED, None)]
+    assert bus.statuses[-1]["status"] == "paused"
 
 
 @pytest.mark.asyncio

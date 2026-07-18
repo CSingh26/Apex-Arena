@@ -79,27 +79,30 @@ class RoomReplayCoordinator:
             return playback
 
     async def pause(self, room: RaceRoom) -> RoomPlaybackState:
-        playback = await self.rooms.update_playback(room.id, is_paused=True)
-        await self.rooms.update_room_status(room.id, RoomStatus.PAUSED)
-        await self._publish(room.id, playback, RoomStatus.PAUSED)
-        return playback
+        async with self._locks.setdefault(room.id, asyncio.Lock()):
+            playback = await self.rooms.update_playback(room.id, is_paused=True)
+            await self.rooms.update_room_status(room.id, RoomStatus.PAUSED)
+            await self._publish(room.id, playback, RoomStatus.PAUSED)
+            return playback
 
     async def resume(self, room: RaceRoom) -> RoomPlaybackState:
-        playback = await self.rooms.update_playback(room.id, is_paused=False)
-        await self.rooms.update_room_status(room.id, RoomStatus.REPLAYING)
-        if room.id not in self._tasks or self._tasks[room.id].done():
-            self._tasks[room.id] = asyncio.create_task(
-                self._run(room), name=f"room-replay:{room.slug}"
-            )
-        await self._publish(room.id, playback, RoomStatus.REPLAYING)
-        return playback
+        async with self._locks.setdefault(room.id, asyncio.Lock()):
+            playback = await self.rooms.update_playback(room.id, is_paused=False)
+            await self.rooms.update_room_status(room.id, RoomStatus.REPLAYING)
+            if room.id not in self._tasks or self._tasks[room.id].done():
+                self._tasks[room.id] = asyncio.create_task(
+                    self._run(room), name=f"room-replay:{room.slug}"
+                )
+            await self._publish(room.id, playback, RoomStatus.REPLAYING)
+            return playback
 
     async def set_speed(self, room: RaceRoom, speed: float) -> RoomPlaybackState:
         if speed not in {0.5, 1.0, 2.0, 4.0, 8.0}:
             raise ValueError("Unsupported playback speed")
-        playback = await self.rooms.update_playback(room.id, playback_speed=speed)
-        await self._publish(room.id, playback, room.status)
-        return playback
+        async with self._locks.setdefault(room.id, asyncio.Lock()):
+            playback = await self.rooms.update_playback(room.id, playback_speed=speed)
+            await self._publish(room.id, playback, room.status)
+            return playback
 
     async def seek_to_sequence(self, room: RaceRoom, sequence: int) -> RoomPlaybackState:
         if room.session_key is None:
@@ -107,11 +110,11 @@ class RoomReplayCoordinator:
         maximum = await self.events.max_sequence(room.session_key)
         if sequence > maximum:
             raise ReplayUnavailableError("Replay sequence is outside the available event range")
-        playback = await self.rooms.update_playback(
-            room.id, current_event_sequence=sequence
-        )
-        await self._publish(room.id, playback, room.status)
-        return playback
+        async with self._locks.setdefault(room.id, asyncio.Lock()):
+            playback = await self._rebuild_to_sequence(room, sequence)
+            room_status = await self._status_after_seek(room, sequence, maximum)
+            await self._publish(room.id, playback, room_status)
+            return playback
 
     async def seek_to_lap(self, room: RaceRoom, lap_number: int) -> RoomPlaybackState:
         if room.session_key is None:
@@ -119,13 +122,21 @@ class RoomReplayCoordinator:
         sequence = await self.events.sequence_for_lap(room.session_key, lap_number)
         if sequence is None:
             raise ReplayUnavailableError("Replay lap is outside the available event range")
-        playback = await self.rooms.update_playback(
-            room.id,
-            current_event_sequence=max(0, sequence - 1),
-            current_lap=lap_number,
-        )
-        await self._publish(room.id, playback, room.status)
-        return playback
+        maximum = await self.events.max_sequence(room.session_key)
+        target_sequence = max(0, sequence - 1)
+        async with self._locks.setdefault(room.id, asyncio.Lock()):
+            playback = await self._rebuild_to_sequence(
+                room,
+                target_sequence,
+                displayed_lap=lap_number,
+            )
+            room_status = await self._status_after_seek(
+                room,
+                target_sequence,
+                maximum,
+            )
+            await self._publish(room.id, playback, room_status)
+            return playback
 
     async def close(self) -> None:
         await asyncio.gather(
@@ -137,40 +148,47 @@ class RoomReplayCoordinator:
         assert room.session_key is not None
         try:
             while True:
-                playback = await self.rooms.get_playback(room.id)
-                if playback.is_paused:
+                should_wait = False
+                async with self._locks.setdefault(room.id, asyncio.Lock()):
+                    playback = await self.rooms.get_playback(room.id)
+                    if playback.is_paused:
+                        should_wait = True
+                    else:
+                        events = await self.events.list_for_session(
+                            room.session_key,
+                            after_sequence=playback.current_event_sequence,
+                            limit=1,
+                        )
+                        if not events:
+                            completed = await self.rooms.update_playback(
+                                room.id, is_paused=True
+                            )
+                            await self.rooms.update_room_status(room.id, RoomStatus.COMPLETED)
+                            await self._publish(room.id, completed, RoomStatus.COMPLETED)
+                            await self._publish_status(
+                                str(room.id), {"status": "replay_complete"}
+                            )
+                            return
+                        event = events[0]
+                        await self.race_state.consume(event)
+                        await self.discussion.consume(event)
+                        message_sequence = await self.rooms.max_message_sequence(room.id)
+                        advanced = await self.rooms.update_playback(
+                            room.id,
+                            current_event_sequence=event.sequence_number,
+                            current_message_sequence=message_sequence,
+                            current_lap=event.lap_number,
+                        )
+                        await self.rooms.update_room_status(
+                            room.id,
+                            RoomStatus.REPLAYING,
+                            current_lap=event.lap_number,
+                            last_event_at=event.event_time,
+                        )
+                        await self._publish(room.id, advanced, RoomStatus.REPLAYING)
+                if should_wait:
                     await asyncio.sleep(0.1)
                     continue
-                events = await self.events.list_for_session(
-                    room.session_key,
-                    after_sequence=playback.current_event_sequence,
-                    limit=1,
-                )
-                if not events:
-                    completed = await self.rooms.update_playback(room.id, is_paused=True)
-                    await self.rooms.update_room_status(room.id, RoomStatus.COMPLETED)
-                    await self._publish(room.id, completed, RoomStatus.COMPLETED)
-                    await self._publish_status(
-                        str(room.id), {"status": "replay_complete"}
-                    )
-                    return
-                event = events[0]
-                await self.race_state.consume(event)
-                await self.discussion.consume(event)
-                message_sequence = await self.rooms.max_message_sequence(room.id)
-                advanced = await self.rooms.update_playback(
-                    room.id,
-                    current_event_sequence=event.sequence_number,
-                    current_message_sequence=message_sequence,
-                    current_lap=event.lap_number,
-                )
-                await self.rooms.update_room_status(
-                    room.id,
-                    RoomStatus.REPLAYING,
-                    current_lap=event.lap_number,
-                    last_event_at=event.event_time,
-                )
-                await self._publish(room.id, advanced, RoomStatus.REPLAYING)
                 await asyncio.sleep(self.base_interval_seconds / advanced.playback_speed)
         except asyncio.CancelledError:
             raise
@@ -180,6 +198,58 @@ class RoomReplayCoordinator:
             await self._publish_status(
                 str(room.id), {"status": "failed", "detail": "Replay processing failed"}
             )
+
+    async def _rebuild_to_sequence(
+        self,
+        room: RaceRoom,
+        target_sequence: int,
+        *,
+        displayed_lap: int | None = None,
+    ) -> RoomPlaybackState:
+        assert room.session_key is not None
+        await self.race_state.reset_session(room.session_key)
+        self.discussion.reset_session(room.session_key, str(room.id))
+        cursor = 0
+        last_lap: int | None = None
+        while cursor < target_sequence:
+            events = await self.events.list_for_session(
+                room.session_key,
+                after_sequence=cursor,
+                limit=250,
+            )
+            eligible = [event for event in events if event.sequence_number <= target_sequence]
+            if not eligible:
+                break
+            for event in eligible:
+                await self.race_state.consume(event)
+                await self.discussion.consume(event)
+                cursor = event.sequence_number
+                if event.lap_number is not None:
+                    last_lap = event.lap_number
+            if len(eligible) < len(events):
+                break
+        message_sequence = await self.rooms.max_message_sequence_for_event(
+            room.id,
+            room.session_key,
+            target_sequence,
+        )
+        return await self.rooms.update_playback(
+            room.id,
+            current_event_sequence=target_sequence,
+            current_message_sequence=message_sequence,
+            current_lap=displayed_lap if displayed_lap is not None else last_lap or 0,
+        )
+
+    async def _status_after_seek(
+        self,
+        room: RaceRoom,
+        target_sequence: int,
+        maximum_sequence: int,
+    ) -> RoomStatus:
+        if room.status == RoomStatus.COMPLETED and target_sequence < maximum_sequence:
+            await self.rooms.update_room_status(room.id, RoomStatus.PAUSED)
+            return RoomStatus.PAUSED
+        return room.status
 
     async def _publish(
         self, room_id: UUID, playback: RoomPlaybackState, status: RoomStatus

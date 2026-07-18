@@ -22,6 +22,7 @@ from app.storage.database import Database
 from app.storage.models import (
     AgentProfileRecord,
     MessageEvidenceRecord,
+    NormalizedRaceEventRecord,
     RaceRoomAgentRecord,
     RaceRoomRecord,
     RoomMessageRecord,
@@ -366,6 +367,27 @@ class SqlRaceRoomRepository:
         async with self.database.session_factory() as session:
             return int((await session.execute(statement)).scalar_one_or_none() or 0)
 
+    async def max_message_sequence_for_event(
+        self,
+        room_id: UUID,
+        session_key: str,
+        event_sequence: int,
+    ) -> int:
+        statement = (
+            select(func.max(RoomMessageRecord.sequence))
+            .join(
+                NormalizedRaceEventRecord,
+                NormalizedRaceEventRecord.id == RoomMessageRecord.trigger_event_id,
+            )
+            .where(
+                RoomMessageRecord.room_id == room_id,
+                NormalizedRaceEventRecord.session_key == session_key,
+                NormalizedRaceEventRecord.sequence_number <= event_sequence,
+            )
+        )
+        async with self.database.session_factory() as session:
+            return int((await session.execute(statement)).scalar_one_or_none() or 0)
+
     async def update_room_status(
         self,
         room_id: UUID,
@@ -402,3 +424,34 @@ class SqlRaceRoomRepository:
                 .values(message_count=0, current_lap=None, last_event_at=None)
             )
             await session.commit()
+
+    async def delete_empty_development_room(self, slug: str) -> bool:
+        """Retire a superseded fixture without touching rooms that contain discussion."""
+        async with self.database.session_factory() as session:
+            room_id = (
+                await session.execute(
+                    select(RaceRoomRecord.id)
+                    .where(
+                        RaceRoomRecord.slug == slug,
+                        RaceRoomRecord.is_development.is_(True),
+                        RaceRoomRecord.message_count == 0,
+                        ~select(RoomMessageRecord.id)
+                        .where(RoomMessageRecord.room_id == RaceRoomRecord.id)
+                        .exists(),
+                    )
+                    .with_for_update()
+                )
+            ).scalar_one_or_none()
+            if room_id is None:
+                return False
+            await session.execute(
+                delete(RoomPlaybackStateRecord).where(
+                    RoomPlaybackStateRecord.room_id == room_id
+                )
+            )
+            await session.execute(
+                delete(RaceRoomAgentRecord).where(RaceRoomAgentRecord.room_id == room_id)
+            )
+            await session.execute(delete(RaceRoomRecord).where(RaceRoomRecord.id == room_id))
+            await session.commit()
+            return True

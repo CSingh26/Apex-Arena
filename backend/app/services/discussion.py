@@ -15,6 +15,7 @@ from app.domain.rooms import (
     Confidence,
     EvidenceStatus,
     MessageEvidence,
+    MessageTopic,
     MessageType,
     RoomMessage,
 )
@@ -513,7 +514,13 @@ class RaceRoomDiscussionEngine:
             sequence=0,
             lap_number=event.lap_number,
             wall_time=event.event_time,
-            topic=trigger.topic,
+            topic=(
+                MessageTopic.STRATEGY
+                if agent_id == "mira-vale"
+                and event.event_type == RaceEventType.LAP_COMPLETED
+                and "pace_trend_seconds" in context.evidence
+                else trigger.topic
+            ),
             message_type=generated.message_type,
             content=generated.content,
             confidence=generated.confidence,

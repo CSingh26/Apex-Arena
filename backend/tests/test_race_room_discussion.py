@@ -7,7 +7,14 @@ from uuid import uuid4
 import pytest
 
 from app.domain.models import RaceEventType
-from app.domain.rooms import Confidence, EvidenceStatus, MessageEvidence, MessageType, RoomMessage
+from app.domain.rooms import (
+    Confidence,
+    EvidenceStatus,
+    MessageEvidence,
+    MessageTopic,
+    MessageType,
+    RoomMessage,
+)
 from app.services.discussion import (
     DeterministicRoomGenerator,
     GeneratedRoomMessage,
@@ -315,6 +322,32 @@ async def test_position_change_produces_a_grounded_disagreement() -> None:
 
     assert [message.agent_id for message in repository.messages] == ["lena-cross", "theo-voss"]
     assert repository.messages[1].message_type is MessageType.DISAGREEMENT
+
+
+@pytest.mark.asyncio
+async def test_mira_pace_reply_is_classified_as_strategy_analysis() -> None:
+    repository = FakeRoomRepository()
+    engine = RaceRoomDiscussionEngine(
+        repository,  # type: ignore[arg-type]
+        DiscussionTriggerEvaluator(topic_cooldown_seconds=0, agent_cooldown_seconds=0),
+    )
+
+    await engine.consume(
+        race_room_event(
+            RaceEventType.LAP_COMPLETED,
+            lap=9,
+            payload={
+                "pace_trend_seconds": -0.42,
+                "representative_laps": [92.1, 91.8, 91.68],
+            },
+        )
+    )
+
+    assert [message.agent_id for message in repository.messages] == [
+        "theo-voss",
+        "mira-vale",
+    ]
+    assert repository.messages[1].topic is MessageTopic.STRATEGY
 
 
 @pytest.mark.asyncio

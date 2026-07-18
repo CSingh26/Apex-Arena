@@ -54,6 +54,7 @@ class FakeRoomRepository:
         self.seed_calls = 0
         self.upserts: list[RaceRoom] = []
         self.rooms: dict[str, RaceRoom] = {}
+        self.cleanup_calls: list[str] = []
 
     async def seed_agents(self, agents: list[object]) -> None:
         assert len(agents) == 5
@@ -78,6 +79,10 @@ class FakeRoomRepository:
             )
         self.rooms[room.slug] = room
         return room
+
+    async def delete_empty_development_room(self, slug: str) -> bool:
+        self.cleanup_calls.append(slug)
+        return True
 
 
 class FakeSeason:
@@ -296,7 +301,27 @@ async def test_force_sync_seeds_fixture_and_reports_room_count() -> None:
 
     assert count == 2
     assert fixture.seed_count == 1
+    assert repository.cleanup_calls == ["development-day2-validation"]
     assert set(repository.rooms) == {
         "day3-validation-room",
         "2026-belgian-grand-prix-race",
     }
+
+
+@pytest.mark.asyncio
+async def test_initial_catalog_retires_only_the_named_legacy_fixture() -> None:
+    repository = FakeRoomRepository()
+    fixture = FakeFixture()
+    service = RaceRoomService(
+        repository,  # type: ignore[arg-type]
+        FakeSeason([]),  # type: ignore[arg-type]
+        2026,
+        fixture=fixture,  # type: ignore[arg-type]
+    )
+
+    await service.ensure_catalog()
+    await service.ensure_catalog()
+
+    assert fixture.seed_count == 1
+    assert repository.cleanup_calls == ["development-day2-validation"]
+    assert "day3-validation-room" in repository.rooms
