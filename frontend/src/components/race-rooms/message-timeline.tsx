@@ -9,6 +9,13 @@ import { roomMessageTime } from "@/lib/room-state";
 const TOPICS: MessageTopic[] = ["strategy", "pace", "racecraft", "incident", "race_control", "weather", "pit_stop", "tyres", "championship", "summary", "session"];
 const MESSAGE_TYPES: MessageType[] = ["observation", "analysis", "question", "reply", "agreement", "disagreement", "correction", "summary", "uncertainty_notice"];
 const MAX_RENDERED_MESSAGES = 300;
+const AGENT_SIDES: Record<string, "left" | "right" | "host"> = {
+  "mira-vale": "right",
+  "theo-voss": "left",
+  "lena-cross": "right",
+  "arjun-reyes": "left",
+  nova: "host",
+};
 
 const MESSAGE_TYPE_LABELS: Record<MessageType, string> = {
   observation: "Call",
@@ -92,7 +99,8 @@ export function MessageTimeline({ messages, agents, selectedAgent, totalLaps, se
         const agent = agentsById.get(message.agent_id);
         const parent = message.reply_to_message_id ? messagesById.get(message.reply_to_message_id) : undefined;
         const parentAgent = parent ? agentsById.get(parent.agent_id) : undefined;
-        return <article className={`message message--${message.message_type}`} data-testid="room-message" data-message-sequence={message.sequence} data-agent-id={message.agent_id} data-topic={message.topic} data-message-type={message.message_type} data-accent={agent?.ui_accent_key} key={message.id}>
+        const side = AGENT_SIDES[message.agent_id] ?? (message.sequence % 2 ? "left" : "right");
+        return <article className={`message message--${message.message_type} message--side-${side}`} data-testid="room-message" data-message-sequence={message.sequence} data-agent-id={message.agent_id} data-topic={message.topic} data-message-type={message.message_type} data-message-side={side} data-accent={agent?.ui_accent_key} key={message.id}>
           <div className="message__rail"><span className="agent-avatar" aria-hidden>{agent?.avatar_key ?? "AA"}</span><span className="timeline-line" /></div>
           <div className="message__body">
             <header className="message__meta"><strong>{agent?.display_name ?? "Race Room"}</strong><span>{agent?.role ?? "Room voice"}</span><span>{message.session_phase ?? (qualifying ? "Session" : message.lap_number == null ? "Session" : `Lap ${message.lap_number}`)}</span></header>

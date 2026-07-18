@@ -1688,6 +1688,7 @@ summary:focus-visible {
   --apex-blue: #6d8cff;
   --apex-violet: #a779ff;
   --apex-yellow: #ffd166;
+  --apex-gold: var(--apex-yellow);
 }
 
 body {
@@ -3654,4 +3655,91 @@ body {
 [data-theme="light"] .weekend-countdown__action {
   border-color: rgb(67 88 168 / 16%);
   background: rgb(255 255 255 / 56%);
+}
+
+/* Day 5 — arena-style agent conversation */
+.message-feed {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 22px;
+  background: linear-gradient(180deg, rgb(109 140 255 / 3%), transparent 30%);
+}
+
+.message {
+  position: relative;
+  width: min(84%, 880px);
+  margin: 0;
+  padding: 20px 22px;
+  border: 1px solid color-mix(in srgb, var(--line) 78%, transparent);
+  border-radius: 22px;
+  background: color-mix(in srgb, var(--panel-raised) 92%, var(--apex-cyan) 8%);
+  box-shadow: 0 16px 40px rgb(1 5 20 / 10%);
+}
+
+.message--side-right {
+  margin-left: auto;
+  background: color-mix(in srgb, var(--panel-raised) 90%, var(--apex-cyan) 10%);
+}
+
+.message--side-left {
+  margin-right: auto;
+  background: color-mix(in srgb, var(--panel-raised) 91%, var(--apex-violet) 9%);
+}
+
+.message--side-host {
+  width: min(78%, 800px);
+  margin-inline: auto;
+  background: color-mix(in srgb, var(--panel-raised) 90%, var(--apex-gold) 10%);
+}
+
+.message--side-left::after,
+.message--side-right::after {
+  position: absolute;
+  bottom: 24px;
+  width: 18px;
+  height: 18px;
+  background: inherit;
+  content: "";
+  transform: rotate(45deg);
+}
+
+.message--side-left::after {
+  left: -8px;
+  border-bottom: 1px solid var(--line);
+  border-left: 1px solid var(--line);
+}
+
+.message--side-right::after {
+  right: -8px;
+  border-top: 1px solid var(--line);
+  border-right: 1px solid var(--line);
+}
+
+.message__rail {
+  align-content: start;
+}
+
+.message .timeline-line {
+  display: none;
+}
+
+.message__body > p {
+  max-width: none;
+  font-size: clamp(.96rem, 1.2vw, 1.08rem);
+  line-height: 1.62;
+}
+
+.message--side-right .message__meta,
+.message--side-right .message__labels,
+.message--side-right .message__footer {
+  justify-content: flex-end;
+}
+
+@media (max-width: 700px) {
+  .message-feed { gap: 12px; padding: 14px 10px; }
+  .message, .message--side-host { width: calc(100% - 10px); padding: 16px 14px; border-radius: 17px; }
+  .message--side-right { margin-left: 10px; }
+  .message--side-left { margin-right: 10px; }
+  .message--side-right .message__meta, .message--side-right .message__labels, .message--side-right .message__footer { justify-content: flex-start; }
 }
