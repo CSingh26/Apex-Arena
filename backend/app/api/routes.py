@@ -283,6 +283,8 @@ async def season_calendar(year: int, services: Services) -> SeasonCalendarSummar
 @router.get("/api/v1/debug/config", response_model=DebugConfigResponse)
 async def debug_config(services: Services) -> DebugConfigResponse:
     settings = services.settings
+    if settings.app_env == "production" and not settings.room_diagnostics_enabled:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
     return DebugConfigResponse(
         runtime=settings.safe_runtime_metadata,
         features={

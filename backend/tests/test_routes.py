@@ -157,3 +157,23 @@ def test_historical_ingestion_returns_pipeline_counts(settings: Settings) -> Non
 
     assert response.status_code == 200
     assert response.json()["normalized_inserted"] == 3
+
+
+def test_debug_config_is_available_outside_production(settings: Settings) -> None:
+    with TestClient(create_app(settings)) as client:
+        response = client.get("/api/v1/debug/config")
+
+    assert response.status_code == 200
+    assert "features" in response.json()
+
+
+def test_debug_config_is_hidden_in_production_without_flag(settings: Settings) -> None:
+    hardened = Settings.model_validate(
+        {**settings.model_dump(), "app_env": "production", "room_diagnostics_enabled": False}
+    )
+    with TestClient(create_app(hardened)) as client:
+        response = client.get("/api/v1/debug/config")
+
+    # The endpoint must not leak internal database/redis hostnames publicly.
+    assert response.status_code == 404
+    assert "database_host" not in response.text
