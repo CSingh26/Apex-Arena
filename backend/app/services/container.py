@@ -45,8 +45,23 @@ logger = logging.getLogger(__name__)
 class AppServices:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
-        self.database = Database(settings.async_database_url)
-        self.redis = RedisStore(settings.redis_dsn)
+        # The ingestor holds a session-scoped advisory lease, which a transaction
+        # pooler would silently break, so it connects through the direct DSN.
+        self.database = Database(
+            settings.async_migration_database_url
+            if settings.app_process_role == "ingestor"
+            else settings.async_database_url,
+            pool_size=settings.db_pool_size,
+            max_overflow=settings.db_max_overflow,
+            pool_timeout=settings.db_pool_timeout_seconds,
+            pool_recycle=settings.db_pool_recycle_seconds,
+        )
+        self.redis = RedisStore(
+            settings.redis_dsn,
+            socket_timeout=settings.redis_socket_timeout_seconds,
+            connect_timeout=settings.redis_connect_timeout_seconds,
+            health_check_interval=settings.redis_health_check_interval_seconds,
+        )
         self.event_bus = EventBus(self.redis.client)
         self.jolpica = JolpicaClient(settings.jolpica_base_url)
         self.openf1_auth = OpenF1AuthService(settings)

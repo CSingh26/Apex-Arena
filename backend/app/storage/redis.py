@@ -17,8 +17,24 @@ logger = logging.getLogger(__name__)
 
 
 class RedisStore:
-    def __init__(self, redis_url: str) -> None:
-        self.client: Redis = Redis.from_url(redis_url, decode_responses=True)
+    def __init__(
+        self,
+        redis_url: str,
+        *,
+        socket_timeout: int = 5,
+        connect_timeout: int = 5,
+        health_check_interval: int = 30,
+    ) -> None:
+        # rediss:// URLs negotiate TLS automatically. The health-check interval
+        # revives connections that a managed provider closed while idle.
+        self.client: Redis = Redis.from_url(
+            redis_url,
+            decode_responses=True,
+            socket_timeout=socket_timeout,
+            socket_connect_timeout=connect_timeout,
+            health_check_interval=health_check_interval,
+            retry_on_timeout=True,
+        )
 
     async def health_check(self, timeout_seconds: float = 2.0) -> tuple[bool, str]:
         try:

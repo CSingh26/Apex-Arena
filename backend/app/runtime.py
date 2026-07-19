@@ -17,13 +17,15 @@ def main() -> None:
         if settings.app_process_role == "ingestor"
         else "app.main:app"
     )
+    # Railway (and most PaaS platforms) inject the listening port at runtime.
+    port = os.getenv("PORT", "8000")
     command = [
         "uvicorn",
         target,
         "--host",
         "0.0.0.0",
         "--port",
-        "8000",
+        port,
         "--proxy-headers",
         "--forwarded-allow-ips",
         os.getenv("FORWARDED_ALLOW_IPS", "127.0.0.1"),

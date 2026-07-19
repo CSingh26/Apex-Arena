@@ -19,11 +19,24 @@ class Base(DeclarativeBase):
 
 
 class Database:
-    def __init__(self, database_url: str) -> None:
+    def __init__(
+        self,
+        database_url: str,
+        *,
+        pool_size: int = 3,
+        max_overflow: int = 2,
+        pool_timeout: int = 15,
+        pool_recycle: int = 300,
+    ) -> None:
+        # Conservative pooling: managed free-tier databases cap total connections,
+        # and pre-ping recovers sockets dropped during provider autosuspend.
         self.engine: AsyncEngine = create_async_engine(
             database_url,
             pool_pre_ping=True,
-            pool_recycle=300,
+            pool_size=pool_size,
+            max_overflow=max_overflow,
+            pool_timeout=pool_timeout,
+            pool_recycle=pool_recycle,
         )
         self.session_factory = async_sessionmaker(
             self.engine,

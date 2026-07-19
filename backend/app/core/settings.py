@@ -36,13 +36,26 @@ class Settings(BaseSettings):
     next_public_app_base_path: str = ""
 
     database_url: SecretStr
+    # Managed providers (Neon) issue a single authoritative DSN, so the discrete
+    # POSTGRES_* parts stay optional and are only cross-checked when supplied.
+    database_migration_url: SecretStr | None = None
     postgres_db: str = "apex_arena"
     postgres_user: str = "apex"
-    postgres_password: SecretStr
+    postgres_password: SecretStr | None = None
     postgres_host: str = "localhost"
     postgres_port: int = 5432
+    # Conservative pool sizing keeps a small managed database within its
+    # connection ceiling when several Railway replicas connect at once.
+    db_pool_size: int = Field(default=3, ge=1, le=20)
+    db_max_overflow: int = Field(default=2, ge=0, le=20)
+    db_pool_timeout_seconds: int = Field(default=15, ge=1, le=120)
+    db_pool_recycle_seconds: int = Field(default=300, ge=30, le=3600)
+
     redis_url: SecretStr
     redis_port: int = 6379
+    redis_socket_timeout_seconds: int = Field(default=5, ge=1, le=60)
+    redis_connect_timeout_seconds: int = Field(default=5, ge=1, le=60)
+    redis_health_check_interval_seconds: int = Field(default=30, ge=0, le=300)
 
     openf1_rest_base_url: str = "https://api.openf1.org/v1"
     openf1_username: str | None = None
@@ -118,6 +131,21 @@ class Settings(BaseSettings):
     internal_api_key: SecretStr | None = None
     admin_dashboard_password: SecretStr | None = None
     cors_allowed_origins: str = "http://localhost:3000"
+
+    # Public mount point. Requests arrive through the portfolio proxy, so the
+    # backend must be able to rebuild public URLs without trusting raw Host.
+    app_base_path: str = ""
+    apex_arena_proxy_token: SecretStr | None = None
+    public_proxy_host: str = ""
+    trusted_proxy_hosts: str = ""
+    proxy_enforcement_enabled: bool = True
+
+    # Telemetry retention keeps a small managed database inside its storage quota.
+    # Zero disables pruning for that dataset; nothing is deleted implicitly.
+    raw_event_retention_days: int = Field(default=0, ge=0, le=3650)
+    normalized_event_retention_days: int = Field(default=0, ge=0, le=3650)
+    provider_payload_retention_days: int = Field(default=0, ge=0, le=3650)
+    replay_archive_enabled: bool = False
 
     log_level: str = "info"
     log_format: Literal["pretty", "json"] = "pretty"
@@ -200,10 +228,13 @@ class Settings(BaseSettings):
         if self.season_only_mode and self.season_year != 2026:
             raise ValueError("SEASON_ONLY_MODE requires SEASON_YEAR=2026 for Apex Arena v0.1")
 
-        parsed_password = urlparse(self.database_url.get_secret_value()).password
-        configured_password = self.postgres_password.get_secret_value()
-        if parsed_password and unquote(parsed_password) != configured_password:
-            raise ValueError("DATABASE_URL password must match POSTGRES_PASSWORD")
+        # Only meaningful when the discrete parts are supplied (local compose builds
+        # the DSN from them). Managed providers hand over one DSN and set nothing else.
+        if self.postgres_password is not None:
+            parsed_password = urlparse(self.database_url.get_secret_value()).password
+            configured_password = self.postgres_password.get_secret_value()
+            if parsed_password and unquote(parsed_password) != configured_password:
+                raise ValueError("DATABASE_URL password must match POSTGRES_PASSWORD")
 
         if self.openf1_reconnect_base_delay_ms > self.openf1_reconnect_max_delay_ms:
             raise ValueError("OpenF1 reconnect base delay cannot exceed maximum delay")
@@ -238,6 +269,32 @@ class Settings(BaseSettings):
         if database_url.startswith("postgresql+asyncpg://"):
             return database_url
         return database_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+
+    @property
+    def async_migration_database_url(self) -> str:
+        """Migrations and the ingestor lease need a direct (non-pooled) endpoint.
+
+        Managed poolers in transaction mode break session-scoped advisory locks
+        and prepared statements, so fall back to the runtime DSN only when no
+        dedicated migration URL is configured.
+        """
+        if self.database_migration_url is None:
+            return self.async_database_url
+        migration_url = self.database_migration_url.get_secret_value()
+        if migration_url.startswith("postgresql+asyncpg://"):
+            return migration_url
+        return migration_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+
+    @property
+    def normalized_base_path(self) -> str:
+        value = (self.app_base_path or self.next_public_app_base_path or "").strip()
+        if not value or value == "/":
+            return ""
+        return "/" + value.strip("/")
+
+    @property
+    def trusted_proxy_host_list(self) -> list[str]:
+        return [host.strip() for host in self.trusted_proxy_hosts.split(",") if host.strip()]
 
     @property
     def redis_dsn(self) -> str:
