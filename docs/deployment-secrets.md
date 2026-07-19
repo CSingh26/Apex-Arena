@@ -271,6 +271,14 @@ requires the `rediss://` scheme (`validate_runtime_contract`). Note that
 | `OPENF1_USERNAME` | I | Treat as secret | `<openf1-username>` |
 | `OPENF1_PASSWORD` | I | **Yes** | `<openf1-password>` |
 | `OPENF1_LIVE_AUTO_CONNECT` | A, I | No | `false` on A (**enforced** in production), `true` on I |
+| `OPENF1_INGESTION_MODE` | I | No | `rest` while MQTT is unavailable; otherwise `auto` |
+| `OPENF1_REST_BACKFILL_ENABLED` | I | No | Keep `false`; execution is explicit CLI-only |
+| `OPENF1_REST_BACKFILL_SEASON` | I | No | `2026` |
+| `OPENF1_REST_BACKFILL_MAX_SESSIONS` | I | No | `1` |
+| `OPENF1_REST_MAX_CONCURRENT_REQUESTS` | I | No | `2` |
+| `OPENF1_REST_CURSOR_OVERLAP_SECONDS` | I | No | `2` |
+| `OPENF1_REST_INCLUDE_HIGH_FREQUENCY` | I | No | `false` |
+| `OPENF1_MQTT_CONNECT_TIMEOUT_SECONDS` | I | No | `10` |
 | `OPENF1_REST_BASE_URL` | A, I | No | `https://api.openf1.org/v1` |
 | `OPENF1_AUTH_URL` | A, I | No | `https://api.openf1.org/token` |
 | `OPENF1_MQTT_HOST` | I | No | `mqtt.openf1.org` |

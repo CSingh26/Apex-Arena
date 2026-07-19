@@ -105,6 +105,11 @@ start command. `APP_PROCESS_ROLE` alone decides what each container becomes.
 | Public domain | **enabled** | **disabled** |
 | Replicas | 1 | **1 — never more** |
 
+While the OpenF1 MQTT broker is refusing connections, set the ingestor value to `false` and use
+the explicit, one-session historical REST workflow in
+[`openf1-rest-backfill.md`](./openf1-rest-backfill.md). Historical backfill never starts merely
+because the Railway service boots.
+
 Two production validators in
 [`backend/app/core/settings.py`](../backend/app/core/settings.py) enforce this split:
 `APP_PROCESS_ROLE=all` is rejected outright in production, and `APP_PROCESS_ROLE=api`
