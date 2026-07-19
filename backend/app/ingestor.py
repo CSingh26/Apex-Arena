@@ -22,9 +22,11 @@ def create_ingestor_app(settings_override: Settings | None = None) -> FastAPI:
         configure_logging(settings)
         services = AppServices(settings)
         application.state.services = services
-        if settings.openf1_live_auto_connect:
-            await services.start_live_services()
         try:
+            if not await services.database.acquire_ingestor_lease():
+                raise RuntimeError("Another Apex Arena ingestor owns the singleton lease")
+            if settings.openf1_live_auto_connect:
+                await services.start_live_services()
             yield
         finally:
             await services.close()

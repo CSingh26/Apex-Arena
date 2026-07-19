@@ -34,7 +34,14 @@ def test_ingestor_role_owns_live_startup_and_health(settings: Settings) -> None:
         app_process_role="ingestor",
         openf1_live_auto_connect=True,
     )
-    with patch("app.ingestor.AppServices.start_live_services", new_callable=AsyncMock) as start:
+    with (
+        patch(
+            "app.services.container.Database.acquire_ingestor_lease",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch("app.ingestor.AppServices.start_live_services", new_callable=AsyncMock) as start,
+    ):
         with TestClient(create_ingestor_app(ingestor_settings)) as client:
             response = client.get("/health/live")
 
