@@ -3,7 +3,10 @@
 # Local environment and secrets
 .env
 .env.*
+# Placeholder-only templates are tracked; real .env files never are.
 !.env.example
+!.env.railway.example
+!.env.vercel.example
 
 # Python
 __pycache__/
