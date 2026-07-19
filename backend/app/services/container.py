@@ -23,12 +23,14 @@ from app.services.event_pipeline import (
 )
 from app.services.historical import HistoricalOpenF1Adapter
 from app.services.normalization import OpenF1EventNormalizer
+from app.services.openf1_backfill import OpenF1HistoricalBackfillService, OpenF1RoomFinalizer
 from app.services.race_state import RaceStateEngine
 from app.services.raw_events import RawProviderEventService
 from app.services.room_eligibility import RoomEligibilityService
 from app.services.room_replay import RoomReplayCoordinator
 from app.services.rooms import RaceRoomService
 from app.services.season import SeasonService
+from app.storage.backfill_repository import SqlOpenF1BackfillJobRepository
 from app.storage.database import Database
 from app.storage.redis import EventBus, RaceEventRedisPublisher, RedisStore
 from app.storage.repositories import (
@@ -76,6 +78,7 @@ class AppServices:
         self.normalized_event_repository = SqlNormalizedEventRepository(self.database)
         self.snapshot_repository = SqlRaceStateSnapshotRepository(self.database)
         self.ingestion_runs = SqlIngestionRunRepository(self.database)
+        self.backfill_jobs = SqlOpenF1BackfillJobRepository(self.database)
         self.room_repository = SqlRaceRoomRepository(self.database)
         self.raw_events = RawProviderEventService(self.raw_event_repository)
         self.ordering_buffer = EventOrderingBuffer(settings.event_ordering_buffer_ms)
@@ -134,6 +137,16 @@ class AppServices:
             snapshots=self.snapshot_repository,
             max_records_per_endpoint=settings.historical_ingestion_max_records_per_endpoint,
             room_availability=self.room_repository,
+        )
+        self.room_finalizer = OpenF1RoomFinalizer(self.database)
+        self.backfill = OpenF1HistoricalBackfillService(
+            settings=settings,
+            client=self.openf1,
+            adapter=self.historical,
+            jobs=self.backfill_jobs,
+            rooms=self.room_repository,
+            database=self.database,
+            finalizer=self.room_finalizer,
         )
         self._live_catalog_task: asyncio.Task[None] | None = None
 

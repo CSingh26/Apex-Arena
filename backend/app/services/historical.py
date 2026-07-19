@@ -164,6 +164,7 @@ class HistoricalOpenF1Adapter:
         endpoints: list[str] | None = None,
         *,
         availability_baseline: dict[str, int] | None = None,
+        update_room: bool = True,
     ) -> HistoricalIngestionResult:
         selected = self._validate_endpoints(endpoints)
         selected_stages = self._selected_stages(selected)
@@ -258,7 +259,7 @@ class HistoricalOpenF1Adapter:
                 else IngestionStatus.UNAVAILABLE
             )
             data_availability = self._availability(endpoint_counts)
-            if self.room_availability is not None:
+            if update_room and self.room_availability is not None:
                 await self.room_availability.update_ingestion_availability(
                     session_key=session_key,
                     ingestion_status=ingestion_status,
@@ -281,7 +282,7 @@ class HistoricalOpenF1Adapter:
             )
         except Exception as exc:
             safe_error = type(exc).__name__
-            if self.room_availability is not None:
+            if update_room and self.room_availability is not None:
                 try:
                     await self.room_availability.update_ingestion_availability(
                         session_key=session_key,

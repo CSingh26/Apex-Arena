@@ -204,6 +204,37 @@ class SqlRaceRoomRepository:
                 else None
             )
 
+    async def bind_provider_session(
+        self, slug: str, *, meeting_key: str | None, session_key: str
+    ) -> RaceRoom:
+        """Persist only a confidently resolved provider identity."""
+        async with self.database.session_factory() as session:
+            conflict = (
+                await session.execute(
+                    select(RaceRoomRecord.slug).where(
+                        RaceRoomRecord.session_key == session_key,
+                        RaceRoomRecord.slug != slug,
+                    )
+                )
+            ).scalar_one_or_none()
+            if conflict is not None:
+                raise RuntimeError("Provider session is already bound to another room")
+            await session.execute(
+                update(RaceRoomRecord)
+                .where(RaceRoomRecord.slug == slug)
+                .values(
+                    meeting_key=meeting_key,
+                    session_key=session_key,
+                    ingestion_status=IngestionStatus.MATCHING.value,
+                    updated_at=datetime.now(UTC),
+                )
+            )
+            await session.commit()
+        room = await self.get_room(slug)
+        if room is None:
+            raise RuntimeError("Race room was not found")
+        return room
+
     async def update_ingestion_availability(
         self,
         *,

@@ -30,6 +30,7 @@ from app.domain.models import MeetingLifecycleStatus
 from app.providers.jolpica import JolpicaPayloadError
 from app.services.container import AppServices
 from app.services.historical import HistoricalIngestionError
+from app.services.openf1_backfill import backfill_job_status
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -164,6 +165,30 @@ async def openf1_status(services: Services) -> OpenF1StatusResponse:
         **rest_status,
         live_auth_ready=services.settings.openf1_credentials_present,
     )
+
+
+@router.get("/api/v1/internal/openf1/backfill-status", response_model=None)
+async def openf1_backfill_status(
+    services: Services,
+    internal_api_key: Annotated[str | None, Header(alias="X-Internal-API-Key")] = None,
+) -> dict[str, object]:
+    configured = services.settings.internal_api_key
+    if (
+        configured is None
+        or internal_api_key is None
+        or not hmac.compare_digest(internal_api_key, configured.get_secret_value())
+    ):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid internal key")
+    latest = await services.backfill_jobs.latest()
+    live = services.openf1_live.status()
+    return {
+        "ingestion_mode": services.settings.openf1_ingestion_mode,
+        "mqtt_state": live["connection_state"],
+        "rest_backfill_enabled": services.settings.openf1_rest_backfill_enabled,
+        "current_job": backfill_job_status(latest),
+        "advisory_lease_owner": services.database.ingestor_lease_owned,
+        "last_provider_event_timestamp": live["last_event_at"],
+    }
 
 
 @router.get("/api/v1/live/status", response_model=LiveStatusResponse)
