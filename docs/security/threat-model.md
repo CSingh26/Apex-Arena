@@ -17,14 +17,17 @@ shared internal API key.
 
 | Boundary | From → To | Trust posture |
 |---|---|---|
-| B1 | Browser → Next.js frontend | Untrusted client; server components render escaped data only |
-| B2 | Browser → FastAPI backend | Untrusted client; CORS-restricted, read endpoints public, mutating ops key-gated |
-| B3 | Backend → PostgreSQL | Private network; parameterized ORM only; app DB user should be non-superuser |
-| B4 | Backend → Redis | Private network; JSON transport, namespaced keys, no untrusted deserialization |
-| B5 | Backend → OpenF1 REST/OAuth/MQTT | Fixed provider hosts; TLS; server-side credentials only |
-| B6 | Backend → Jolpica | Fixed provider host; TLS; response schema-validated |
-| B7 | CI → GHCR | Tag-gated publish, scoped `GITHUB_TOKEN` |
-| B8 | Public internet → AWS (staging) | Only the load balancer is public; RDS/ElastiCache/ECS tasks private |
+| B1 | Browser → `chaitanyasingh.org` (portfolio, Vercel project 1) | Untrusted client; the only public entry point; owns the public domain and the TLS/edge controls |
+| B2 | Portfolio middleware → Apex Arena frontend (Vercel project 2) | Internal origin, `basePath=/apex-arena`, no public domain attached; the rewrite attaches `APEX_ARENA_PROXY_TOKEN` |
+| B3 | Apex Arena frontend → FastAPI API on Railway | Server-side proxy of `/apex-arena/api/*`; mints the hop token from `APEX_ARENA_BACKEND_PROXY_TOKEN`; the backend origin never appears in the browser bundle |
+| B4 | Public internet → Railway API origin | `ProxyContextMiddleware` rejects any request without a matching proxy token with `403` (constant-time compare); `/health/live` is deliberately exempt for the platform probe |
+| B5 | Browser → FastAPI backend (logical) | Untrusted client; CORS-restricted, read endpoints public, mutating ops internal-key-gated |
+| B6 | Backend → Neon PostgreSQL | Managed endpoint reachable over the internet on the free tier — **no private networking**; controlled by unique credentials + enforced TLS; parameterized ORM only; app DB user should be non-superuser |
+| B7 | Backend → Upstash Redis | Managed endpoint reachable over the internet — **no private networking**; controlled by credentials + `rediss://` TLS; JSON transport, namespaced keys, no untrusted deserialization |
+| B8 | Ingestor (Railway, `APP_PROCESS_ROLE=ingestor`) → Neon direct endpoint | Singleton advisory lease requires the direct, non-pooled `DATABASE_MIGRATION_URL`; startup fails without it |
+| B9 | Backend → OpenF1 REST/OAuth/MQTT | Fixed provider hosts; TLS; server-side credentials only |
+| B10 | Backend → Jolpica | Fixed provider host; TLS; response schema-validated |
+| B11 | CI → GHCR | Tag-gated publish, scoped `GITHUB_TOKEN` |
 
 ## Assets
 
@@ -51,9 +54,26 @@ shared internal API key.
 
 ## Residual risk (out of code scope — deployment-time)
 
-- No application-layer rate limiting; relies on ALB/WAF for public read/stream throttling.
-- Datastore isolation, IAM least-privilege, and secret injection are AWS controls not
-  represented as code in this repo — they must be verified at deploy time
-  (see `deployment-security-checklist.md`).
+- No application-layer rate limiting; relies on the Vercel edge and the portfolio proxy for
+  public read/stream throttling.
+- **Datastore network isolation is not available.** Neon and Upstash free tiers offer no
+  private networking or VPC, so both endpoints are reachable from the internet. The
+  previously assumed private-subnet boundary does not exist in this topology. What replaces
+  it is weaker and must be treated as such: a unique per-project credential, enforced TLS
+  (`sslmode=require`+ for Neon, `rediss://` for Upstash — both checked by the production
+  settings validator), and a rotation procedure. Credential compromise is therefore directly
+  exploitable from anywhere, with no network layer to fall back on.
+- Platform controls replace the previously assumed VPC boundary: Railway project/service
+  access, Vercel project access, and the paired proxy token that makes the Railway API origin
+  answer `403` to anything that did not traverse the portfolio → Apex frontend chain. These
+  are deploy-time controls with no code representation here beyond the middleware itself, and
+  must be verified at deploy time (see `deployment-security-checklist.md`).
+- No cloud instance-metadata endpoint exists in this topology, so metadata SSRF is not
+  reachable; the provider clients remain host-allowlisted regardless.
+- **Availability, not security:** Vercel caps function duration, which bounds the lifetime of
+  an SSE stream. Clients reconnect with `Last-Event-ID`, so this is a continuity concern for
+  live mode rather than a security control.
+- Secret injection is via Railway service variables (secret type) and Vercel environment
+  variables; correctness of that injection cannot be verified from this repository.
 - No end-user auth yet: any future authenticated/mutating features must add authZ,
   CSRF, and session controls before exposure.

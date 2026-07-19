@@ -25,10 +25,19 @@ regression-tested; full backend suite (198 tests) passes; lint/format clean; fro
 dependency audit clean.
 
 **Overall staging deployment: CONDITIONAL** on the manual infrastructure controls in the
-checklist (private RDS/ElastiCache, secret injection via Secrets Manager/SSM, explicit
-staging CORS origin, HTTPS-only, ALB/WAF rate limiting, least-privilege IAM). These are
-deploy-time controls with no code representation in this repo, so they must be confirmed by
-the deployer before exposure. **This report does not claim those controls are in place.**
+checklist (matched proxy-token pair between the Apex Vercel project and the Railway API,
+unique and TLS-enforced Neon/Upstash credentials, secret injection via Railway service
+variables and Vercel environment variables, explicit staging CORS origin, HTTPS-only,
+edge rate limiting, least-privilege Railway/Vercel project access). These are deploy-time
+controls with no code representation in this repo, so they must be confirmed by the deployer
+before exposure. **This report does not claim those controls are in place.**
+
+Note on the target topology: public traffic enters only at `chaitanyasingh.org` (portfolio
+on Vercel), is rewritten to the Apex Arena frontend origin (a second Vercel project with no
+public domain attached), and is proxied server-side to the FastAPI API on Railway, which
+backs onto Neon PostgreSQL and Upstash Redis. Neither managed datastore offers private
+networking on its free tier, so datastore protection rests on credentials and TLS rather
+than network isolation — see the residual-risk section of `threat-model.md`.
 
 ## 3. Confirmed findings
 
@@ -37,10 +46,13 @@ the deployer before exposure. **This report does not claim those controls are in
 - **Confidence:** High. **Attacker prerequisites:** none (unauthenticated GET).
 - **Exploit path:** Before the fix, `GET /api/v1/debug/config` returned
   `safe_runtime_metadata` — including `database_host`, `database_port`, `redis_host`,
-  `redis_port` — in every environment. In staging/production these are internal RDS/
-  ElastiCache endpoints, so an anonymous visitor could enumerate internal architecture.
-- **Impact:** Information disclosure of internal topology (not secrets; hosts are not
-  externally reachable, but disclosure aids targeting). Every other diagnostic surface
+  `redis_port` — in every environment. In staging/production these are the managed Neon and
+  Upstash endpoints, so an anonymous visitor could enumerate internal architecture.
+- **Impact:** Information disclosure of internal topology (not secrets). This matters more
+  under the current architecture than under a private-subnet model: the Neon and Upstash
+  endpoints **are** reachable from the internet and are protected by credentials and TLS
+  alone, so disclosing them hands an attacker a valid target to credential-attack. Every
+  other diagnostic surface
   (`/race-rooms/{slug}/diagnostics`) was already production-gated; this endpoint was the
   lone gap.
 - **Fix:** Return `404` in production unless `room_diagnostics_enabled`, matching the
@@ -57,8 +69,11 @@ the deployer before exposure. **This report does not claim those controls are in
   service runs with no `requirepass`. On a shared or exposed host, an off-host client could
   reach an unauthenticated Redis or the database port.
 - **Impact:** Datastore exposure. Bounded because this compose is local-development only;
-  staging uses private RDS/ElastiCache. Still a real hardening gap and a "compose defaults
-  reused as prod" risk.
+  staging and production use managed Neon PostgreSQL and Upstash Redis, both credential- and
+  TLS-protected (the production settings validator rejects a non-TLS `DATABASE_URL` and any
+  `REDIS_URL` that is not `rediss://`). Still a real hardening gap and a "compose defaults
+  reused as prod" risk — and that risk is sharper here, because the deployed datastores have
+  no network isolation to fall back on if a weak or reused credential ever reaches them.
 - **Fix:** Bind both published ports to `127.0.0.1`; added comments stating this file is
   local-only and must not be reused for staging.
 - **Validation:** `docker compose config` confirms `host_ip: 127.0.0.1` for both datastores;
@@ -153,8 +168,14 @@ full `npm test`/build (no frontend source changed). These run in the existing
   breaking the suite. Deferred; not a deployment blocker.
 - **`pip` PYSEC-2026-196 → 26.1.2:** build-time only; the backend Dockerfile already runs
   `pip install --upgrade pip`, so the built image uses current pip. Not a runtime surface.
-- **Application-layer rate limiting:** intentionally delegated to ALB/WAF; expensive ops are
-  key-gated. Tracked as a required deploy-time control.
+- **Application-layer rate limiting:** intentionally delegated to the Vercel edge and the
+  portfolio proxy; expensive ops are key-gated. Tracked as a required deploy-time control.
+- **Datastore network isolation:** unavailable on the Neon and Upstash free tiers. Accepted
+  with compensating controls only (unique credentials, enforced TLS, rotation). Explicitly
+  **not** equivalent to a private subnet.
+- **SSE stream duration on Vercel:** function duration limits cap the lifetime of a live
+  stream; clients reconnect via `Last-Event-ID`. Accepted as an availability characteristic,
+  not a security control.
 - **CI actions pinned by major tag** (except Trivy): first-party GitHub/Docker actions;
   SHA-pinning recommended as a follow-up hardening, not blocking.
 
