@@ -89,7 +89,7 @@ export function getRaceRooms(params: URLSearchParams, signal?: AbortSignal): Pro
 }
 
 export function getRaceRoomEvents(params: URLSearchParams, signal?: AbortSignal): Promise<RaceRoomEventsResponse> {
-  return request<RaceRoomEventsResponse>(`/events?${params}`, signal);
+  return request<RaceRoomEventsResponse>(`/weekends?${params}`, signal);
 }
 
 export function getRaceRoom(slug: string, signal?: AbortSignal): Promise<RaceRoomDetailResponse> {
