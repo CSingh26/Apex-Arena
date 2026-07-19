@@ -36,6 +36,7 @@ blob-report/
 .DS_Store
 .idea/
 .vscode/
+.claude/
 
 # Runtime files
 *.log
