@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 from typing import Literal
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, parse_qsl, unquote, urlencode, urlparse, urlunparse
 
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -263,12 +263,50 @@ class Settings(BaseSettings):
                 raise ValueError("ROOM_DIAGNOSTICS_ENABLED must be false in production")
         return self
 
+    @staticmethod
+    def _asyncpg_dsn(database_url: str) -> str:
+        """Normalize a managed PostgreSQL DSN for the asyncpg driver.
+
+        Neon's copy button emits libpq parameters (``sslmode``,
+        ``channel_binding``) that asyncpg rejects at connect time. Translate
+        ``sslmode`` to asyncpg's ``ssl`` and drop parameters it cannot consume,
+        so an operator can paste the provider string verbatim.
+        """
+        if not database_url.startswith("postgresql+asyncpg://"):
+            database_url = database_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+        parsed = urlparse(database_url)
+        if not parsed.query:
+            return database_url
+        preserved: list[tuple[str, str]] = []
+        ssl_mode: str | None = None
+        for key, value in parse_qsl(parsed.query, keep_blank_values=True):
+            lowered = key.lower()
+            if lowered in {"sslmode", "ssl"}:
+                ssl_mode = ssl_mode or value
+                continue
+            if lowered == "channel_binding":
+                continue
+            preserved.append((key, value))
+        if ssl_mode:
+            # asyncpg understands ssl=require/verify-ca/verify-full; libpq's
+            # "true" is normalized to the equivalent require.
+            preserved.append(("ssl", "require" if ssl_mode == "true" else ssl_mode))
+        return urlunparse(parsed._replace(query=urlencode(preserved)))
+
     @property
     def async_database_url(self) -> str:
-        database_url = self.database_url.get_secret_value()
-        if database_url.startswith("postgresql+asyncpg://"):
-            return database_url
-        return database_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+        return self._asyncpg_dsn(self.database_url.get_secret_value())
+
+    @property
+    def effective_redis_socket_timeout(self) -> int:
+        """Socket timeout that cannot abort a blocking stream read.
+
+        SSE consumers call ``XREAD`` with ``BLOCK`` for up to ten seconds. A
+        socket timeout below that window would abort every idle heartbeat and
+        report a healthy stream as degraded, so keep a margin above it.
+        """
+        blocking_window_seconds = min(10, self.sse_heartbeat_seconds)
+        return max(self.redis_socket_timeout_seconds, blocking_window_seconds + 5)
 
     @property
     def async_migration_database_url(self) -> str:
@@ -280,10 +318,7 @@ class Settings(BaseSettings):
         """
         if self.database_migration_url is None:
             return self.async_database_url
-        migration_url = self.database_migration_url.get_secret_value()
-        if migration_url.startswith("postgresql+asyncpg://"):
-            return migration_url
-        return migration_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+        return self._asyncpg_dsn(self.database_migration_url.get_secret_value())
 
     @property
     def normalized_base_path(self) -> str:

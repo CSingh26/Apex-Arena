@@ -70,6 +70,43 @@ def test_managed_dsn_does_not_require_discrete_postgres_password() -> None:
     assert "ssl=require" in managed.async_database_url
 
 
+def test_neon_libpq_parameters_are_translated_for_asyncpg() -> None:
+    """Neon's copy button emits sslmode/channel_binding, which asyncpg rejects."""
+    neon = Settings(
+        app_env="staging",
+        database_url=(
+            "postgresql://u:p@ep-example.neon.tech/apex?sslmode=require&channel_binding=require"
+        ),
+        redis_url="rediss://default:token@example.upstash.io:6379",
+        postgres_password=None,
+    )
+
+    dsn = neon.async_database_url
+    assert dsn.startswith("postgresql+asyncpg://")
+    assert "ssl=require" in dsn
+    assert "sslmode" not in dsn
+    assert "channel_binding" not in dsn
+
+
+def test_redis_socket_timeout_cannot_abort_a_blocking_stream_read(
+    settings: Settings,
+) -> None:
+    """A socket timeout under the XREAD BLOCK window would flap SSE to degraded."""
+    values = settings.model_dump()
+    values.update(redis_socket_timeout_seconds=5, sse_heartbeat_seconds=15)
+    configured = Settings.model_validate(values)
+
+    # The room stream blocks for at most 10s, so the socket must outlast it.
+    assert configured.effective_redis_socket_timeout > 10
+    assert configured.effective_redis_socket_timeout >= 15
+
+
+def test_generous_redis_socket_timeout_is_respected(settings: Settings) -> None:
+    values = settings.model_dump()
+    values.update(redis_socket_timeout_seconds=40, sse_heartbeat_seconds=15)
+    assert Settings.model_validate(values).effective_redis_socket_timeout == 40
+
+
 def test_migration_url_falls_back_to_runtime_dsn(settings: Settings) -> None:
     assert settings.database_migration_url is None
     assert settings.async_migration_database_url == settings.async_database_url

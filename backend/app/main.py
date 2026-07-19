@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.proxy import ProxyContextMiddleware
 from app.api.room_routes import router as room_router
 from app.api.routes import router
 from app.core.logging import configure_logging
@@ -34,6 +35,9 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
         description="Unified live and replay Formula racing intelligence for the 2026 season.",
         lifespan=lifespan,
     )
+    # Registered before CORS so the outermost layer rejects direct-origin traffic
+    # before any other handler observes the request.
+    application.add_middleware(ProxyContextMiddleware, settings=settings)
     application.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins,

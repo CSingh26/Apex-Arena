@@ -58,7 +58,7 @@ class AppServices:
         )
         self.redis = RedisStore(
             settings.redis_dsn,
-            socket_timeout=settings.redis_socket_timeout_seconds,
+            socket_timeout=settings.effective_redis_socket_timeout,
             connect_timeout=settings.redis_connect_timeout_seconds,
             health_check_interval=settings.redis_health_check_interval_seconds,
         )
