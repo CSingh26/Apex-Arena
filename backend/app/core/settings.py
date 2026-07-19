@@ -140,8 +140,10 @@ class Settings(BaseSettings):
     trusted_proxy_hosts: str = ""
     proxy_enforcement_enabled: bool = True
 
-    # Telemetry retention keeps a small managed database inside its storage quota.
-    # Zero disables pruning for that dataset; nothing is deleted implicitly.
+    # RESERVED: these record the intended retention policy but nothing prunes yet.
+    # No pruning job exists in the application, so setting them has no runtime
+    # effect today. They are declared so deployment configuration and the cost
+    # documentation can be written against stable names. Defaults are inert.
     raw_event_retention_days: int = Field(default=0, ge=0, le=3650)
     normalized_event_retention_days: int = Field(default=0, ge=0, le=3650)
     provider_payload_retention_days: int = Field(default=0, ge=0, le=3650)
@@ -240,6 +242,18 @@ class Settings(BaseSettings):
             raise ValueError("OpenF1 reconnect base delay cannot exceed maximum delay")
         if self.app_env == "production" and self.app_process_role == "all":
             raise ValueError("APP_PROCESS_ROLE=all is not allowed in production")
+        # The singleton lease is a session-scoped advisory lock. Through a
+        # transaction pooler it cannot be relied upon, so an ingesting role in a
+        # deployed environment must be given the direct endpoint explicitly.
+        if (
+            self.app_env in {"staging", "production"}
+            and self.app_process_role in {"ingestor", "all"}
+            and self.database_migration_url is None
+        ):
+            raise ValueError(
+                "Ingesting roles require DATABASE_MIGRATION_URL (the direct, "
+                "non-pooled endpoint) so the singleton lease is reliable"
+            )
         if (
             self.app_env == "production"
             and self.app_process_role == "api"

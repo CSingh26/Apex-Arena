@@ -290,7 +290,9 @@ jobs:
               return Settings(
                   app_env="staging",
                   app_process_role=role,
-                  database_url="postgresql://u:p@h/apex?ssl=require",
+                  database_url="postgresql://u:p@pooler/apex?ssl=require",
+                  # Ingesting roles require the direct endpoint for the lease.
+                  database_migration_url="postgresql://u:p@direct/apex?ssl=require",
                   redis_url="rediss://default:t@h:6379",
                   postgres_password=None,
                   debug_ingestion_enabled=False,

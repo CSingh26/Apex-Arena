@@ -169,6 +169,50 @@ def test_empty_base_path_means_root_mount() -> None:
     assert configured.normalized_base_path == ""
 
 
+def test_deployed_ingestor_requires_the_direct_endpoint(settings: Settings) -> None:
+    """A pooled DSN makes the session-scoped singleton lease unreliable."""
+    values = settings.model_dump()
+    values.update(
+        app_env="staging",
+        app_process_role="ingestor",
+        database_url="postgresql://u:p@pooler.neon.tech/apex?ssl=require",
+        redis_url="rediss://default:t@x.upstash.io:6379",
+        postgres_password=None,
+        database_migration_url=None,
+    )
+
+    with pytest.raises(ValidationError, match="DATABASE_MIGRATION_URL"):
+        Settings.model_validate(values)
+
+    values["database_migration_url"] = "postgresql://u:p@direct.neon.tech/apex?ssl=require"
+    configured = Settings.model_validate(values)
+    assert "direct.neon.tech" in configured.async_migration_database_url
+
+
+def test_combined_role_also_requires_the_direct_endpoint(settings: Settings) -> None:
+    """Combined mode ingests too, so it takes the same lease as the ingestor."""
+    values = settings.model_dump()
+    values.update(
+        app_env="staging",
+        app_process_role="all",
+        database_url="postgresql://u:p@pooler.neon.tech/apex?ssl=require",
+        redis_url="rediss://default:t@x.upstash.io:6379",
+        postgres_password=None,
+        database_migration_url=None,
+    )
+
+    with pytest.raises(ValidationError, match="DATABASE_MIGRATION_URL"):
+        Settings.model_validate(values)
+
+
+def test_local_ingestor_does_not_require_a_direct_endpoint(settings: Settings) -> None:
+    """Local development runs against one plain PostgreSQL with no pooler."""
+    values = settings.model_dump()
+    values.update(app_env="local", app_process_role="all", database_migration_url=None)
+
+    assert Settings.model_validate(values).app_process_role == "all"
+
+
 def test_retention_is_disabled_by_default(settings: Settings) -> None:
     """Nothing is pruned implicitly; retention must be opted into."""
     assert settings.raw_event_retention_days == 0

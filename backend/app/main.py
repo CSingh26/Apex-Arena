@@ -21,13 +21,20 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
         configure_logging(settings)
-        application.state.services = AppServices(settings)
+        services = AppServices(settings)
+        application.state.services = services
         if settings.app_process_role == "all" and settings.openf1_live_auto_connect:
-            await application.state.services.start_live_services()
+            # Combined mode ingests as well as serves, so it must take the same
+            # singleton lease the dedicated ingestor uses. Without it, two
+            # overlapping deploys would both subscribe to OpenF1 MQTT and
+            # double-write the event pipeline.
+            if not await services.database.acquire_ingestor_lease():
+                raise RuntimeError("Another Apex Arena ingestor owns the singleton lease")
+            await services.start_live_services()
         try:
             yield
         finally:
-            await application.state.services.close()
+            await services.close()
 
     application = FastAPI(
         title="Apex Arena API",
