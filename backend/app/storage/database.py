@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import (
@@ -45,6 +48,10 @@ class Database:
         )
         self._ingestor_lease_connection: AsyncConnection | None = None
 
+    @property
+    def ingestor_lease_owned(self) -> bool:
+        return self._ingestor_lease_connection is not None
+
     async def acquire_ingestor_lease(self) -> bool:
         """Hold a PostgreSQL advisory lock for the lifetime of the ingestion process."""
         if self._ingestor_lease_connection is not None:
@@ -73,6 +80,30 @@ class Database:
                 {"lock_id": 1_095_782_232},
             )
         finally:
+            await connection.close()
+
+    @asynccontextmanager
+    async def backfill_lease(self, season: int, session_key: str) -> AsyncIterator[bool]:
+        """Hold a session-scoped advisory lock on one direct database connection."""
+        digest = hashlib.sha256(f"openf1:{season}:{session_key}".encode()).digest()
+        lock_id = int.from_bytes(digest[:8], "big", signed=True)
+        connection = await self.engine.connect()
+        acquired = bool(
+            await connection.scalar(
+                text("SELECT pg_try_advisory_lock(:lock_id)"), {"lock_id": lock_id}
+            )
+        )
+        try:
+            yield acquired
+        finally:
+            if acquired:
+                try:
+                    await connection.execute(
+                        text("SELECT pg_advisory_unlock(:lock_id)"), {"lock_id": lock_id}
+                    )
+                except Exception:
+                    # A dropped session has already released its PostgreSQL lock.
+                    pass
             await connection.close()
 
     async def health_check(self, timeout_seconds: float = 2.0) -> tuple[bool, str]:

@@ -71,6 +71,14 @@ class Settings(BaseSettings):
     openf1_reconnect_base_delay_ms: int = 1000
     openf1_reconnect_max_delay_ms: int = 30000
     openf1_live_auto_connect: bool = False
+    openf1_ingestion_mode: Literal["mqtt", "rest", "auto"] = "auto"
+    openf1_rest_backfill_enabled: bool = False
+    openf1_rest_backfill_season: int = Field(default=2026, ge=1950, le=2100)
+    openf1_rest_backfill_max_sessions: int = Field(default=1, ge=1, le=10)
+    openf1_rest_max_concurrent_requests: int = Field(default=2, ge=1, le=8)
+    openf1_rest_cursor_overlap_seconds: int = Field(default=2, ge=0, le=60)
+    openf1_rest_include_high_frequency: bool = False
+    openf1_mqtt_connect_timeout_seconds: int = Field(default=10, ge=1, le=120)
     openf1_live_catalog_sync_seconds: int = Field(default=60, ge=15, le=900)
     openf1_live_topics: str = (
         "v1/sessions,v1/drivers,v1/position,v1/intervals,v1/laps,v1/pit,"
@@ -258,6 +266,8 @@ class Settings(BaseSettings):
 
         if self.openf1_reconnect_base_delay_ms > self.openf1_reconnect_max_delay_ms:
             raise ValueError("OpenF1 reconnect base delay cannot exceed maximum delay")
+        if self.openf1_rest_backfill_enabled and self.app_process_role == "api":
+            raise ValueError("API processes cannot enable OpenF1 historical backfill")
         if self.app_env == "production" and self.app_process_role == "all":
             raise ValueError("APP_PROCESS_ROLE=all is not allowed in production")
         # The singleton lease is a session-scoped advisory lock. Through a
