@@ -77,14 +77,26 @@ async function proxy(request: NextRequest, context: RouteContext): Promise<Respo
   });
 
   const responseHeaders = new Headers(response.headers);
+
   responseHeaders.delete("content-length");
-  // Keep live endpoints uncacheable across every hop in the proxy chain.
-  if (responseHeaders.get("content-type")?.includes("text/event-stream")) {
+  responseHeaders.delete("content-encoding");
+
+  const contentType = responseHeaders.get("content-type") ?? "";
+
+  if (contentType.includes("text/event-stream")) {
     responseHeaders.set("cache-control", "no-cache, no-transform");
     responseHeaders.set("x-accel-buffering", "no");
+
+    return new Response(response.body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: responseHeaders,
+    });
   }
 
-  return new Response(response.body, {
+  const responseBody = await response.arrayBuffer();
+
+  return new Response(responseBody, {
     status: response.status,
     statusText: response.statusText,
     headers: responseHeaders,
