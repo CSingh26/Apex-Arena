@@ -26,6 +26,7 @@ class FakeMqttClient:
         self.subscriptions: list[str] = []
         self.started = False
         self.on_connect: Any = None
+        self.on_connect_fail: Any = None
         self.on_disconnect: Any = None
         self.on_message: Any = None
 
@@ -247,4 +248,55 @@ async def test_live_message_uses_unified_processor(settings: Settings) -> None:
     assert processor.events[0].provider_event_id == "12"
     assert processor.flushed == ["9999"]
     assert live.last_event_at is not None
+    await auth.close()
+
+
+@pytest.mark.asyncio
+async def test_mqtt_connect_failure_leaves_connecting_state(settings: Settings) -> None:
+    live_settings = Settings.model_validate(
+        {
+            **settings.model_dump(),
+            "openf1_username": "fan@example.test",
+            "openf1_password": "live-password",
+        }
+    )
+
+    async def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"access_token": "token", "expires_in": 3600})
+
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    auth = OpenF1AuthService(live_settings, http_client)
+    mqtt_client = FakeMqttClient()
+    live = OpenF1LiveClient(
+        live_settings,
+        auth,
+        client_factory=lambda: mqtt_client,  # type: ignore[arg-type]
+    )
+    await live.connect()
+    mqtt_client.on_connect_fail(mqtt_client, None)
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert live.connection_state is LiveConnectionState.DEGRADED
+    assert live.status()["degraded_reason"] == "MQTT broker connection failed"
+    await live.disconnect()
+    await http_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_mqtt_connect_timeout_is_terminal_not_connecting(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    auth = OpenF1AuthService(settings)
+    mqtt_client = FakeMqttClient()
+    live = OpenF1LiveClient(settings, auth, client_factory=lambda: mqtt_client)  # type: ignore[arg-type]
+    live._client = mqtt_client  # type: ignore[assignment]
+    live.connection_state = LiveConnectionState.CONNECTING
+
+    async def no_wait(_: float) -> None:
+        return None
+
+    monkeypatch.setattr("app.providers.openf1.asyncio.sleep", no_wait)
+    await live._connection_timeout()
+    assert live.connection_state is LiveConnectionState.DEGRADED
+    assert mqtt_client.started is False
     await auth.close()

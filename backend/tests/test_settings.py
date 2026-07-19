@@ -174,6 +174,32 @@ def test_shell_environment_overrides_dotenv_file(monkeypatch, tmp_path: Path) ->
     assert "direct.example.net" in configured.async_migration_database_url
 
 
+def test_openf1_backfill_defaults_are_conservative(settings: Settings) -> None:
+    assert settings.openf1_ingestion_mode == "auto"
+    assert settings.openf1_rest_backfill_enabled is False
+    assert settings.openf1_rest_backfill_max_sessions == 1
+    assert settings.openf1_rest_max_concurrent_requests == 2
+    assert settings.openf1_rest_include_high_frequency is False
+
+
+def test_production_api_cannot_enable_historical_backfill(settings: Settings) -> None:
+    values = settings.model_dump()
+    values.update(
+        app_env="production",
+        app_process_role="api",
+        openf1_live_auto_connect=False,
+        openf1_rest_backfill_enabled=True,
+        database_url="postgresql://u:p@pooler.neon.tech/apex?ssl=require",
+        redis_url="rediss://default:t@x.upstash.io:6379",
+        postgres_password=None,
+        debug_ingestion_enabled=False,
+        development_fixture_enabled=False,
+        room_diagnostics_enabled=False,
+    )
+    with pytest.raises(ValidationError, match="API processes cannot enable"):
+        Settings.model_validate(values)
+
+
 def test_neon_libpq_parameters_are_translated_for_asyncpg() -> None:
     """Neon's copy button emits sslmode/channel_binding, which asyncpg rejects."""
     neon = Settings(
@@ -301,6 +327,7 @@ def test_combined_role_also_requires_the_direct_endpoint(settings: Settings) -> 
     values.update(
         app_env="staging",
         app_process_role="all",
+        openf1_live_auto_connect=True,
         database_url="postgresql://u:p@pooler.neon.tech/apex?ssl=require",
         redis_url="rediss://default:t@x.upstash.io:6379",
         postgres_password=None,
