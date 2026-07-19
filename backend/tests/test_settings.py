@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from pydantic import ValidationError
 
@@ -19,11 +21,45 @@ def test_settings_exposes_only_safe_runtime_metadata(settings: Settings) -> None
     assert "v1/laps" in settings.openf1_topics
 
 
-def test_database_passwords_must_match() -> None:
+def test_local_compose_password_match_passes() -> None:
+    configured = Settings(
+        app_env="test",
+        database_url="postgresql://apex:local-password@postgres:5432/apex_arena",
+        postgres_password="local-password",
+        redis_url="redis://localhost:6379/15",
+    )
+
+    assert configured.safe_runtime_metadata["database_host"] == "postgres"
+
+
+def test_local_compose_password_mismatch_fails_without_disclosing_values() -> None:
     with pytest.raises(ValidationError, match="must match POSTGRES_PASSWORD"):
         Settings(
             app_env="test",
-            database_url="postgresql://apex:first@localhost:5432/apex_arena",
+            database_url="postgresql://apex:local-url-secret@postgres:5432/apex_arena",
+            postgres_password="local-variable-secret",
+            redis_url="redis://localhost:6379/15",
+        )
+
+    try:
+        Settings(
+            app_env="test",
+            database_url="postgresql://apex:local-url-secret@postgres:5432/apex_arena",
+            postgres_password="local-variable-secret",
+            redis_url="redis://localhost:6379/15",
+        )
+    except ValidationError as exc:
+        message = str(exc)
+        assert "local-url-secret" not in message
+        assert "local-variable-secret" not in message
+        assert "postgresql://" not in message
+
+
+def test_localhost_password_mismatch_still_fails() -> None:
+    with pytest.raises(ValidationError, match="for local PostgreSQL"):
+        Settings(
+            app_env="test",
+            database_url="postgresql://apex:first@127.0.0.1:5432/apex_arena",
             postgres_password="second",
             redis_url="redis://localhost:6379/15",
         )
@@ -56,18 +92,86 @@ def test_production_rejects_combined_role_and_plaintext_datastores(settings: Set
         Settings.model_validate(values)
 
 
-def test_managed_dsn_does_not_require_discrete_postgres_password() -> None:
-    """Neon issues a single DSN; the discrete POSTGRES_* parts stay optional."""
+def test_managed_dsn_ignores_unrelated_local_postgres_password() -> None:
+    """Ambient local Compose credentials do not invalidate an external DSN."""
     managed = Settings(
         app_env="staging",
         database_url="postgresql://neon_user:neon_pw@ep-example.neon.tech/apex?ssl=require",
         redis_url="rediss://default:token@example.upstash.io:6379",
-        postgres_password=None,
+        postgres_password="unrelated-local-password",
     )
 
-    assert managed.postgres_password is None
+    assert managed.postgres_password is not None
     assert managed.async_database_url.startswith("postgresql+asyncpg://")
     assert "ssl=require" in managed.async_database_url
+
+
+def test_managed_direct_migration_dsn_ignores_local_postgres_password() -> None:
+    managed = Settings(
+        app_env="staging",
+        database_url="postgresql://u:pooled@pooler.example.net/apex?ssl=require",
+        database_migration_url="postgresql://u:direct@direct.example.net/apex?ssl=require",
+        redis_url="rediss://default:token@example.upstash.io:6379",
+        postgres_password="local-compose-password",
+    )
+
+    assert "direct.example.net" in managed.async_migration_database_url
+
+
+def test_local_percent_encoded_password_is_compared_after_decoding() -> None:
+    configured = Settings(
+        app_env="test",
+        database_url="postgresql://apex:p%40ss%25word@localhost:5432/apex_arena",
+        postgres_password="p@ss%word",
+        redis_url="redis://localhost:6379/15",
+    )
+
+    assert "p%40ss%25word" in configured.async_database_url
+
+
+def test_migration_url_is_validated_independently() -> None:
+    with pytest.raises(ValidationError, match="DATABASE_MIGRATION_URL must use PostgreSQL"):
+        Settings(
+            app_env="test",
+            database_url="postgresql://apex:test@localhost:5432/apex_arena",
+            database_migration_url="mysql://apex:test@localhost/apex_arena",
+            postgres_password="test",
+            redis_url="redis://localhost:6379/15",
+        )
+
+
+def test_empty_migration_url_falls_back_to_runtime_dsn(settings: Settings) -> None:
+    values = settings.model_dump()
+    values["database_migration_url"] = ""
+    configured = Settings.model_validate(values)
+
+    assert configured.database_migration_url is None
+    assert configured.async_migration_database_url == configured.async_database_url
+
+
+def test_shell_environment_overrides_dotenv_file(monkeypatch, tmp_path: Path) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "DATABASE_URL=postgresql://apex:file@localhost:5432/from_file\n"
+        "POSTGRES_PASSWORD=file\n"
+        "REDIS_URL=redis://localhost:6379/15\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql://managed:shell@external.example.net/from_shell?ssl=require",
+    )
+    monkeypatch.setenv(
+        "DATABASE_MIGRATION_URL",
+        "postgresql://managed:direct@direct.example.net/from_shell?ssl=require",
+    )
+    monkeypatch.setenv("POSTGRES_PASSWORD", "unrelated-local-password")
+    monkeypatch.setenv("REDIS_URL", "rediss://default:token@example.upstash.io:6379")
+
+    configured = Settings(_env_file=env_file)
+
+    assert configured.safe_runtime_metadata["database_host"] == "external.example.net"
+    assert "direct.example.net" in configured.async_migration_database_url
 
 
 def test_neon_libpq_parameters_are_translated_for_asyncpg() -> None:
@@ -122,6 +226,7 @@ def test_direct_migration_url_is_preferred_when_configured(settings: Settings) -
 
     assert "direct.neon.tech" in configured.async_migration_database_url
     assert configured.async_migration_database_url.startswith("postgresql+asyncpg://")
+    assert "direct.neon.tech" not in configured.async_process_database_url
 
 
 def test_upstash_tls_url_is_accepted_and_masked() -> None:
@@ -187,6 +292,7 @@ def test_deployed_ingestor_requires_the_direct_endpoint(settings: Settings) -> N
     values["database_migration_url"] = "postgresql://u:p@direct.neon.tech/apex?ssl=require"
     configured = Settings.model_validate(values)
     assert "direct.neon.tech" in configured.async_migration_database_url
+    assert "direct.neon.tech" in configured.async_process_database_url
 
 
 def test_combined_role_also_requires_the_direct_endpoint(settings: Settings) -> None:
@@ -203,6 +309,10 @@ def test_combined_role_also_requires_the_direct_endpoint(settings: Settings) -> 
 
     with pytest.raises(ValidationError, match="DATABASE_MIGRATION_URL"):
         Settings.model_validate(values)
+
+    values["database_migration_url"] = "postgresql://u:p@direct.neon.tech/apex?ssl=require"
+    configured = Settings.model_validate(values)
+    assert "direct.neon.tech" in configured.async_process_database_url
 
 
 def test_local_ingestor_does_not_require_a_direct_endpoint(settings: Settings) -> None:
