@@ -32,14 +32,19 @@ else
   exit 2
 fi
 
-# Report only which variable was chosen and its host - never the full DSN.
+# Report only which variable was chosen and a redacted host - never the full DSN.
 MIGRATION_HOST="$(
   python3 - <<'PY'
 import os
 from urllib.parse import urlparse
 
 raw = os.environ.get("DATABASE_MIGRATION_URL") or os.environ.get("DATABASE_URL", "")
-print(urlparse(raw).hostname or "unknown")
+host = urlparse(raw).hostname or "unknown"
+labels = host.split(".")
+if len(labels) > 2:
+    print(f"{labels[0][:4]}....{'.'.join(labels[-2:])}")
+else:
+    print("local-or-external")
 PY
 )"
 

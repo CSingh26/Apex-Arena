@@ -5,8 +5,10 @@ from functools import lru_cache
 from typing import Literal
 from urllib.parse import parse_qs, parse_qsl, unquote, urlencode, urlparse, urlunparse
 
-from pydantic import Field, SecretStr, field_validator, model_validator
+from pydantic import Field, SecretStr, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+LOCAL_POSTGRES_HOSTS = frozenset({"postgres", "localhost", "127.0.0.1", "::1"})
 
 
 class Settings(BaseSettings):
@@ -36,8 +38,8 @@ class Settings(BaseSettings):
     next_public_app_base_path: str = ""
 
     database_url: SecretStr
-    # Managed providers (Neon) issue a single authoritative DSN, so the discrete
-    # POSTGRES_* parts stay optional and are only cross-checked when supplied.
+    # Managed providers issue authoritative DSNs. POSTGRES_* belongs to local
+    # Compose and is cross-checked only when a URL points to a local host.
     database_migration_url: SecretStr | None = None
     postgres_db: str = "apex_arena"
     postgres_user: str = "apex"
@@ -185,15 +187,20 @@ class Settings(BaseSettings):
             return None
         return value
 
-    @field_validator("database_url", mode="before")
+    @field_validator("database_url", "database_migration_url", mode="before")
     @classmethod
-    def validate_database_url(cls, value: object) -> str:
+    def validate_database_url(cls, value: object, info: ValidationInfo) -> str | None:
         if isinstance(value, SecretStr):
             value = value.get_secret_value()
+        variable_name = info.field_name.upper()
+        if info.field_name == "database_migration_url" and (
+            value is None or (isinstance(value, str) and not value.strip())
+        ):
+            return None
         if not isinstance(value, str):
-            raise ValueError("DATABASE_URL must be a string")
+            raise ValueError(f"{variable_name} must be a string")
         if not value.startswith(("postgresql://", "postgresql+asyncpg://")):
-            raise ValueError("DATABASE_URL must use PostgreSQL")
+            raise ValueError(f"{variable_name} must use PostgreSQL")
         return value.rstrip("/")
 
     @field_validator("redis_url", mode="before")
@@ -230,13 +237,24 @@ class Settings(BaseSettings):
         if self.season_only_mode and self.season_year != 2026:
             raise ValueError("SEASON_ONLY_MODE requires SEASON_YEAR=2026 for Apex Arena v0.1")
 
-        # Only meaningful when the discrete parts are supplied (local compose builds
-        # the DSN from them). Managed providers hand over one DSN and set nothing else.
+        # POSTGRES_* belongs to the repository's local Compose database. A developer
+        # may also keep managed DSNs in the same untracked .env, so never compare
+        # credentials for an external host merely because POSTGRES_PASSWORD exists.
         if self.postgres_password is not None:
-            parsed_password = urlparse(self.database_url.get_secret_value()).password
             configured_password = self.postgres_password.get_secret_value()
-            if parsed_password and unquote(parsed_password) != configured_password:
-                raise ValueError("DATABASE_URL password must match POSTGRES_PASSWORD")
+            database_urls = [("DATABASE_URL", self.database_url)]
+            if self.database_migration_url is not None:
+                database_urls.append(("DATABASE_MIGRATION_URL", self.database_migration_url))
+            for variable_name, secret_url in database_urls:
+                parsed = urlparse(secret_url.get_secret_value())
+                host = (parsed.hostname or "").lower().rstrip(".")
+                if host not in LOCAL_POSTGRES_HOSTS:
+                    continue
+                if parsed.password and unquote(parsed.password) != configured_password:
+                    raise ValueError(
+                        f"{variable_name} password must match POSTGRES_PASSWORD "
+                        "for local PostgreSQL"
+                    )
 
         if self.openf1_reconnect_base_delay_ms > self.openf1_reconnect_max_delay_ms:
             raise ValueError("OpenF1 reconnect base delay cannot exceed maximum delay")
@@ -333,6 +351,16 @@ class Settings(BaseSettings):
         if self.database_migration_url is None:
             return self.async_database_url
         return self._asyncpg_dsn(self.database_migration_url.get_secret_value())
+
+    @property
+    def async_process_database_url(self) -> str:
+        """Choose the DSN that preserves the process role's connection semantics."""
+        needs_session_lease = self.app_process_role == "ingestor" or (
+            self.app_process_role == "all" and self.openf1_live_auto_connect
+        )
+        if needs_session_lease:
+            return self.async_migration_database_url
+        return self.async_database_url
 
     @property
     def normalized_base_path(self) -> str:

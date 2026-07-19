@@ -46,11 +46,10 @@ class AppServices:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         # The ingestor holds a session-scoped advisory lease, which a transaction
-        # pooler would silently break, so it connects through the direct DSN.
+        # pooler would silently break. Combined mode needs the same direct DSN
+        # whenever it is ingesting; API-only processes keep the pooled runtime DSN.
         self.database = Database(
-            settings.async_migration_database_url
-            if settings.app_process_role == "ingestor"
-            else settings.async_database_url,
+            settings.async_process_database_url,
             pool_size=settings.db_pool_size,
             max_overflow=settings.db_max_overflow,
             pool_timeout=settings.db_pool_timeout_seconds,

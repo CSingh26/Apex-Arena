@@ -49,6 +49,7 @@ services:
     environment:
       APP_PROCESS_ROLE: api
       DATABASE_URL: postgresql://${POSTGRES_USER:-apex}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-apex_arena}
+      DATABASE_MIGRATION_URL: postgresql://${POSTGRES_USER:-apex}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-apex_arena}
       POSTGRES_HOST: postgres
       POSTGRES_PORT: 5432
       REDIS_URL: redis://redis:6379/0
@@ -69,6 +70,7 @@ services:
     environment:
       APP_PROCESS_ROLE: all
       DATABASE_URL: postgresql://${POSTGRES_USER:-apex}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-apex_arena}
+      DATABASE_MIGRATION_URL: postgresql://${POSTGRES_USER:-apex}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-apex_arena}
       POSTGRES_HOST: postgres
       POSTGRES_PORT: 5432
       REDIS_URL: redis://redis:6379/0
