@@ -174,6 +174,234 @@ jobs:
         if: always()
         run: docker compose down --volumes --remove-orphans
 
+  deployment-validation:
+    name: Deployment configuration gate
+    runs-on: ubuntu-latest
+    env:
+      APP_ENV: test
+      DATABASE_URL: postgresql://apex:test-password@localhost:5432/apex_arena
+      POSTGRES_PASSWORD: test-password
+      REDIS_URL: redis://localhost:6379/15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/pyproject.toml
+      - name: Install backend
+        working-directory: backend
+        run: python -m pip install --upgrade pip && python -m pip install -e '.[dev]'
+
+      - name: Validate Railway manifests
+        run: |
+          python - <<'PY'
+          import pathlib, sys, tomllib
+          required = {"api", "ingestor", "combined"}
+          found = set()
+          for path in pathlib.Path("deploy/railway").glob("*.toml"):
+              data = tomllib.loads(path.read_text())
+              deploy = data.get("deploy", {})
+              assert deploy.get("startCommand"), f"{path}: missing startCommand"
+              assert deploy.get("healthcheckPath"), f"{path}: missing healthcheckPath"
+              replicas = deploy.get("numReplicas")
+              # A second ingestor would contend for the singleton advisory lease.
+              assert replicas == 1, f"{path}: numReplicas must be 1, got {replicas}"
+              found.add(path.stem)
+          missing = required - found
+          assert not missing, f"missing Railway manifests: {sorted(missing)}"
+          print(f"validated Railway manifests: {sorted(found)}")
+          PY
+
+      - name: Validate managed datastore URL handling
+        working-directory: backend
+        run: |
+          python - <<'PY'
+          from app.core.settings import Settings
+
+          # Neon's copy button emits libpq params that asyncpg cannot consume.
+          neon = Settings(
+              app_env="staging",
+              database_url=(
+                  "postgresql://u:p@ep-x.neon.tech/apex"
+                  "?sslmode=require&channel_binding=require"
+              ),
+              redis_url="rediss://default:token@x.upstash.io:6379",
+              postgres_password=None,
+          )
+          dsn = neon.async_database_url
+          assert dsn.startswith("postgresql+asyncpg://"), dsn
+          assert "ssl=require" in dsn and "sslmode" not in dsn, dsn
+          assert "channel_binding" not in dsn, dsn
+          assert neon.redis_dsn.startswith("rediss://")
+          # A socket timeout under the blocking read window would flap SSE.
+          assert neon.effective_redis_socket_timeout > 10
+          print("managed datastore URL handling OK")
+          PY
+
+      - name: Reject unsafe production configuration
+        working-directory: backend
+        run: |
+          python - <<'PY'
+          from pydantic import ValidationError
+          from app.core.settings import Settings
+
+          # Every field is explicit: validators short-circuit on the first
+          # error, so an ambient value would mask the case under test.
+          base = dict(
+              app_env="production",
+              app_process_role="api",
+              database_url="postgresql://u:p@h/apex?ssl=require",
+              redis_url="rediss://default:t@h:6379",
+              postgres_password=None,
+              openf1_live_auto_connect=False,
+              debug_ingestion_enabled=False,
+              development_fixture_enabled=False,
+              room_diagnostics_enabled=False,
+          )
+
+          def rejected(match: str, **overrides: object) -> None:
+              try:
+                  Settings(**{**base, **overrides})
+              except ValidationError as exc:
+                  assert match in str(exc), f"expected {match!r} in {exc}"
+                  return
+              raise AssertionError(f"production accepted unsafe config: {overrides}")
+
+          rejected("APP_PROCESS_ROLE=all", app_process_role="all")
+          rejected("cannot auto-connect", openf1_live_auto_connect=True)
+          rejected("must use rediss", redis_url="redis://h:6379")
+          rejected("must require TLS", database_url="postgresql://u:p@h/apex")
+          rejected("DEBUG_INGESTION_ENABLED", debug_ingestion_enabled=True)
+          rejected("DEVELOPMENT_FIXTURE_ENABLED", development_fixture_enabled=True)
+          rejected("ROOM_DIAGNOSTICS_ENABLED", room_diagnostics_enabled=True)
+          print("production guards OK")
+          PY
+
+      - name: Verify process roles start
+        working-directory: backend
+        run: |
+          python - <<'PY'
+          from app.core.settings import Settings
+          from app.ingestor import create_ingestor_app
+          from app.main import create_app
+
+          def settings(role: str) -> Settings:
+              return Settings(
+                  app_env="staging",
+                  app_process_role=role,
+                  database_url="postgresql://u:p@h/apex?ssl=require",
+                  redis_url="rediss://default:t@h:6379",
+                  postgres_password=None,
+                  debug_ingestion_enabled=False,
+              )
+
+          assert create_app(settings("api")) is not None
+          assert create_ingestor_app(settings("ingestor")) is not None
+          assert create_app(settings("all")) is not None
+          assert create_ingestor_app(settings("all")) is not None
+
+          # The API role must not be able to masquerade as the ingestor.
+          try:
+              create_ingestor_app(settings("api"))
+          except RuntimeError:
+              print("process roles OK")
+          else:
+              raise AssertionError("ingestor accepted APP_PROCESS_ROLE=api")
+          PY
+
+      - name: Check deployment scripts
+        run: |
+          bash -n scripts/run-production-migrations.sh
+          bash -n scripts/smoke-test-deployment.sh
+          # Must fail closed when no database URL is present.
+          if (unset DATABASE_URL DATABASE_MIGRATION_URL; \
+              scripts/run-production-migrations.sh --check >/dev/null 2>&1); then
+            echo "migration script did not fail closed without a DSN" && exit 1
+          fi
+          echo "deployment scripts OK"
+
+      - name: Scan tracked files for credentials
+        run: |
+          # Placeholder templates are tracked; real secrets must never be.
+          if git ls-files | grep -E '^\.env$|^\.env\.(local|production|staging)$'; then
+            echo "a real .env file is tracked" && exit 1
+          fi
+          if git grep -nIE '(sk-[A-Za-z0-9]{20,}|ghp_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY-----)' \
+             -- . ':!*.lock' ':!package-lock.json'; then
+            echo "possible credential committed" && exit 1
+          fi
+          echo "no credentials found in tracked files"
+
+      - name: Check documentation links
+        run: |
+          python - <<'PY'
+          import pathlib, re, sys
+
+          broken = []
+          for doc in pathlib.Path("docs").rglob("*.md"):
+              text = doc.read_text(encoding="utf-8")
+              for target in re.findall(r"\]\((?!https?://|#|mailto:)([^)#]+)", text):
+                  candidate = (doc.parent / target.strip()).resolve()
+                  repo_relative = pathlib.Path.cwd().resolve()
+                  if not candidate.exists():
+                      alt = (repo_relative / target.strip().lstrip("/")).resolve()
+                      if not alt.exists():
+                          broken.append(f"{doc}: {target}")
+          if broken:
+              print("broken documentation links:")
+              print("\n".join(broken))
+              sys.exit(1)
+          print("documentation links OK")
+          PY
+
+  deploy-railway:
+    name: Deploy backend to Railway (opt-in)
+    needs: [backend, frontend, containers, end-to-end, deployment-validation]
+    # Disabled until the repository variable is explicitly set to "true".
+    if: github.ref == 'refs/heads/main' && vars.RAILWAY_DEPLOY_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - uses: actions/checkout@v6
+      - name: Confirm deployment credentials are present
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          if [ -z "${RAILWAY_TOKEN}" ]; then
+            echo "RAILWAY_TOKEN is not configured; refusing to deploy." && exit 1
+          fi
+          echo "Railway deployment credentials present."
+      # Deployment steps are intentionally left unimplemented until the Railway
+      # project exists. See docs/railway-deployment-runbook.md.
+      - name: Deployment placeholder
+        run: |
+          echo "Railway services are not provisioned yet."
+          echo "Follow docs/railway-deployment-runbook.md before enabling this job."
+          exit 1
+
+  deploy-vercel-frontend:
+    name: Deploy Apex Arena frontend to Vercel (opt-in)
+    needs: [backend, frontend, containers, end-to-end, deployment-validation]
+    if: github.ref == 'refs/heads/main' && vars.VERCEL_APEX_DEPLOY_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - uses: actions/checkout@v6
+      - name: Confirm deployment credentials are present
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+        run: |
+          if [ -z "${VERCEL_TOKEN}" ]; then
+            echo "VERCEL_TOKEN is not configured; refusing to deploy." && exit 1
+          fi
+          echo "Vercel deployment credentials present."
+      - name: Deployment placeholder
+        run: |
+          echo "The Apex Arena Vercel project is not provisioned yet."
+          echo "Follow docs/apex-arena-vercel-deployment.md before enabling this job."
+          exit 1
+
   publish:
     name: Publish verified images to GHCR
     if: startsWith(github.ref, 'refs/tags/v')
