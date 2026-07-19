@@ -27,9 +27,34 @@ export function withBasePath(path: string): string {
   return `${APP_BASE_PATH}${normalizedPath}`;
 }
 
+/**
+ * Browser-facing API mount point. Defaults to `<base path>/api` so a single
+ * NEXT_PUBLIC_APP_BASE_PATH keeps routes and API calls in step; an explicit
+ * NEXT_PUBLIC_API_BASE_PATH overrides it when the two must diverge.
+ */
+export const API_BASE_PATH = normalizeBasePath(process.env.NEXT_PUBLIC_API_BASE_PATH)
+  || `${APP_BASE_PATH}/api`;
+
 export function apiPath(path: string): string {
   const normalizedPath = path.startsWith("/") ? path : `/${path}`;
-  return withBasePath(`/api${normalizedPath}`);
+  return `${API_BASE_PATH}${normalizedPath}`;
+}
+
+/**
+ * Absolute, browser-visible URL. Used for canonical tags, Open Graph metadata
+ * and share links, which must always resolve to the public domain rather than
+ * an internal Vercel or Railway origin.
+ */
+export function publicUrl(path = "/"): string {
+  const origin = (process.env.NEXT_PUBLIC_APP_URL ?? "").trim().replace(/\/+$/, "");
+  // Canonical URLs must be stable, so never emit a trailing slash for the root.
+  const relative = withBasePath(path).replace(/(.)\/$/, "$1");
+  if (!origin) return relative;
+  // NEXT_PUBLIC_APP_URL may already include the base path; avoid doubling it.
+  const base = APP_BASE_PATH && origin.endsWith(APP_BASE_PATH)
+    ? origin.slice(0, -APP_BASE_PATH.length)
+    : origin;
+  return `${base}${relative}`;
 }
 
 export function publicAssetPath(path: string): string {
