@@ -307,16 +307,17 @@ database could in principle collide, which is one more reason not to share the d
 
 ### Why the ingestor uses the DIRECT (non-pooled) Neon DSN
 
-`backend/app/services/container.py` selects the DSN by role:
+`backend/app/services/container.py` selects the DSN by process behavior:
 
 ```python
 self.database = Database(
-    settings.async_migration_database_url
-    if settings.app_process_role == "ingestor"
-    else settings.async_database_url,
+    settings.async_process_database_url,
     ...
 )
 ```
+
+The process-aware property selects the direct endpoint for the ingestor and for combined mode
+while live ingestion is enabled. API-only processes keep the pooled endpoint.
 
 and `async_migration_database_url` falls back to the runtime DSN when
 `DATABASE_MIGRATION_URL` is unset:
@@ -419,7 +420,7 @@ stream, and the API reads the latest entry.
      `75` (`EX_TEMPFAIL`), which is safe to retry;
    - prefers `DATABASE_MIGRATION_URL` and falls back to `DATABASE_URL`, erroring out if
      neither is set;
-   - prints only the variable name it chose and the hostname — never a DSN or credentials;
+   - prints only the variable name it chose and a redacted hostname — never a DSN or credentials;
    - supports `--check` as a dry run before a release.
 
    The lock is session-scoped, so a crashed run releases it and cannot wedge later

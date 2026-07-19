@@ -103,9 +103,8 @@ and dump/restore. Decide the Railway region first.
 3. Copy the generated password once. Neon will not show it again; you can only reset it.
 
 **With a managed provider you do not need the discrete `POSTGRES_*` parts at all.** Neon
-issues one authoritative DSN; `DATABASE_URL` is the only value the application reads to
-connect. The discrete fields exist for the local Docker Compose build, which assembles a DSN
-from them:
+issues authoritative pooled and direct DSNs. The discrete fields exist for the local Docker
+Compose build, which assembles its own local DSNs from them:
 
 ```
 # Optional with Neon. Leave POSTGRES_PASSWORD unset.
@@ -115,20 +114,20 @@ POSTGRES_HOST=<PROJECT_ID>.<REGION>.aws.neon.tech
 POSTGRES_PORT=5432
 ```
 
-> **On the password cross-check.** `postgres_password` is `SecretStr | None = None` — it is
-> **optional**, and `validate_runtime_contract` only compares it against the password
-> embedded in `DATABASE_URL` when it is actually supplied:
+> **On the password cross-check.** A development `.env` may legitimately contain both Neon
+> DSNs and the `POSTGRES_PASSWORD` used by local Compose. `validate_runtime_contract` compares
+> URL-decoded credentials only when `DATABASE_URL` or `DATABASE_MIGRATION_URL` points to a
+> repository-local host: `postgres`, `localhost`, `127.0.0.1`, or `::1`.
 >
 > ```python
-> if self.postgres_password is not None:
->     ...
->     raise ValueError("DATABASE_URL password must match POSTGRES_PASSWORD")
+> if host in LOCAL_POSTGRES_HOSTS:
+>     raise ValueError("... password must match POSTGRES_PASSWORD for local PostgreSQL")
 > ```
 >
-> So for a managed Neon DSN, **simply leave `POSTGRES_PASSWORD` unset** and the check never
-> runs. There is no need to hunt for a URL-safe password. If you do set it (local Compose),
-> store the *raw* value in `POSTGRES_PASSWORD` and the percent-encoded value inside
-> `DATABASE_URL`; the validator URL-decodes before comparing.
+> External managed hosts are never compared with the unrelated Compose password. Local URLs
+> still fail fast on drift. Store the *raw* local value in `POSTGRES_PASSWORD` and the
+> percent-encoded value inside a local URL; the validator URL-decodes before comparing. The
+> error contains variable names only, never a password or connection string.
 
 ## 4. Obtain BOTH connection strings
 
@@ -190,17 +189,18 @@ def async_migration_database_url(self) -> str:
     return self._asyncpg_dsn(self.database_migration_url.get_secret_value())
 ```
 
-`backend/app/services/container.py` picks the DSN by role — you do **not** set a different
+`backend/app/services/container.py` uses the process-aware DSN — you do **not** set a different
 `DATABASE_URL` per service:
 
 ```python
 self.database = Database(
-    settings.async_migration_database_url
-    if settings.app_process_role == "ingestor"
-    else settings.async_database_url,
+    settings.async_process_database_url,
     ...
 )
 ```
+
+`async_process_database_url` selects the direct DSN for the dedicated ingestor and for combined
+mode while live ingestion is enabled. API-only processes use the pooled runtime DSN.
 
 So the intended configuration is:
 
@@ -216,7 +216,8 @@ damaging misconfiguration available in this stack.
 
 ## 7. TLS and the exact URL form
 
-`validate_database_url` in `settings.py` accepts exactly two prefixes:
+The shared database URL validator in `settings.py` parses `DATABASE_URL` and
+`DATABASE_MIGRATION_URL` independently and accepts exactly two prefixes:
 
 ```python
 if not value.startswith(("postgresql://", "postgresql+asyncpg://")):
@@ -317,9 +318,30 @@ Neon free-tier computes **autosuspend after a few minutes of inactivity**. Conse
 
 ## 9. Run Alembic
 
+### Safe local operator flow
+
+Shell-exported variables take precedence over `.env`; the existing development file does not need
+to be deleted or overwritten. From the repository root:
+
+```bash
+cd backend
+source .venv/bin/activate
+export DATABASE_URL='<Neon pooled URL>'
+export DATABASE_MIGRATION_URL='<Neon direct URL>'
+python -m alembic current
+python -m alembic heads
+python -m alembic upgrade head
+unset DATABASE_URL DATABASE_MIGRATION_URL
+```
+
+Do not put real URLs in a committed file. If a local-only migration env file is preferred,
+`.env.migration.local` is already covered by the repository's `.env.*` ignore rule. Confirm the
+direct hostname does not contain `-pooler` before applying a migration, and never print the full
+URL.
+
 Use `scripts/run-production-migrations.sh`. It prefers `DATABASE_MIGRATION_URL`, falls back
 to `DATABASE_URL`, holds its own advisory lock so two concurrent runs cannot collide, and
-prints only the chosen variable name and the hostname — never a DSN:
+prints only the chosen variable name and a redacted hostname — never a DSN:
 
 ```bash
 scripts/run-production-migrations.sh --check    # report current vs head, apply nothing
@@ -335,6 +357,12 @@ railway run --service apex-arena-ingestor scripts/run-production-migrations.sh
 
 If you see `prepared statement "__asyncpg_stmt_..." does not exist` or the migration hangs on
 a lock, you are on the pooled endpoint. Re-check the hostname for the `-pooler` suffix.
+
+If settings report `DATABASE_URL password must match POSTGRES_PASSWORD`, update to a revision with
+the local-host-scoped validator. The old behavior incorrectly applied a Compose drift check to an
+external managed URL whenever the development `.env` also contained `POSTGRES_PASSWORD`. Do not
+work around it by deleting `.env`, copying a Neon password into `POSTGRES_PASSWORD`, or resetting
+the Neon role.
 
 ## 10. Verify connectivity
 

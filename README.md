@@ -223,7 +223,8 @@ The backend supports two operating modes, selected by `APP_PROCESS_ROLE`:
   an `ingestor` process that owns the OpenF1 subscription behind a singleton advisory lease.
 - **Low-cost** — a single combined `all` process that both serves and ingests. It is
   restricted to `APP_ENV=staging`; the application refuses to start with
-  `APP_PROCESS_ROLE=all` in production, because combined mode has no singleton protection.
+  `APP_PROCESS_ROLE=all` in production. When live ingestion is enabled, combined mode uses the
+  direct database endpoint and acquires the same singleton advisory lease as the ingestor.
 
 ### Deployment documentation
 

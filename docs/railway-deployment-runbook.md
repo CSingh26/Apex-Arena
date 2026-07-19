@@ -231,7 +231,7 @@ scripts/run-production-migrations.sh
 
 [`scripts/run-production-migrations.sh`](../scripts/run-production-migrations.sh) prefers
 `DATABASE_MIGRATION_URL` and falls back to `DATABASE_URL` only if the former is unset. It
-prints the chosen variable name and hostname but never a connection string, and it
+prints the chosen variable name and a redacted hostname but never a connection string, and it
 serializes concurrent runs behind a PostgreSQL advisory lock — a second simultaneous
 invocation exits `75` (`EX_TEMPFAIL`, safe to retry) rather than corrupting the schema.
 
@@ -241,6 +241,11 @@ invocation exits `75` (`EX_TEMPFAIL`, safe to retry) rather than corrupting the 
 - Always use the direct endpoint. The Neon pooler in transaction mode silently breaks both
   Alembic and the advisory lock — see [`neon-setup.md`](./neon-setup.md).
 - Deploy the application only after the migration exits `0`.
+
+For a local operator invocation, export the pooled and direct URLs in the shell, run
+`python -m alembic current`, `heads`, and `upgrade head` from `backend`, then unset both variables.
+Shell values override the untracked development `.env`. Full commands and redacted verification
+queries are in [`neon-setup.md`](./neon-setup.md#safe-local-operator-flow).
 
 ---
 
@@ -422,6 +427,7 @@ Run in this order. Do not proceed past a failing step.
 | **`asyncpg` connect error mentioning an unknown parameter** (`sslmode`, `channel_binding`) | A Neon libpq connection string pasted verbatim. `Settings._asyncpg_dsn` now translates `sslmode` → `ssl` and drops `channel_binding`, so this should no longer occur | If it still appears, the DSN carries some other libpq-only parameter. Use the plain form `postgresql://USER:PASSWORD@HOST/apex_arena?ssl=require` |
 | **Startup fails with `Production DATABASE_URL must require TLS`** | The DSN has no `ssl`/`sslmode` parameter, or one with an accepted-but-weaker value | Append `?ssl=require`. Accepted values are `require`, `verify-ca`, `verify-full`, `true` |
 | **Startup fails with `Production REDIS_URL must use rediss://`** | A plaintext Upstash URL | Use the TLS endpoint from the Upstash console |
+| **`DATABASE_URL password must match POSTGRES_PASSWORD` while using Neon** | An older revision applied the local Compose credential check to every host because the development `.env` also contained `POSTGRES_PASSWORD` | Use the local-host-scoped validator. External managed URLs may coexist with local Compose variables; do not delete `.env`, reset the Neon password, or copy managed credentials into `POSTGRES_PASSWORD` |
 | **Startup fails with `APP_PROCESS_ROLE=all is not allowed in production`** | Combined mode with `APP_ENV=production` | Either split into `api` + `ingestor`, or set `APP_ENV=staging`. There is no override |
 | **SSE connections flap to `degraded`** | Historically a Redis socket timeout below the blocking `XREAD` window aborted every idle heartbeat. The blocking read is now capped at 10s and `effective_redis_socket_timeout` keeps a margin above it | Do not lower `REDIS_SOCKET_TIMEOUT_SECONDS` below `SSE_HEARTBEAT_SECONDS`. If flapping continues, check `/health/provider` — a genuinely disconnected ingestor also reports `degraded`. Note that Vercel's function duration cap ends long streams by design; the client resumes with `Last-Event-ID` |
 | **First request after a quiet period times out** | Neon compute autosuspended and is cold-starting | Expected on a small plan. `pool_pre_ping` recovers the connection; retry. If it happens under real traffic, the health check timeout (30s) is the value to review, not the pool |

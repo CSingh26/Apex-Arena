@@ -224,19 +224,20 @@ Never reuse one value across two variables, two environments, or two services.
 | --- | --- | --- | --- |
 | `DATABASE_URL` | A, I | **Yes** | pooled endpoint — see above |
 | `DATABASE_MIGRATION_URL` | I, M | **Yes** | **direct** endpoint — see above |
-| `POSTGRES_DB` | A, I | No | `apex_arena` |
-| `POSTGRES_USER` | A, I | No | `apex` |
-| `POSTGRES_PASSWORD` | A, I | **Yes** | `<APEX_DB_PASSWORD>` |
-| `POSTGRES_HOST` | A, I | No | `ep-<ID>.<REGION>.aws.neon.tech` |
-| `POSTGRES_PORT` | A, I | No | `5432` |
+| `POSTGRES_DB` | Local Compose | No | `apex_arena` |
+| `POSTGRES_USER` | Local Compose | No | `apex` |
+| `POSTGRES_PASSWORD` | Local Compose | **Yes** | `<LOCAL_DB_PASSWORD>` |
+| `POSTGRES_HOST` | Local Compose | No | `postgres` |
+| `POSTGRES_PORT` | Local Compose | No | `5432` |
 
 Constraints enforced by `settings.py`:
 
 - `validate_database_url` accepts **only** `postgresql://` or `postgresql+asyncpg://`.
   `postgres://` is rejected.
-- When `POSTGRES_PASSWORD` is set, `validate_runtime_contract` compares it (URL-decoded)
-  against the password inside `DATABASE_URL` and raises on mismatch. Percent-encode in the
-  URL, store the raw value in `POSTGRES_PASSWORD`.
+- When `POSTGRES_PASSWORD` is set, `validate_runtime_contract` compares it (URL-decoded) only
+  against local-host `DATABASE_URL` / `DATABASE_MIGRATION_URL` values. External managed hosts
+  ignore this unrelated Compose variable. Percent-encode in a local URL and store the raw value
+  in `POSTGRES_PASSWORD`.
 - In production, `DATABASE_URL` must carry `ssl` or `sslmode` of `require`, `verify-ca`,
   `verify-full`, or `true`.
 - `_asyncpg_dsn` strips `sslmode`/`channel_binding` and rewrites to asyncpg's `ssl`, so
@@ -462,9 +463,9 @@ intermediate step.
 ### `DATABASE_URL` / `DATABASE_MIGRATION_URL` / `POSTGRES_PASSWORD`
 
 1. Reset the role password in the Neon console. Neon shows it once.
-2. Update **all three** consistently: the pooled URL, the direct URL, and
-   `POSTGRES_PASSWORD` — remembering the validator compares the URL-decoded password in
-   `DATABASE_URL` against `POSTGRES_PASSWORD`, and that a mismatch prevents startup.
+2. Update both managed secrets consistently: the pooled `DATABASE_URL` and direct
+   `DATABASE_MIGRATION_URL`. `POSTGRES_PASSWORD` belongs to local Compose and is not a Railway
+   or Neon secret; do not overwrite it during managed credential rotation.
 3. Apply to the API service and the ingestor service and restart both.
 4. Verify: `/health/ready` returns 200 with `database: "ready"` on the API, and the
    ingestor holds the advisory lock (`pg_locks` query in `neon-setup.md`).
