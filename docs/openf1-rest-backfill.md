@@ -193,6 +193,11 @@ Historical chat generation is now an explicit database job. The frontend reads p
 `room_messages` only; normal page requests do not generate conversations. This keeps production
 traffic predictable and makes every replay resumable.
 
+Railway deployment is repository-driven now. The API service uses
+`/backend/deploy/railway/api.toml`; the finite historical job uses
+`/backend/deploy/railway/chat-build.toml`. See [Railway deployment](railway-deployment.md) before
+running the production job.
+
 Recommended operator sequence:
 
 ```bash
