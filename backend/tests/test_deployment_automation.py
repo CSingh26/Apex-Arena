@@ -192,7 +192,7 @@ def test_deploy_script_argument_and_missing_variable_behavior(tmp_path: Path) ->
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     railway = fake_bin / "railway"
-    railway.write_text("#!/usr/bin/env bash\necho railway \"$@\"\n")
+    railway.write_text('#!/usr/bin/env bash\necho railway "$@"\n')
     railway.chmod(0o755)
     env = {**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}"}
 
@@ -240,3 +240,11 @@ def test_api_workflow_deploys_only_api_service() -> None:
     assert "scripts/deploy_railway.sh api" in text
     assert "deploy_railway.sh historical" not in text
     assert "apex-arena-historical-chat" not in text
+    assert "Skipping GitHub Actions Railway CLI deploy" in text
+
+
+def test_historical_workflow_skips_without_railway_token() -> None:
+    text = (REPO_ROOT / ".github/workflows/run-historical-chat-build.yml").read_text()
+
+    assert "Skipping GitHub Actions Railway CLI deploy" in text
+    assert "Use Railway's GitHub-connected service" in text

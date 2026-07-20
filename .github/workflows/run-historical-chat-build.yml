@@ -52,19 +52,19 @@ jobs:
           [[ "${{ inputs.generation_version }}" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "generation_version has invalid characters"; exit 1; }
           [[ "${{ inputs.force_regenerate }}" =~ ^(true|false)$ ]] || { echo "force_regenerate must be true or false"; exit 1; }
 
-      - name: Validate Railway deployment secrets
-        run: |
-          test -n "${RAILWAY_TOKEN}" || { echo "RAILWAY_TOKEN is missing"; exit 1; }
-          test -n "${RAILWAY_PROJECT_ID}" || { echo "RAILWAY_PROJECT_ID is missing"; exit 1; }
-
-      - name: Install Railway CLI
-        run: npm install --global @railway/cli
-
       - name: Remind operator about Railway service variables
         run: |
           echo "Deploying historical service source only."
           echo "The Railway service must already have RUN_ROOM_CHAT_BUILD=true to execute."
           echo "Configure MAX_ROOMS=${{ inputs.max_rooms }}, MAX_MESSAGES_PER_ROOM=${{ inputs.max_messages_per_room }}, GENERATION_VERSION=${{ inputs.generation_version }}, FORCE_REGENERATE=${{ inputs.force_regenerate }} in Railway if needed."
 
-      - name: Deploy historical service
-        run: scripts/deploy_railway.sh historical
+      - name: Deploy historical service if Railway CLI credentials are configured
+        run: |
+          if [ -z "${RAILWAY_TOKEN}" ] || [ -z "${RAILWAY_PROJECT_ID}" ]; then
+            echo "RAILWAY_TOKEN or RAILWAY_PROJECT_ID is not configured."
+            echo "Skipping GitHub Actions Railway CLI deploy."
+            echo "Use Railway's GitHub-connected service and manually redeploy apex-arena-historical-chat."
+            exit 0
+          fi
+          npm install --global @railway/cli
+          scripts/deploy_railway.sh historical

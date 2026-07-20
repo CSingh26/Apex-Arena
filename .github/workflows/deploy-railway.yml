@@ -31,13 +31,13 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Validate Railway deployment secrets
+      - name: Deploy API service if Railway CLI credentials are configured
         run: |
-          test -n "${RAILWAY_TOKEN}" || { echo "RAILWAY_TOKEN is missing"; exit 1; }
-          test -n "${RAILWAY_PROJECT_ID}" || { echo "RAILWAY_PROJECT_ID is missing"; exit 1; }
-
-      - name: Install Railway CLI
-        run: npm install --global @railway/cli
-
-      - name: Deploy API service only
-        run: scripts/deploy_railway.sh api
+          if [ -z "${RAILWAY_TOKEN}" ] || [ -z "${RAILWAY_PROJECT_ID}" ]; then
+            echo "RAILWAY_TOKEN or RAILWAY_PROJECT_ID is not configured."
+            echo "Skipping GitHub Actions Railway CLI deploy."
+            echo "Use Railway's GitHub-connected auto-deploy with backend/deploy/railway/api.toml."
+            exit 0
+          fi
+          npm install --global @railway/cli
+          scripts/deploy_railway.sh api

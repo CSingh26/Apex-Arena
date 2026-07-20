@@ -79,7 +79,11 @@ Keep `RUN_ROOM_CHAT_BUILD=false` except during the manual historical job window.
 
 ## GitHub Actions
 
-Required repository secrets:
+Railway's GitHub-connected auto-deploy does not require a GitHub Actions Railway token. If you use
+Railway's dashboard integration, leave these secrets unset; the deploy workflows will skip their CLI
+deploy step cleanly.
+
+Optional repository secrets for CLI deploys from GitHub Actions:
 
 - `RAILWAY_TOKEN`
 - `RAILWAY_PROJECT_ID`
@@ -90,12 +94,15 @@ Optional repository variables:
 - `RAILWAY_HISTORICAL_SERVICE` defaults to `apex-arena-historical-chat`
 
 `.github/workflows/deploy-railway.yml` deploys only the API service on pushes to `main` that touch
-backend/deployment files. It never deploys the historical service and never runs the chat build.
+backend/deployment files when `RAILWAY_TOKEN` and `RAILWAY_PROJECT_ID` are configured. If they are
+not configured, it exits successfully and relies on Railway's GitHub-connected auto-deploy. It never
+deploys the historical service and never runs the chat build.
 
 `.github/workflows/run-historical-chat-build.yml` is `workflow_dispatch` only. It deploys the
 historical service source, but it does not mutate Railway variables and does not generate chats
-inside GitHub Actions. The Railway service must already have `RUN_ROOM_CHAT_BUILD=true` to execute
-the finite job.
+inside GitHub Actions. If Railway CLI secrets are not configured, it exits successfully after the
+operator reminder. The Railway service must already have `RUN_ROOM_CHAT_BUILD=true` to execute the
+finite job.
 
 ## Local deploy script
 
@@ -205,5 +212,6 @@ Historical rollback:
   `/backend/deploy/railway/chat-build.toml`.
 - Wrong Dockerfile path: for repository-root source, use `backend/Dockerfile`.
 - Wrong root directory: these new manifests assume repository root, not `backend`.
-- GitHub autodeploy not enabled: connect the API service to GitHub `main`, set the custom config
-  path, and configure `RAILWAY_TOKEN` and `RAILWAY_PROJECT_ID` in GitHub Actions.
+- GitHub autodeploy not enabled: connect the API service to GitHub `main` and set the custom config
+  path. `RAILWAY_TOKEN` and `RAILWAY_PROJECT_ID` are needed only for optional Railway CLI deploys
+  from GitHub Actions.
