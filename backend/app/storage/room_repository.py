@@ -324,6 +324,161 @@ class SqlRaceRoomRepository:
             records = (await session.execute(statement)).scalars().all()
             return [RaceRoom.model_validate(record, from_attributes=True) for record in records]
 
+    async def list_completed_backfill_candidates(
+        self,
+        *,
+        season: int,
+        room_slug: str | None = None,
+        limit: int | None = None,
+    ) -> list[RaceRoom]:
+        """Find completed competitive rooms that still need provider backfill repair."""
+
+        event_counts = (
+            select(
+                NormalizedRaceEventRecord.session_key.label("session_key"),
+                func.count(NormalizedRaceEventRecord.id).label("event_count"),
+            )
+            .group_by(NormalizedRaceEventRecord.session_key)
+            .subquery()
+        )
+        filters = [
+            RaceRoomRecord.season == season,
+            RaceRoomRecord.is_development.is_(False),
+            RaceRoomRecord.session_type.in_(
+                [
+                    SessionType.QUALIFYING.value,
+                    SessionType.SPRINT_QUALIFYING.value,
+                    SessionType.SPRINT.value,
+                    SessionType.RACE.value,
+                ]
+            ),
+            RaceRoomRecord.scheduled_start <= datetime.now(UTC),
+            or_(
+                RaceRoomRecord.session_key.is_(None),
+                RaceRoomRecord.replay_available.is_(False),
+                RaceRoomRecord.status.in_(
+                    [
+                        RoomStatus.PENDING.value,
+                        RoomStatus.INGESTING.value,
+                        RoomStatus.UNAVAILABLE.value,
+                        RoomStatus.FAILED.value,
+                    ]
+                ),
+                RaceRoomRecord.ingestion_status.in_(
+                    [
+                        IngestionStatus.PENDING.value,
+                        IngestionStatus.MATCHING.value,
+                        IngestionStatus.PARTIAL.value,
+                        IngestionStatus.FAILED.value,
+                        IngestionStatus.UNAVAILABLE.value,
+                    ]
+                ),
+                RaceRoomRecord.source_availability.in_(
+                    [
+                        SourceAvailability.UNAVAILABLE.value,
+                        SourceAvailability.RESULTS_ONLY.value,
+                        SourceAvailability.TIMING_ONLY.value,
+                    ]
+                ),
+                func.coalesce(event_counts.c.event_count, 0) == 0,
+            ),
+        ]
+        if room_slug:
+            filters.append(RaceRoomRecord.slug == room_slug)
+        statement = (
+            select(RaceRoomRecord)
+            .outerjoin(event_counts, RaceRoomRecord.session_key == event_counts.c.session_key)
+            .where(*filters)
+            .order_by(RaceRoomRecord.scheduled_start.asc(), RaceRoomRecord.session_type.asc())
+        )
+        if limit is not None:
+            statement = statement.limit(limit)
+        async with self.database.session_factory() as session:
+            records = (await session.execute(statement)).scalars().all()
+            return [RaceRoom.model_validate(record, from_attributes=True) for record in records]
+
+    async def list_completed_backfill_status(
+        self, *, season: int, room_slug: str | None = None
+    ) -> list[dict[str, object]]:
+        """Return operator diagnostics for completed-room historical readiness."""
+
+        event_counts = (
+            select(
+                NormalizedRaceEventRecord.session_key.label("session_key"),
+                func.count(NormalizedRaceEventRecord.id).label("normalized_event_count"),
+            )
+            .group_by(NormalizedRaceEventRecord.session_key)
+            .subquery()
+        )
+        filters = [
+            RaceRoomRecord.season == season,
+            RaceRoomRecord.is_development.is_(False),
+            RaceRoomRecord.session_type.in_(
+                [
+                    SessionType.QUALIFYING.value,
+                    SessionType.SPRINT_QUALIFYING.value,
+                    SessionType.SPRINT.value,
+                    SessionType.RACE.value,
+                ]
+            ),
+            RaceRoomRecord.scheduled_start <= datetime.now(UTC),
+        ]
+        if room_slug:
+            filters.append(RaceRoomRecord.slug == room_slug)
+        statement = (
+            select(
+                RaceRoomRecord.slug,
+                RaceRoomRecord.session_type,
+                RaceRoomRecord.scheduled_start,
+                RaceRoomRecord.meeting_key,
+                RaceRoomRecord.session_key,
+                RaceRoomRecord.status,
+                RaceRoomRecord.ingestion_status,
+                RaceRoomRecord.source_availability,
+                RaceRoomRecord.replay_available,
+                func.coalesce(event_counts.c.normalized_event_count, 0).label(
+                    "normalized_event_count"
+                ),
+            )
+            .outerjoin(event_counts, RaceRoomRecord.session_key == event_counts.c.session_key)
+            .where(*filters)
+            .order_by(RaceRoomRecord.scheduled_start.asc(), RaceRoomRecord.session_type.asc())
+        )
+        async with self.database.session_factory() as session:
+            rows = (await session.execute(statement)).mappings().all()
+        diagnostics: list[dict[str, object]] = []
+        for row in rows:
+            reasons: list[str] = []
+            if row["session_key"] is None:
+                reasons.append("missing_session_key")
+            if not row["replay_available"]:
+                reasons.append("replay_not_available")
+            if row["ingestion_status"] in {
+                IngestionStatus.PENDING.value,
+                IngestionStatus.MATCHING.value,
+                IngestionStatus.PARTIAL.value,
+                IngestionStatus.FAILED.value,
+                IngestionStatus.UNAVAILABLE.value,
+            }:
+                reasons.append(f"ingestion_{row['ingestion_status']}")
+            if row["source_availability"] in {
+                SourceAvailability.UNAVAILABLE.value,
+                SourceAvailability.RESULTS_ONLY.value,
+                SourceAvailability.TIMING_ONLY.value,
+            }:
+                reasons.append(f"source_{row['source_availability']}")
+            if int(row["normalized_event_count"]) == 0:
+                reasons.append("no_normalized_events")
+            diagnostics.append(
+                {
+                    **dict(row),
+                    "backfill_candidate": bool(reasons),
+                    "exclusion_reason": "ready_for_chat_generation" if not reasons else None,
+                    "repair_reasons": reasons,
+                }
+            )
+        return diagnostics
+
     async def bind_provider_session(
         self, slug: str, *, meeting_key: str | None, session_key: str
     ) -> RaceRoom:

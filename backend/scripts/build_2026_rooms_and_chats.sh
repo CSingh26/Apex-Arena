@@ -24,6 +24,32 @@ python -m app.cli.build_race_rooms \
   --json-summary \
   --force-refresh
 
+backfill_args=(
+  --season "${SEASON_YEAR:-2026}"
+  --resume
+  --json-summary
+)
+
+if [[ -n "${MAX_BACKFILL_ROOMS:-}" ]]; then
+  backfill_args+=(--max-rooms "${MAX_BACKFILL_ROOMS}")
+fi
+
+if [[ "${BACKFILL_INCLUDE_HIGH_FREQUENCY:-false}" == "true" ]]; then
+  backfill_args+=(--include-high-frequency)
+fi
+
+if [[ "${BACKFILL_FORCE_RETRY_FAILED:-false}" == "true" ]]; then
+  backfill_args+=(--force-retry-failed)
+fi
+
+if [[ "${BACKFILL_CONTINUE_ON_ERROR:-true}" == "true" ]]; then
+  backfill_args+=(--continue-on-error)
+else
+  backfill_args+=(--fail-fast)
+fi
+
+python -m app.cli.backfill_completed_rooms "${backfill_args[@]}"
+
 generate_args=(
   --season "${SEASON_YEAR:-2026}"
   --completed-only
@@ -38,3 +64,4 @@ if [[ "${FORCE_REGENERATE:-false}" == "true" ]]; then
 fi
 
 python -m app.cli.generate_room_chats "${generate_args[@]}"
+python -m app.cli.database_status --json-summary
