@@ -2,8 +2,9 @@
 # Apex Arena combined service.
 #
 # Runs the FastAPI API and the narrow recent-session REST reconciliation worker
-# in one Railway service. Deploy from main and keep replicas at 1 while worker
-# duties are enabled.
+# in one Railway service. Prefer the verified GHCR image source
+# ghcr.io/csingh26/apex-arena-backend:main, and keep replicas at 1 while
+# worker duties are enabled.
 #
 # Railway service settings to set in the UI:
 #   Root directory     : backend

@@ -200,13 +200,20 @@ Every pull request, `main` update, and version tag must pass:
 - production backend and frontend Docker builds
 - critical-vulnerability scans for both images
 
-Only a version tag that clears every job can publish. The release workflow produces multi-platform
-`linux/amd64` and `linux/arm64` images:
+Only verified builds can publish images. Version tags publish multi-platform release images:
 
 - `ghcr.io/csingh26/apex-arena-backend`
 - `ghcr.io/csingh26/apex-arena-frontend`
 
 Published images receive semantic-version, major/minor, major, `latest`, and commit-SHA tags.
+After the full `main` verification workflow succeeds, a dedicated backend image workflow also
+publishes the Railway-ready AMD64 backend image as:
+
+- `ghcr.io/csingh26/apex-arena-backend:main`
+- `ghcr.io/csingh26/apex-arena-backend:<full-commit-sha>`
+
+Railway should follow `:main` for simple continuous deployment and keep the SHA tags available
+for exact rollbacks.
 
 ## Deployment
 
