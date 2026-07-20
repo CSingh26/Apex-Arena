@@ -81,7 +81,8 @@ jobs:
       - name: Build backend verification image
         uses: docker/build-push-action@v7
         with:
-          context: backend
+          context: .
+          file: backend/Dockerfile
           load: true
           tags: apex-arena-backend:verify
           cache-from: type=gha,scope=backend
@@ -421,11 +422,13 @@ jobs:
       matrix:
         include:
           - component: backend
-            context: backend
+            context: .
+            dockerfile: backend/Dockerfile
             image: ghcr.io/csingh26/apex-arena-backend
             build_args: ""
           - component: frontend
             context: frontend
+            dockerfile: frontend/Dockerfile
             image: ghcr.io/csingh26/apex-arena-frontend
             build_args: |
               NEXT_PUBLIC_APP_NAME=Apex Arena
@@ -464,6 +467,7 @@ jobs:
         uses: docker/build-push-action@v7
         with:
           context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
           push: true
           platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta.outputs.tags }}

@@ -18,9 +18,23 @@ fi
 
 alembic upgrade head
 python -m app.cli.database_status --json-summary
-python -m app.cli.build_race_rooms --season 2026 --completed-only --json-summary --force-refresh
-python -m app.cli.generate_room_chats \
-  --season 2026 \
+python -m app.cli.build_race_rooms \
+  --season "${SEASON_YEAR:-2026}" \
   --completed-only \
   --json-summary \
-  --generation-version "${ROOM_CHAT_GENERATION_VERSION:-rooms-v4-stat-debate}"
+  --force-refresh
+
+generate_args=(
+  --season "${SEASON_YEAR:-2026}"
+  --completed-only
+  --json-summary
+  --generation-version "${GENERATION_VERSION:-v1}"
+  --max-rooms "${MAX_ROOMS:-100}"
+  --max-messages-per-room "${MAX_MESSAGES_PER_ROOM:-250}"
+)
+
+if [[ "${FORCE_REGENERATE:-false}" == "true" ]]; then
+  generate_args+=(--force-regenerate)
+fi
+
+python -m app.cli.generate_room_chats "${generate_args[@]}"
