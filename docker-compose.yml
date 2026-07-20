@@ -41,8 +41,8 @@ services:
   migrate:
     image: apex-arena-backend:local
     build:
-      context: .
-      dockerfile: backend/Dockerfile
+      context: ./backend
+      dockerfile: Dockerfile
     restart: "no"
     env_file:
       - .env
@@ -67,8 +67,8 @@ services:
   backend:
     image: apex-arena-backend:local
     build:
-      context: .
-      dockerfile: backend/Dockerfile
+      context: ./backend
+      dockerfile: Dockerfile
     restart: unless-stopped
     env_file:
       - .env

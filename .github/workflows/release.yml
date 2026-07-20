@@ -81,8 +81,7 @@ jobs:
       - name: Build backend verification image
         uses: docker/build-push-action@v7
         with:
-          context: .
-          file: backend/Dockerfile
+          context: backend
           load: true
           tags: apex-arena-backend:verify
           cache-from: type=gha,scope=backend
@@ -422,8 +421,8 @@ jobs:
       matrix:
         include:
           - component: backend
-            context: .
-            dockerfile: backend/Dockerfile
+            context: backend
+            dockerfile: Dockerfile
             image: ghcr.io/csingh26/apex-arena-backend
             build_args: ""
           - component: frontend

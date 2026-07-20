@@ -10,9 +10,9 @@ change. Both Railway backend services should be connected directly to the GitHub
 
 - Railway service: `apex-arena-backend`
 - GitHub branch: `main`
-- Railway source root: repository root
+- Railway Root Directory: `/backend`
 - Railway custom config path: `/backend/deploy/railway/api.toml`
-- Dockerfile: `backend/Dockerfile`
+- Dockerfile: `Dockerfile`
 - Container working directory: `/app`
 - Start command: runs `alembic upgrade head`, then `python -m app.runtime`
 - Health check: `/health/live`
@@ -42,9 +42,9 @@ Also configure the existing production secrets/references:
 
 - Railway service: `apex-arena-historical-chat`
 - GitHub branch: `main`
-- Railway source root: repository root
+- Railway Root Directory: `/backend`
 - Railway custom config path: `/backend/deploy/railway/chat-build.toml`
-- Dockerfile: `backend/Dockerfile`
+- Dockerfile: `Dockerfile`
 - Container working directory: `/app`
 - HTTP health check: none
 - Restart policy: never restart after successful completion
@@ -210,8 +210,8 @@ Historical rollback:
 - `RUN_ROOM_CHAT_BUILD=false`: service exits successfully with `Historical chat job disabled`.
 - Wrong Railway config path: set API to `/backend/deploy/railway/api.toml` and historical to
   `/backend/deploy/railway/chat-build.toml`.
-- Wrong Dockerfile path: for repository-root source, use `backend/Dockerfile`.
-- Wrong root directory: these new manifests assume repository root, not `backend`.
+- Wrong Dockerfile path: with Railway Root Directory `/backend`, use `Dockerfile`.
+- Wrong root directory: these manifests assume Railway Root Directory `/backend`.
 - GitHub autodeploy not enabled: connect the API service to GitHub `main` and set the custom config
   path. `RAILWAY_TOKEN` and `RAILWAY_PROJECT_ID` are needed only for optional Railway CLI deploys
   from GitHub Actions.

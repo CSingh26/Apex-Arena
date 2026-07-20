@@ -160,11 +160,12 @@ def test_service_specific_railway_toml_files_parse() -> None:
     for relative in (
         "backend/deploy/railway/api.toml",
         "backend/deploy/railway/chat-build.toml",
-        "railway.toml",
     ):
         data = tomllib.loads((REPO_ROOT / relative).read_text())
-        assert data["build"]["builder"] == "dockerfile"
-        assert data["build"]["dockerfilePath"].endswith("backend/Dockerfile")
+        assert data["build"]["builder"] == "DOCKERFILE"
+        assert data["build"]["dockerfilePath"] == "Dockerfile"
+    root = tomllib.loads((REPO_ROOT / "railway.toml").read_text())
+    assert root["build"]["dockerfilePath"] == "backend/Dockerfile"
 
 
 def test_historical_config_is_guarded_and_finite() -> None:
@@ -222,7 +223,8 @@ def test_deploy_script_argument_and_missing_variable_behavior(tmp_path: Path) ->
 def test_dockerfile_copies_backend_scripts() -> None:
     dockerfile = (REPO_ROOT / "backend/Dockerfile").read_text()
 
-    assert "COPY backend/scripts ./scripts" in dockerfile
+    assert "COPY scripts ./scripts" in dockerfile
+    assert "COPY backend/scripts ./scripts" not in dockerfile
 
 
 def test_historical_workflow_is_manual_only() -> None:

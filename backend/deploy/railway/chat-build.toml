@@ -1,22 +1,22 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Railway config for the finite historical race-room chat build job.
 #
-# Railway source root: repository root
-# Dockerfile path     : backend/Dockerfile
+# Railway Root Directory: /backend
+# Dockerfile path       : Dockerfile
 # Container WORKDIR   : /app
 #
 # This service is intentionally inert unless RUN_ROOM_CHAT_BUILD=true.
 
 [build]
-builder = "dockerfile"
-dockerfilePath = "backend/Dockerfile"
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
 watchPatterns = [
-  "backend/app/**",
-  "backend/migrations/**",
-  "backend/scripts/**",
-  "backend/pyproject.toml",
-  "backend/Dockerfile",
-  "backend/deploy/railway/chat-build.toml",
+  "app/**",
+  "migrations/**",
+  "scripts/**",
+  "pyproject.toml",
+  "Dockerfile",
+  "deploy/railway/chat-build.toml",
 ]
 
 [deploy]

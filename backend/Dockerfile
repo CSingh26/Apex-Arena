@@ -9,11 +9,11 @@ WORKDIR /app
 
 RUN addgroup --system apex && adduser --system --ingroup apex apex
 
-COPY backend/pyproject.toml ./
-COPY backend/app ./app
-COPY backend/scripts ./scripts
-COPY backend/migrations ./migrations
-COPY backend/alembic.ini ./
+COPY pyproject.toml ./
+COPY app ./app
+COPY scripts ./scripts
+COPY migrations ./migrations
+COPY alembic.ini ./
 
 RUN pip install --upgrade pip && pip install .
 
