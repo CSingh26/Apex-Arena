@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 
+from app.api.routes import stream_session
 from app.api.streaming import format_sse, session_event_stream
 from app.core.settings import Settings
 from app.domain.models import NormalizedRaceEvent, RaceEventType
@@ -66,3 +67,30 @@ def test_sse_format_is_compact_and_parseable() -> None:
 
     assert message.endswith("\n\n")
     assert json.loads(data_line.removeprefix("data: ")) == {"status": "CONNECTED"}
+
+
+@pytest.mark.asyncio
+async def test_session_stream_prefers_numeric_last_event_id_for_reconnect(monkeypatch) -> None:
+    recovered_sequences: list[int] = []
+
+    async def fake_stream(
+        _request: Any,
+        _services: Any,
+        _session_key: str,
+        recovered_sequence: int,
+    ):
+        recovered_sequences.append(recovered_sequence)
+        yield ": heartbeat\n\n"
+
+    monkeypatch.setattr("app.api.routes.session_event_stream", fake_stream)
+    response = await stream_session(
+        "spa-race",
+        ConnectedRequest(),  # type: ignore[arg-type]
+        SimpleNamespace(),  # type: ignore[arg-type]
+        last_sequence_number=4,
+        last_event_id="9",
+    )
+
+    await anext(response.body_iterator)
+
+    assert recovered_sequences == [9]

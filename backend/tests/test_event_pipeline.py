@@ -94,6 +94,11 @@ class Consumer:
         self.events.append(event)
 
 
+class FailingConsumer:
+    async def consume(self, event: NormalizedRaceEvent) -> None:
+        raise ConnectionError("provider consumer unavailable")
+
+
 def processor() -> tuple[RaceEventProcessor, NormalizedRepository, Consumer]:
     normalized = NormalizedRepository()
     consumer = Consumer()
@@ -171,3 +176,29 @@ async def test_out_of_order_events_receive_monotonic_event_time_sequences() -> N
     assert [event.lap_number for event in events] == [1, 2]
     assert [event.sequence_number for event in events] == [1, 2]
     assert [event.sequence_number for event in consumer.events] == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_consumer_outage_does_not_rollback_persisted_event() -> None:
+    normalized = NormalizedRepository()
+    healthy = Consumer()
+    pipeline = RaceEventProcessor(
+        raw_events=RawProviderEventService(RawRepository()),
+        normalizer=OpenF1EventNormalizer(),
+        normalized_repository=normalized,
+        deduplicator=EventDeduplicator(),
+        ordering_buffer=EventOrderingBuffer(window_ms=0),
+        sequence_numbers=SequenceNumberService(normalized),
+        consumers=[FailingConsumer(), healthy],
+    )
+    result = await pipeline.ingest(
+        RawEventInput(
+            provider_endpoint="laps",
+            provider_event_id="durable",
+            session_key="spa-race",
+            raw_payload={"driver_number": 4, "lap_number": 1},
+        )
+    )
+    assert result.normalized_inserted == 1
+    assert await normalized.count("spa-race") == 1
+    assert len(healthy.events) == 1

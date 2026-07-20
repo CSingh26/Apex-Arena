@@ -208,6 +208,56 @@ Only a version tag that clears every job can publish. The release workflow produ
 
 Published images receive semantic-version, major/minor, major, `latest`, and commit-SHA tags.
 
+## Deployment
+
+Apex Arena runs in production at **https://chaitanyasingh.org/apex-arena**.
+
+The public domain belongs to the portfolio project, which rewrites `/apex-arena/*` to the
+Apex Arena frontend on Vercel. The frontend proxies API calls server-side to the FastAPI
+backend on Railway, which reads from Neon PostgreSQL and Upstash Redis. No infrastructure
+hostname is ever exposed to the browser.
+
+The backend supports two operating modes, selected by `APP_PROCESS_ROLE`:
+
+- **Recommended production** — two services: an `api` process that serves HTTP and SSE, and
+  an `ingestor` process that owns the OpenF1 subscription behind a singleton advisory lease.
+- **Low-cost** — a single combined `all` process that both serves and ingests. It is
+  restricted to `APP_ENV=staging`; the application refuses to start with
+  `APP_PROCESS_ROLE=all` in production. When live ingestion is enabled, combined mode uses the
+  direct database endpoint and acquires the same singleton advisory lease as the ingestor.
+
+### Deployment documentation
+
+- [Low-cost deployment audit](docs/low-cost-deployment-audit.md)
+- [Low-cost production architecture](docs/low-cost-production-architecture.md)
+- [Railway deployment runbook (backend)](docs/railway-deployment-runbook.md)
+- [Neon PostgreSQL setup](docs/neon-setup.md)
+- [Upstash Redis setup](docs/upstash-setup.md)
+- [Apex Arena frontend on Vercel](docs/apex-arena-vercel-deployment.md)
+- [Portfolio ↔ Apex Arena integration](docs/portfolio-vercel-integration.md)
+- [Deployment secrets and environment variables](docs/deployment-secrets.md)
+- [Deployment cost controls](docs/deployment-cost-controls.md)
+- [Deployment rollback runbook](docs/deployment-rollback-runbook.md)
+
+### Local development URL
+
+The mount point is controlled by a single variable, `NEXT_PUBLIC_APP_BASE_PATH`, from which
+`next.config.ts` derives the Next.js `basePath`. This changes where the development server
+serves the application:
+
+| `NEXT_PUBLIC_APP_BASE_PATH` | Local URL | Notes |
+| --- | --- | --- |
+| unset (or empty) | `http://localhost:3000` | The app is served at the origin root. Convenient for day-to-day local work |
+| `/apex-arena` | `http://localhost:3000/apex-arena` | Mirrors production. `http://localhost:3000` itself returns 404 — this is correct, not a broken build |
+
+Production **always** uses the prefixed form, because Apex Arena is mounted beneath the
+portfolio domain rather than served from its own root. If you are testing anything that
+depends on URL construction — canonical tags, Open Graph metadata, share links, the API
+prefix, or the static asset path — run locally with `NEXT_PUBLIC_APP_BASE_PATH=/apex-arena`
+so the local URLs match production. Note that the browser-facing API prefix follows the
+base path: it defaults to `<base path>/api`, and can be overridden with
+`NEXT_PUBLIC_API_BASE_PATH`.
+
 ## Project documentation
 
 - [Day 3: Race Rooms and evidence architecture](docs/day-3-race-rooms.md)

@@ -13,6 +13,7 @@ import { MessageTimeline } from "@/components/race-rooms/message-timeline";
 import { PlaybackControls } from "@/components/race-rooms/playback-controls";
 import { RoomContext } from "@/components/race-rooms/room-context";
 import { getRaceRoom, getRoomMessages, roomStreamUrl, startRoomReplay, updateRoomPlayback } from "@/lib/api";
+import { appRoutes } from "@/lib/app-paths";
 import { mergeRoomMessages } from "@/lib/room-state";
 import type { PlaybackAction, RaceRoomDetailResponse, ReplayAction, RoomMessage, RoomPlayback, RoomStatus } from "@/lib/types";
 
@@ -145,7 +146,7 @@ export function RoomExperience({ slug }: { slug: string }) {
   const closeEvidence = useCallback(() => setSelectedMessage(null), []);
 
   if (loading) return <main className="room-page track-grid"><ApexRaceLoader label="Joining the race room" /></main>;
-  if (error || !detail || !playback) return <main className="room-page track-grid"><div className="room-state room-state--error room-state--centered" role="alert"><span aria-hidden>!</span><b>Room unavailable</b><p>{error ?? "The room response was incomplete."}</p><div><button className="control-button" type="button" onClick={() => { setLoading(true); setError(null); setReloadKey((value) => value + 1); }}>Try again</button><Link className="control-button" href="/race-rooms">All Race Rooms</Link></div></div></main>;
+  if (error || !detail || !playback) return <main className="room-page track-grid"><div className="room-state room-state--error room-state--centered" role="alert"><span aria-hidden>!</span><b>Room unavailable</b><p>{error ?? "The room response was incomplete."}</p><div><button className="control-button" type="button" onClick={() => { setLoading(true); setError(null); setReloadKey((value) => value + 1); }}>Try again</button><Link className="control-button" href={appRoutes.rooms}>All Race Rooms</Link></div></div></main>;
 
   const { room, agents } = detail;
   const evidenceAgent = selectedMessage ? agents.find((agent) => agent.id === selectedMessage.agent_id) : undefined;
@@ -154,7 +155,7 @@ export function RoomExperience({ slug }: { slug: string }) {
   const progressValue = qualifying ? (room.current_phase ?? "Session") : (playback.current_lap ?? room.current_lap ?? "—");
   return <main className="room-page track-grid">
     <AppNavigation contextLabel={`${room.race_name} · ${room.session_type}`} connection={connection} />
-    <Link className="room-breadcrumb" href="/race-rooms"><span aria-hidden>←</span> All Race Rooms</Link>
+    <Link className="room-breadcrumb" href={appRoutes.rooms}><span aria-hidden>←</span> All Race Rooms</Link>
     <header className="room-header"><div><div className="room-header__meta"><span>Round {room.round_number ?? "—"}</span><span>{room.session_type.replaceAll("_", " ")}</span><span className={`status status--${room.status}`}>{room.status}</span></div><h1>{room.race_name}</h1><p>{room.circuit_name} · {room.country}</p></div><CircuitOutline circuitName={room.circuit_name} eventName={room.race_name} /><div className="session-progress"><span>{progressLabel}</span><b>{progressValue}</b>{!qualifying && room.total_laps != null && <small>/ {room.total_laps}</small>}</div></header>
     <div className="sticky-playback"><PlaybackControls room={room} playback={playback} busy={controlBusy} error={controlError} onReplay={runReplay} onControl={runControl} /></div>
     <AgentRoster agents={agents} selectedAgent={selectedAgent} onSelectAgent={setSelectedAgent} />

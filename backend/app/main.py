@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.proxy import ProxyContextMiddleware
 from app.api.room_routes import router as room_router
 from app.api.routes import router
 from app.core.logging import configure_logging
@@ -20,13 +21,20 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
         configure_logging(settings)
-        application.state.services = AppServices(settings)
-        if settings.openf1_live_auto_connect:
-            await application.state.services.start_live_services()
+        services = AppServices(settings)
+        application.state.services = services
+        if settings.app_process_role == "all" and settings.openf1_live_auto_connect:
+            # Combined mode ingests as well as serves, so it must take the same
+            # singleton lease the dedicated ingestor uses. Without it, two
+            # overlapping deploys would both subscribe to OpenF1 MQTT and
+            # double-write the event pipeline.
+            if not await services.database.acquire_ingestor_lease():
+                raise RuntimeError("Another Apex Arena ingestor owns the singleton lease")
+            await services.start_live_services()
         try:
             yield
         finally:
-            await application.state.services.close()
+            await services.close()
 
     application = FastAPI(
         title="Apex Arena API",
@@ -34,6 +42,9 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
         description="Unified live and replay Formula racing intelligence for the 2026 season.",
         lifespan=lifespan,
     )
+    # Registered before CORS so the outermost layer rejects direct-origin traffic
+    # before any other handler observes the request.
+    application.add_middleware(ProxyContextMiddleware, settings=settings)
     application.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins,

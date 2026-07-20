@@ -351,6 +351,7 @@ class OpenF1LiveClient:
         self._client: mqtt.Client | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._shutting_down = False
+        self._connect_timeout_task: asyncio.Task[None] | None = None
 
     async def connect(self) -> None:
         if not self.settings.live_mode_enabled:
@@ -381,6 +382,7 @@ class OpenF1LiveClient:
             max_delay=max(1, math.ceil(self.settings.openf1_reconnect_max_delay_ms / 1000)),
         )
         client.on_connect = self._on_connect
+        client.on_connect_fail = self._on_connect_fail
         client.on_disconnect = self._on_disconnect
         client.on_message = self._on_message
         await self._set_state(LiveConnectionState.CONNECTING)
@@ -399,9 +401,15 @@ class OpenF1LiveClient:
             )
             return
         client.loop_start()
+        self._connect_timeout_task = asyncio.create_task(
+            self._connection_timeout(), name="openf1-mqtt-connect-timeout"
+        )
 
     async def disconnect(self) -> None:
         self._shutting_down = True
+        if self._connect_timeout_task is not None:
+            self._connect_timeout_task.cancel()
+            self._connect_timeout_task = None
         if self._client is not None:
             self._client.disconnect()
             self._client.loop_stop()
@@ -436,10 +444,19 @@ class OpenF1LiveClient:
         if code != 0:
             self._submit_state(LiveConnectionState.ERROR, f"MQTT rejected connection ({code})")
             return
+        if self._connect_timeout_task is not None:
+            self._connect_timeout_task.cancel()
+            self._connect_timeout_task = None
         self.reconnect_attempts = 0
         for topic in self.settings.openf1_topics:
             client.subscribe(topic)
         self._submit_state(LiveConnectionState.CONNECTED)
+
+    def _on_connect_fail(self, client: mqtt.Client, userdata: object) -> None:
+        self._submit_state(
+            LiveConnectionState.DEGRADED,
+            "MQTT broker connection failed",
+        )
 
     def _on_disconnect(
         self,
@@ -474,6 +491,21 @@ class OpenF1LiveClient:
             self._submit_state(LiveConnectionState.DEGRADED, "Unexpected MQTT payload shape")
             return
         asyncio.run_coroutine_threadsafe(self._handle_message(topic, payload), self._loop)
+
+    async def _connection_timeout(self) -> None:
+        try:
+            await asyncio.sleep(self.settings.openf1_mqtt_connect_timeout_seconds)
+        except asyncio.CancelledError:
+            return
+        if self.connection_state is not LiveConnectionState.CONNECTING:
+            return
+        if self._client is not None:
+            self._client.disconnect()
+            self._client.loop_stop()
+        await self._set_state(
+            LiveConnectionState.DEGRADED,
+            "MQTT broker connection timed out",
+        )
 
     async def _handle_message(self, topic: str, payload: dict[str, Any]) -> None:
         session_key = str(payload.get("session_key") or "unknown")

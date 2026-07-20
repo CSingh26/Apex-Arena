@@ -44,7 +44,9 @@ async def race_room_stream(
                 str(room_id),
                 redis_id,
                 count=100,
-                block_ms=services.settings.sse_heartbeat_seconds * 1000,
+                # Cap the blocking read like the session stream does: it bounds how
+                # long a managed Redis connection is held open per client.
+                block_ms=min(10_000, services.settings.sse_heartbeat_seconds * 1000),
             )
         except asyncio.CancelledError:
             raise

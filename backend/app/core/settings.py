@@ -3,10 +3,12 @@ from __future__ import annotations
 
 from functools import lru_cache
 from typing import Literal
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, parse_qsl, unquote, urlencode, urlparse, urlunparse
 
-from pydantic import Field, SecretStr, field_validator, model_validator
+from pydantic import Field, SecretStr, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+LOCAL_POSTGRES_HOSTS = frozenset({"postgres", "localhost", "127.0.0.1", "::1"})
 
 
 class Settings(BaseSettings):
@@ -21,6 +23,7 @@ class Settings(BaseSettings):
 
     app_name: str = "Apex Arena"
     app_env: Literal["local", "test", "staging", "production"] = "local"
+    app_process_role: Literal["api", "ingestor", "all"] = "api"
     node_env: str = "development"
 
     season_year: int = 2026
@@ -32,16 +35,29 @@ class Settings(BaseSettings):
     backend_url: str = "http://localhost:8000"
     next_public_app_name: str = "Apex Arena"
     next_public_app_url: str = "http://localhost:3000"
-    next_public_api_url: str = "http://localhost:8000"
+    next_public_app_base_path: str = ""
 
     database_url: SecretStr
+    # Managed providers issue authoritative DSNs. POSTGRES_* belongs to local
+    # Compose and is cross-checked only when a URL points to a local host.
+    database_migration_url: SecretStr | None = None
     postgres_db: str = "apex_arena"
     postgres_user: str = "apex"
-    postgres_password: SecretStr
+    postgres_password: SecretStr | None = None
     postgres_host: str = "localhost"
     postgres_port: int = 5432
+    # Conservative pool sizing keeps a small managed database within its
+    # connection ceiling when several Railway replicas connect at once.
+    db_pool_size: int = Field(default=3, ge=1, le=20)
+    db_max_overflow: int = Field(default=2, ge=0, le=20)
+    db_pool_timeout_seconds: int = Field(default=15, ge=1, le=120)
+    db_pool_recycle_seconds: int = Field(default=300, ge=30, le=3600)
+
     redis_url: SecretStr
     redis_port: int = 6379
+    redis_socket_timeout_seconds: int = Field(default=5, ge=1, le=60)
+    redis_connect_timeout_seconds: int = Field(default=5, ge=1, le=60)
+    redis_health_check_interval_seconds: int = Field(default=30, ge=0, le=300)
 
     openf1_rest_base_url: str = "https://api.openf1.org/v1"
     openf1_username: str | None = None
@@ -55,6 +71,14 @@ class Settings(BaseSettings):
     openf1_reconnect_base_delay_ms: int = 1000
     openf1_reconnect_max_delay_ms: int = 30000
     openf1_live_auto_connect: bool = False
+    openf1_ingestion_mode: Literal["mqtt", "rest", "auto"] = "auto"
+    openf1_rest_backfill_enabled: bool = False
+    openf1_rest_backfill_season: int = Field(default=2026, ge=1950, le=2100)
+    openf1_rest_backfill_max_sessions: int = Field(default=1, ge=1, le=10)
+    openf1_rest_max_concurrent_requests: int = Field(default=2, ge=1, le=8)
+    openf1_rest_cursor_overlap_seconds: int = Field(default=2, ge=0, le=60)
+    openf1_rest_include_high_frequency: bool = False
+    openf1_mqtt_connect_timeout_seconds: int = Field(default=10, ge=1, le=120)
     openf1_live_catalog_sync_seconds: int = Field(default=60, ge=15, le=900)
     openf1_live_topics: str = (
         "v1/sessions,v1/drivers,v1/position,v1/intervals,v1/laps,v1/pit,"
@@ -118,14 +142,31 @@ class Settings(BaseSettings):
     admin_dashboard_password: SecretStr | None = None
     cors_allowed_origins: str = "http://localhost:3000"
 
+    # Public mount point. Requests arrive through the portfolio proxy, so the
+    # backend must be able to rebuild public URLs without trusting raw Host.
+    app_base_path: str = ""
+    apex_arena_proxy_token: SecretStr | None = None
+    public_proxy_host: str = ""
+    trusted_proxy_hosts: str = ""
+    proxy_enforcement_enabled: bool = True
+
+    # RESERVED: these record the intended retention policy but nothing prunes yet.
+    # No pruning job exists in the application, so setting them has no runtime
+    # effect today. They are declared so deployment configuration and the cost
+    # documentation can be written against stable names. Defaults are inert.
+    raw_event_retention_days: int = Field(default=0, ge=0, le=3650)
+    normalized_event_retention_days: int = Field(default=0, ge=0, le=3650)
+    provider_payload_retention_days: int = Field(default=0, ge=0, le=3650)
+    replay_archive_enabled: bool = False
+
     log_level: str = "info"
     log_format: Literal["pretty", "json"] = "pretty"
     sentry_dsn: SecretStr | None = None
     next_public_sentry_dsn: str | None = None
 
-    production_frontend_url: str = "https://apex.chaitanyasingh.org"
-    production_backend_url: str = "https://api.apex.chaitanyasingh.org"
-    public_base_url: str = "https://apex.chaitanyasingh.org"
+    production_frontend_url: str = "https://chaitanyasingh.org/apex-arena"
+    production_backend_url: str = "https://chaitanyasingh.org/apex-arena/api"
+    public_base_url: str = "https://chaitanyasingh.org/apex-arena"
 
     @field_validator(
         "openf1_username",
@@ -154,15 +195,20 @@ class Settings(BaseSettings):
             return None
         return value
 
-    @field_validator("database_url", mode="before")
+    @field_validator("database_url", "database_migration_url", mode="before")
     @classmethod
-    def validate_database_url(cls, value: object) -> str:
+    def validate_database_url(cls, value: object, info: ValidationInfo) -> str | None:
         if isinstance(value, SecretStr):
             value = value.get_secret_value()
+        variable_name = info.field_name.upper()
+        if info.field_name == "database_migration_url" and (
+            value is None or (isinstance(value, str) and not value.strip())
+        ):
+            return None
         if not isinstance(value, str):
-            raise ValueError("DATABASE_URL must be a string")
+            raise ValueError(f"{variable_name} must be a string")
         if not value.startswith(("postgresql://", "postgresql+asyncpg://")):
-            raise ValueError("DATABASE_URL must use PostgreSQL")
+            raise ValueError(f"{variable_name} must use PostgreSQL")
         return value.rstrip("/")
 
     @field_validator("redis_url", mode="before")
@@ -180,7 +226,6 @@ class Settings(BaseSettings):
         "frontend_url",
         "backend_url",
         "next_public_app_url",
-        "next_public_api_url",
         "openf1_rest_base_url",
         "openf1_auth_url",
         "jolpica_base_url",
@@ -200,21 +245,143 @@ class Settings(BaseSettings):
         if self.season_only_mode and self.season_year != 2026:
             raise ValueError("SEASON_ONLY_MODE requires SEASON_YEAR=2026 for Apex Arena v0.1")
 
-        parsed_password = urlparse(self.database_url.get_secret_value()).password
-        configured_password = self.postgres_password.get_secret_value()
-        if parsed_password and unquote(parsed_password) != configured_password:
-            raise ValueError("DATABASE_URL password must match POSTGRES_PASSWORD")
+        # POSTGRES_* belongs to the repository's local Compose database. A developer
+        # may also keep managed DSNs in the same untracked .env, so never compare
+        # credentials for an external host merely because POSTGRES_PASSWORD exists.
+        if self.postgres_password is not None:
+            configured_password = self.postgres_password.get_secret_value()
+            database_urls = [("DATABASE_URL", self.database_url)]
+            if self.database_migration_url is not None:
+                database_urls.append(("DATABASE_MIGRATION_URL", self.database_migration_url))
+            for variable_name, secret_url in database_urls:
+                parsed = urlparse(secret_url.get_secret_value())
+                host = (parsed.hostname or "").lower().rstrip(".")
+                if host not in LOCAL_POSTGRES_HOSTS:
+                    continue
+                if parsed.password and unquote(parsed.password) != configured_password:
+                    raise ValueError(
+                        f"{variable_name} password must match POSTGRES_PASSWORD "
+                        "for local PostgreSQL"
+                    )
 
         if self.openf1_reconnect_base_delay_ms > self.openf1_reconnect_max_delay_ms:
             raise ValueError("OpenF1 reconnect base delay cannot exceed maximum delay")
+        if self.openf1_rest_backfill_enabled and self.app_process_role == "api":
+            raise ValueError("API processes cannot enable OpenF1 historical backfill")
+        if self.app_env == "production" and self.app_process_role == "all":
+            raise ValueError("APP_PROCESS_ROLE=all is not allowed in production")
+        # The singleton lease is a session-scoped advisory lock. Through a
+        # transaction pooler it cannot be relied upon, so an ingesting role in a
+        # deployed environment must be given the direct endpoint explicitly.
+        if (
+            self.app_env in {"staging", "production"}
+            and self.app_process_role in {"ingestor", "all"}
+            and self.database_migration_url is None
+        ):
+            raise ValueError(
+                "Ingesting roles require DATABASE_MIGRATION_URL (the direct, "
+                "non-pooled endpoint) so the singleton lease is reliable"
+            )
+        if (
+            self.app_env == "production"
+            and self.app_process_role == "api"
+            and self.openf1_live_auto_connect
+        ):
+            raise ValueError(
+                "API processes cannot auto-connect OpenF1 live ingestion in production"
+            )
+        if self.app_env == "production":
+            database_query = parse_qs(urlparse(self.database_url.get_secret_value()).query)
+            database_tls = (database_query.get("ssl") or database_query.get("sslmode") or [""])[0]
+            if database_tls not in {"require", "verify-ca", "verify-full", "true"}:
+                raise ValueError("Production DATABASE_URL must require TLS")
+            if not self.redis_url.get_secret_value().startswith("rediss://"):
+                raise ValueError("Production REDIS_URL must use rediss://")
+            if self.debug_ingestion_enabled:
+                raise ValueError("DEBUG_INGESTION_ENABLED must be false in production")
+            if self.development_fixture_enabled:
+                raise ValueError("DEVELOPMENT_FIXTURE_ENABLED must be false in production")
+            if self.room_diagnostics_enabled:
+                raise ValueError("ROOM_DIAGNOSTICS_ENABLED must be false in production")
         return self
+
+    @staticmethod
+    def _asyncpg_dsn(database_url: str) -> str:
+        """Normalize a managed PostgreSQL DSN for the asyncpg driver.
+
+        Neon's copy button emits libpq parameters (``sslmode``,
+        ``channel_binding``) that asyncpg rejects at connect time. Translate
+        ``sslmode`` to asyncpg's ``ssl`` and drop parameters it cannot consume,
+        so an operator can paste the provider string verbatim.
+        """
+        if not database_url.startswith("postgresql+asyncpg://"):
+            database_url = database_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+        parsed = urlparse(database_url)
+        if not parsed.query:
+            return database_url
+        preserved: list[tuple[str, str]] = []
+        ssl_mode: str | None = None
+        for key, value in parse_qsl(parsed.query, keep_blank_values=True):
+            lowered = key.lower()
+            if lowered in {"sslmode", "ssl"}:
+                ssl_mode = ssl_mode or value
+                continue
+            if lowered == "channel_binding":
+                continue
+            preserved.append((key, value))
+        if ssl_mode:
+            # asyncpg understands ssl=require/verify-ca/verify-full; libpq's
+            # "true" is normalized to the equivalent require.
+            preserved.append(("ssl", "require" if ssl_mode == "true" else ssl_mode))
+        return urlunparse(parsed._replace(query=urlencode(preserved)))
 
     @property
     def async_database_url(self) -> str:
-        database_url = self.database_url.get_secret_value()
-        if database_url.startswith("postgresql+asyncpg://"):
-            return database_url
-        return database_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+        return self._asyncpg_dsn(self.database_url.get_secret_value())
+
+    @property
+    def effective_redis_socket_timeout(self) -> int:
+        """Socket timeout that cannot abort a blocking stream read.
+
+        SSE consumers call ``XREAD`` with ``BLOCK`` for up to ten seconds. A
+        socket timeout below that window would abort every idle heartbeat and
+        report a healthy stream as degraded, so keep a margin above it.
+        """
+        blocking_window_seconds = min(10, self.sse_heartbeat_seconds)
+        return max(self.redis_socket_timeout_seconds, blocking_window_seconds + 5)
+
+    @property
+    def async_migration_database_url(self) -> str:
+        """Migrations and the ingestor lease need a direct (non-pooled) endpoint.
+
+        Managed poolers in transaction mode break session-scoped advisory locks
+        and prepared statements, so fall back to the runtime DSN only when no
+        dedicated migration URL is configured.
+        """
+        if self.database_migration_url is None:
+            return self.async_database_url
+        return self._asyncpg_dsn(self.database_migration_url.get_secret_value())
+
+    @property
+    def async_process_database_url(self) -> str:
+        """Choose the DSN that preserves the process role's connection semantics."""
+        needs_session_lease = self.app_process_role == "ingestor" or (
+            self.app_process_role == "all" and self.openf1_live_auto_connect
+        )
+        if needs_session_lease:
+            return self.async_migration_database_url
+        return self.async_database_url
+
+    @property
+    def normalized_base_path(self) -> str:
+        value = (self.app_base_path or self.next_public_app_base_path or "").strip()
+        if not value or value == "/":
+            return ""
+        return "/" + value.strip("/")
+
+    @property
+    def trusted_proxy_host_list(self) -> list[str]:
+        return [host.strip() for host in self.trusted_proxy_hosts.split(",") if host.strip()]
 
     @property
     def redis_dsn(self) -> str:
@@ -242,6 +409,7 @@ class Settings(BaseSettings):
         redis = urlparse(self.redis_url.get_secret_value())
         return {
             "environment": self.app_env,
+            "process_role": self.app_process_role,
             "season": self.season_year,
             "database_host": database.hostname,
             "database_port": database.port,

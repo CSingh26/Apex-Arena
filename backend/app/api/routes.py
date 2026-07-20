@@ -9,7 +9,7 @@ from typing import Annotated
 
 import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from app.api.schemas import (
     AppHealth,
@@ -30,6 +30,7 @@ from app.domain.models import MeetingLifecycleStatus
 from app.providers.jolpica import JolpicaPayloadError
 from app.services.container import AppServices
 from app.services.historical import HistoricalIngestionError
+from app.services.openf1_backfill import backfill_job_status
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -45,6 +46,69 @@ Services = Annotated[AppServices, Depends(get_services)]
 @router.get("/", include_in_schema=False)
 async def root() -> dict[str, str]:
     return {"name": "Apex Arena API", "docs": "/docs", "health": "/health"}
+
+
+@router.get("/health/live")
+async def health_live(services: Services) -> dict[str, object]:
+    """Cheap process liveness probe; it deliberately avoids network dependencies."""
+    return {
+        "status": "alive",
+        "role": services.settings.app_process_role,
+        "checked_at": datetime.now(UTC).isoformat(),
+    }
+
+
+@router.get("/health/ready", response_model=None)
+async def health_ready(services: Services) -> JSONResponse:
+    """Dependency-aware readiness probe suitable for traffic admission."""
+    database_result, redis_result = await asyncio.gather(
+        services.database.health_check(),
+        services.redis.health_check(),
+    )
+    database_ok, _ = database_result
+    redis_ok, _ = redis_result
+    ready = database_ok and redis_ok
+    return JSONResponse(
+        status_code=status.HTTP_200_OK if ready else status.HTTP_503_SERVICE_UNAVAILABLE,
+        content={
+            "status": "ready" if ready else "not_ready",
+            "role": services.settings.app_process_role,
+            "dependencies": {
+                "database": "ready" if database_ok else "unavailable",
+                "redis": "ready" if redis_ok else "unavailable",
+            },
+            "checked_at": datetime.now(UTC).isoformat(),
+        },
+    )
+
+
+@router.get("/health/provider", response_model=None)
+async def health_provider(services: Services) -> JSONResponse:
+    """Report the latest OpenF1 ingestion state without exposing credentials or tokens."""
+    provider: dict[str, object] | None
+    source = "local_process"
+    if services.settings.app_process_role == "api":
+        source = "redis_status_stream"
+        try:
+            provider = await services.event_bus.latest_connection_status()
+        except Exception:
+            provider = None
+    else:
+        provider = services.openf1_live.status()
+
+    state = str((provider or {}).get("connection_state") or "unknown").upper()
+    healthy = not services.settings.live_mode_enabled or state in {"CONNECTED", "DISABLED"}
+    return JSONResponse(
+        status_code=status.HTTP_200_OK if healthy else status.HTTP_503_SERVICE_UNAVAILABLE,
+        content={
+            "status": "ready" if healthy else "degraded",
+            "source": source,
+            "connection_state": state,
+            "current_session_key": (provider or {}).get("current_session_key"),
+            "last_event_at": str((provider or {}).get("last_event_at") or "") or None,
+            "checked_at": datetime.now(UTC).isoformat(),
+        },
+    )
 
 
 @router.get("/health", response_model=HealthResponse)
@@ -101,6 +165,30 @@ async def openf1_status(services: Services) -> OpenF1StatusResponse:
         **rest_status,
         live_auth_ready=services.settings.openf1_credentials_present,
     )
+
+
+@router.get("/api/v1/internal/openf1/backfill-status", response_model=None)
+async def openf1_backfill_status(
+    services: Services,
+    internal_api_key: Annotated[str | None, Header(alias="X-Internal-API-Key")] = None,
+) -> dict[str, object]:
+    configured = services.settings.internal_api_key
+    if (
+        configured is None
+        or internal_api_key is None
+        or not hmac.compare_digest(internal_api_key, configured.get_secret_value())
+    ):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid internal key")
+    latest = await services.backfill_jobs.latest()
+    live = services.openf1_live.status()
+    return {
+        "ingestion_mode": services.settings.openf1_ingestion_mode,
+        "mqtt_state": live["connection_state"],
+        "rest_backfill_enabled": services.settings.openf1_rest_backfill_enabled,
+        "current_job": backfill_job_status(latest),
+        "advisory_lease_owner": services.database.ingestor_lease_owned,
+        "last_provider_event_timestamp": live["last_event_at"],
+    }
 
 
 @router.get("/api/v1/live/status", response_model=LiveStatusResponse)
@@ -194,9 +282,13 @@ async def stream_session(
     request: Request,
     services: Services,
     last_sequence_number: int = Query(default=0, ge=0),
+    last_event_id: Annotated[str | None, Header(alias="Last-Event-ID")] = None,
 ) -> StreamingResponse:
+    recovered_sequence = last_sequence_number
+    if last_event_id is not None and last_event_id.isdigit():
+        recovered_sequence = max(recovered_sequence, int(last_event_id))
     return StreamingResponse(
-        session_event_stream(request, services, session_key, last_sequence_number),
+        session_event_stream(request, services, session_key, recovered_sequence),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache, no-transform",

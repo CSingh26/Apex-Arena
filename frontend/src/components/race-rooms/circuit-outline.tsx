@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import Image from "next/image";
 
+import { publicAssetPath } from "@/lib/app-paths";
+
 type CircuitOutlineProps = {
   circuitName: string;
   eventName?: string;
@@ -47,8 +49,8 @@ export function CircuitOutline({ circuitName, eventName, compact = false }: Circ
 
   return <div className={className}>
     {assetId ? <div className="circuit-outline__art" role="img" aria-label={label}>
-      <Image className="circuit-outline__asset circuit-outline__asset--dark" src={`/circuits/2026/white-outline/${assetId}.svg`} alt="" fill sizes={compact ? "96px" : "210px"} unoptimized />
-      <Image className="circuit-outline__asset circuit-outline__asset--light" src={`/circuits/2026/black-outline/${assetId}.svg`} alt="" fill sizes={compact ? "96px" : "210px"} unoptimized />
+      <Image className="circuit-outline__asset circuit-outline__asset--dark" src={publicAssetPath(`/circuits/2026/white-outline/${assetId}.svg`)} alt="" fill sizes={compact ? "96px" : "210px"} unoptimized />
+      <Image className="circuit-outline__asset circuit-outline__asset--light" src={publicAssetPath(`/circuits/2026/black-outline/${assetId}.svg`)} alt="" fill sizes={compact ? "96px" : "210px"} unoptimized />
     </div> : <div className="circuit-outline__unavailable" role="img" aria-label={`${label} unavailable`}>Layout unavailable</div>}
     {!compact && <span title="Circuit artwork by Jules Roy, CC BY 4.0"><i /> 2026 circuit trace</span>}
   </div>;

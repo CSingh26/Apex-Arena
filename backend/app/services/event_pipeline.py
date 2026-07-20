@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import heapq
 import itertools
+import logging
 import time
 from collections import defaultdict
 from datetime import datetime, timedelta
@@ -15,6 +16,8 @@ from pydantic import BaseModel
 from app.domain.models import NormalizedRaceEvent
 from app.services.normalization import OpenF1EventNormalizer
 from app.services.raw_events import RawEventInput, RawProviderEventService
+
+logger = logging.getLogger(__name__)
 
 
 class NormalizedPersistResult(BaseModel):
@@ -199,5 +202,16 @@ class RaceEventProcessor:
         if event.raw_event_id:
             await self.raw_events.mark_status(event.raw_event_id, "normalized")
         for consumer in self.consumers:
-            await consumer.consume(sequenced)
+            try:
+                await consumer.consume(sequenced)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                # Persistence is authoritative. Redis or discussion outages must
+                # not turn an already committed provider event into a failed row.
+                logger.error(
+                    "Normalized event consumer failed consumer=%s error=%s",
+                    type(consumer).__name__,
+                    type(exc).__name__,
+                )
         return PipelineResult(normalized_inserted=1)

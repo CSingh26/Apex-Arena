@@ -39,6 +39,9 @@ backfill it through the historical REST pipeline if OpenF1 publishes a matching 
 provider does not publish that session or the subscription cannot access it, the UI remains
 `Provider data not published yet`; the system will not fabricate laps, classifications, or debate.
 
+For the resumable, production-safe recovery procedure, endpoint checkpoints, advisory locking,
+and room finalization rules, see [`openf1-rest-backfill.md`](./openf1-rest-backfill.md).
+
 ## Live limitations
 
 - Live availability and latency depend on the OpenF1 subscription and provider publication.

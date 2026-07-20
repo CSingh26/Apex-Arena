@@ -2,6 +2,7 @@
 import Link from "next/link";
 
 import { AppNavigation } from "@/components/navigation/app-navigation";
+import { appRoutes } from "@/lib/app-paths";
 
 const agents = [
   { initials: "MV", name: "Mira Vale", role: "Strategy", accent: "copper" },
@@ -45,7 +46,7 @@ export function LandingPage() {
         <h1 id="landing-title">Every race has a story. <em>Five minds find it.</em></h1>
         <p className="landing-lede">Apex Arena turns live and historical race data into an evidence-linked conversation between specialist AI agents—so every strategy call, pace shift and on-track battle has context.</p>
         <div className="landing-actions">
-          <Link className="landing-button landing-button--primary" href="/race-rooms">Enter Race Rooms <span aria-hidden>↗</span></Link>
+          <Link className="landing-button landing-button--primary" href={appRoutes.rooms}>Enter Race Rooms <span aria-hidden>↗</span></Link>
           <a className="landing-button landing-button--secondary" href="#experience">See how it works <span aria-hidden>↓</span></a>
         </div>
         <div className="landing-proof" aria-label="Product highlights">
@@ -79,14 +80,14 @@ export function LandingPage() {
     </section>
 
     <section id="agents" className="landing-section landing-agents" aria-labelledby="agents-title">
-      <div className="landing-agents__copy"><p className="landing-kicker"><span /> Inside every Race Room</p><h2 id="agents-title">One race.<br /><em>Five perspectives.</em></h2><p>Each agent has a defined analytical lens, speaking style and evidence standard. They do not simply comment—they respond to one another.</p><Link className="text-link" href="/race-rooms">Meet them in a Race Room <span aria-hidden>→</span></Link></div>
+      <div className="landing-agents__copy"><p className="landing-kicker"><span /> Inside every Race Room</p><h2 id="agents-title">One race.<br /><em>Five perspectives.</em></h2><p>Each agent has a defined analytical lens, speaking style and evidence standard. They do not simply comment—they respond to one another.</p><Link className="text-link" href={appRoutes.rooms}>Meet them in a Race Room <span aria-hidden>→</span></Link></div>
       <div className="agent-spectrum">{agents.map((agent, index) => <article data-accent={agent.accent} key={agent.name}><span className="agent-spectrum__index">0{index + 1}</span><span className="agent-avatar" aria-hidden>{agent.initials}</span><div><h3>{agent.name}</h3><p>{agent.role}</p></div><span className="agent-spectrum__arrow" aria-hidden>↗</span></article>)}</div>
     </section>
 
     <section className="landing-cta" aria-labelledby="cta-title">
-      <div><p className="landing-kicker"><span /> The room is ready</p><h2 id="cta-title">Watch the race think out loud.</h2></div><Link className="landing-button landing-button--light" href="/race-rooms">Explore the 2026 rooms <span aria-hidden>→</span></Link>
+      <div><p className="landing-kicker"><span /> The room is ready</p><h2 id="cta-title">Watch the race think out loud.</h2></div><Link className="landing-button landing-button--light" href={appRoutes.rooms}>Explore the 2026 rooms <span aria-hidden>→</span></Link>
     </section>
 
-    <footer className="landing-footer"><Link className="landing-brand" href="/"><i className="brand-mark" /><span>APEX ARENA</span></Link><p>Independent Formula racing intelligence. Built around evidence, not noise.</p><span>Unofficial fan project · 2026</span></footer>
+    <footer className="landing-footer"><Link className="landing-brand" href={appRoutes.home}><i className="brand-mark" /><span>APEX ARENA</span></Link><p>Independent Formula racing intelligence. Built around evidence, not noise.</p><span>Unofficial fan project · 2026</span></footer>
   </main>;
 }

@@ -1,0 +1,31 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# Default Railway configuration for the Apex Arena backend.
+#
+# This file covers a single-service deployment. For the recommended two-service
+# production topology, point each Railway service at the matching manifest:
+#
+#   deploy/railway/api.toml       APP_PROCESS_ROLE=api       (public HTTP + SSE)
+#   deploy/railway/ingestor.toml  APP_PROCESS_ROLE=ingestor  (OpenF1 MQTT, singleton)
+#   deploy/railway/combined.toml  APP_PROCESS_ROLE=all       (staging only)
+#
+# The frontend is NOT deployed here: it runs as a separate Vercel project and is
+# proxied through the portfolio domain. See docs/apex-arena-vercel-deployment.md.
+#
+# Set the service root directory to "backend" in the Railway UI.
+
+[build]
+builder = "dockerfile"
+dockerfilePath = "backend/Dockerfile"
+
+[deploy]
+# The role is chosen by APP_PROCESS_ROLE; one entrypoint serves every role.
+startCommand = "python -m app.runtime"
+# Exempt from proxy-token enforcement so the platform probe can reach it.
+healthcheckPath = "/health/live"
+healthcheckTimeout = 30
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10
+# Never raise this for a service that ingests: the OpenF1 subscription is a
+# singleton guarded by a PostgreSQL advisory lease.
+numReplicas = 1

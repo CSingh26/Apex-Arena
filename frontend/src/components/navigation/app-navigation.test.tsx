@@ -7,7 +7,7 @@ import { AppNavigation } from "@/components/navigation/app-navigation";
 
 describe("AppNavigation", () => {
   it("keeps the brand, active Race Rooms route, and an accessible mobile menu", async () => {
-    window.history.replaceState(null, "", "/race-rooms");
+    window.history.replaceState(null, "", "/rooms");
     const user = userEvent.setup();
     render(<AppNavigation contextLabel="Belgian Grand Prix · Race" />);
 

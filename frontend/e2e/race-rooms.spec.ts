@@ -111,7 +111,7 @@ test("introduces Apex Arena on a responsive, theme-aware landing page", async ({
   await expect(page.getByRole("link", { name: /Enter Race Rooms/ })).toBeVisible();
   await expectNoHorizontalOverflow(page);
   await page.getByRole("link", { name: /Enter Race Rooms/ }).click();
-  await expect(page).toHaveURL(/\/race-rooms$/);
+  await expect(page).toHaveURL(/\/rooms$/);
   await expect(page.getByRole("heading", { name: "Race Rooms" })).toBeVisible();
   expect(browserErrors).toEqual([]);
 });
@@ -138,7 +138,7 @@ test("groups real standard and Sprint weekends in chronological public categorie
     expectAscending(event.sessions.map((session) => Date.parse(session.scheduled_start)));
   }
 
-  await page.goto("/race-rooms");
+  await page.goto("/rooms");
   await expect(page.getByRole("heading", { name: "Live This Weekend" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Completed Events" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Upcoming Events" })).toBeVisible();
@@ -162,7 +162,7 @@ test("opens an upcoming schedule without creating a room and preserves browser h
   expect(session.eligibility).toBe("future_read_only");
   const before = await roomCount(request);
 
-  await page.goto("/race-rooms");
+  await page.goto("/rooms");
   const card = page.locator(".event-card--upcoming").filter({ hasText: event!.event_name });
   await card.getByRole("button", { name: `View schedule for ${event!.event_name} ${session.display_name}` }).click();
   const dialog = page.getByRole("dialog", { name: event!.event_name });
@@ -186,7 +186,7 @@ test("keeps a replay conversation compact, inspectable, and session-aware", asyn
   const browserErrors = collectBrowserErrors(page);
   const { session } = await replayRoom(request);
   await page.setViewportSize({ width: 1280, height: 800 });
-  await page.goto(`/race-rooms/${session.room_slug}`);
+  await page.goto(`/rooms/${session.room_slug}`);
   await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
   await expect(page.getByRole("img", { name: /2026 circuit layout/ })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Session conversation" })).toBeVisible();
@@ -227,7 +227,7 @@ for (const width of VIEWPORT_WIDTHS) {
     const browserErrors = collectBrowserErrors(page);
     const { session } = await replayRoom(request);
     await page.setViewportSize({ width, height: width <= 768 ? 844 : 800 });
-    await page.goto("/race-rooms");
+    await page.goto("/rooms");
     await expect(page.getByRole("heading", { name: "Race Rooms" })).toBeVisible();
     await expect(page.locator(".app-nav")).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
     await expect(page.locator(".app-nav")).toHaveCSS("position", "absolute");
@@ -252,7 +252,7 @@ for (const width of VIEWPORT_WIDTHS) {
       await expect(page.locator("#event-filter-fields")).toBeVisible();
     }
 
-    await page.goto(`/race-rooms/${session.room_slug}`);
+    await page.goto(`/rooms/${session.room_slug}`);
     await expect(page.getByRole("heading", { name: "Session conversation" })).toBeVisible();
     await expect(page.getByTestId("agent-roster")).toBeVisible();
     if (width <= 860) {

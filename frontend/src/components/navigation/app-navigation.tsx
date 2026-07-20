@@ -6,6 +6,7 @@ import { usePathname } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 
 import { ThemeToggle } from "@/components/race-rooms/theme-toggle";
+import { appRoutes, stripBasePath } from "@/lib/app-paths";
 
 type ConnectionState = "connecting" | "live" | "reconnecting" | "degraded";
 
@@ -15,8 +16,8 @@ type AppNavigationProps = {
 };
 
 const navigation = [
-  { href: "/", label: "Home", matches: (pathname: string) => pathname === "/" },
-  { href: "/race-rooms", label: "Race Rooms", matches: (pathname: string) => pathname.startsWith("/race-rooms") },
+  { href: appRoutes.home, label: "Home", matches: (pathname: string) => pathname === "/" },
+  { href: appRoutes.rooms, label: "Race Rooms", matches: (pathname: string) => pathname.startsWith("/rooms") },
 ] as const;
 
 function connectionLabel(connection: ConnectionState): string {
@@ -27,7 +28,9 @@ function connectionLabel(connection: ConnectionState): string {
 }
 
 export function AppNavigation({ contextLabel, connection }: AppNavigationProps) {
-  const pathname = usePathname() ?? (typeof window === "undefined" ? "/" : window.location.pathname);
+  const pathname = usePathname() ?? (
+    typeof window === "undefined" ? "/" : stripBasePath(window.location.pathname)
+  );
   const [menuOpen, setMenuOpen] = useState(false);
   const menuButtonRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLElement>(null);
@@ -84,7 +87,7 @@ export function AppNavigation({ contextLabel, connection }: AppNavigationProps) 
 
   return <header className="app-nav">
     <div className="app-nav__inner">
-      <Link className="app-nav__brand" href="/" aria-label="Apex Arena home"><i className="brand-mark" /><span>APEX ARENA</span></Link>
+      <Link className="app-nav__brand" href={appRoutes.home} aria-label="Apex Arena home"><i className="brand-mark" /><span>APEX ARENA</span></Link>
       <nav className="app-nav__desktop-links" aria-label="Primary navigation">{links()}</nav>
       {contextLabel && <span className="app-nav__context" title={contextLabel}>{contextLabel}</span>}
       <div className="app-nav__actions">

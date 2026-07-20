@@ -200,6 +200,39 @@ class IngestionRunRecord(Base):
     normalized_inserted: Mapped[int] = mapped_column(Integer, default=0)
 
 
+class OpenF1BackfillJobRecord(Base):
+    __tablename__ = "openf1_backfill_jobs"
+    __table_args__ = (
+        UniqueConstraint("season", "session_key", name="uq_openf1_backfill_season_session"),
+        Index("ix_openf1_backfill_status_updated", "status", "updated_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    season: Mapped[int] = mapped_column(Integer, index=True)
+    meeting_key: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
+    session_key: Mapped[str] = mapped_column(String(80), index=True)
+    room_slug: Mapped[str | None] = mapped_column(String(180), nullable=True, index=True)
+    status: Mapped[str] = mapped_column(String(30), index=True, default="pending")
+    requested_endpoints: Mapped[list[str]] = mapped_column(JSON_TYPE, default=list)
+    completed_endpoints: Mapped[list[str]] = mapped_column(JSON_TYPE, default=list)
+    failed_endpoint: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    rows_fetched: Mapped[int] = mapped_column(Integer, default=0)
+    rows_processed: Mapped[int] = mapped_column(Integer, default=0)
+    rows_inserted: Mapped[int] = mapped_column(Integer, default=0)
+    rows_deduplicated: Mapped[int] = mapped_column(Integer, default=0)
+    rows_rejected: Mapped[int] = mapped_column(Integer, default=0)
+    rows_failed: Mapped[int] = mapped_column(Integer, default=0)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error_code: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    last_error_message: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    cursor_state: Mapped[dict[str, Any]] = mapped_column(JSON_TYPE, default=dict)
+    job_metadata: Mapped[dict[str, Any]] = mapped_column("metadata", JSON_TYPE, default=dict)
+
+
 class AgentProfileRecord(Base, TimestampMixin):
     __tablename__ = "agent_profiles"
 
