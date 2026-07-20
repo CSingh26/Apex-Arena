@@ -1,0 +1,70 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+name: Run historical chat build
+
+on:
+  workflow_dispatch:
+    inputs:
+      max_rooms:
+        description: "Maximum rooms the Railway job should process"
+        required: false
+        default: "100"
+      max_messages_per_room:
+        description: "Maximum generated messages per room"
+        required: false
+        default: "250"
+      generation_version:
+        description: "Generation version label already configured on Railway"
+        required: false
+        default: "v1"
+      force_regenerate:
+        description: "Must remain false unless Railway variables are deliberately changed"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: railway-historical-chat-production
+  cancel-in-progress: false
+
+jobs:
+  deploy-historical-service:
+    name: Deploy apex-arena-historical-chat
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+      RAILWAY_PROJECT_ID: ${{ secrets.RAILWAY_PROJECT_ID }}
+      RAILWAY_ENVIRONMENT: production
+      RAILWAY_HISTORICAL_SERVICE: ${{ vars.RAILWAY_HISTORICAL_SERVICE || 'apex-arena-historical-chat' }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Validate inputs
+        run: |
+          [[ "${{ inputs.max_rooms }}" =~ ^[0-9]+$ ]] || { echo "max_rooms must be numeric"; exit 1; }
+          [[ "${{ inputs.max_messages_per_room }}" =~ ^[0-9]+$ ]] || { echo "max_messages_per_room must be numeric"; exit 1; }
+          [[ "${{ inputs.generation_version }}" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "generation_version has invalid characters"; exit 1; }
+          [[ "${{ inputs.force_regenerate }}" =~ ^(true|false)$ ]] || { echo "force_regenerate must be true or false"; exit 1; }
+
+      - name: Validate Railway deployment secrets
+        run: |
+          test -n "${RAILWAY_TOKEN}" || { echo "RAILWAY_TOKEN is missing"; exit 1; }
+          test -n "${RAILWAY_PROJECT_ID}" || { echo "RAILWAY_PROJECT_ID is missing"; exit 1; }
+
+      - name: Install Railway CLI
+        run: npm install --global @railway/cli
+
+      - name: Remind operator about Railway service variables
+        run: |
+          echo "Deploying historical service source only."
+          echo "The Railway service must already have RUN_ROOM_CHAT_BUILD=true to execute."
+          echo "Configure MAX_ROOMS=${{ inputs.max_rooms }}, MAX_MESSAGES_PER_ROOM=${{ inputs.max_messages_per_room }}, GENERATION_VERSION=${{ inputs.generation_version }}, FORCE_REGENERATE=${{ inputs.force_regenerate }} in Railway if needed."
+
+      - name: Deploy historical service
+        run: scripts/deploy_railway.sh historical

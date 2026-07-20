@@ -1,0 +1,43 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+name: Deploy Railway API
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "backend/**"
+      - "backend/deploy/railway/**"
+      - "railway.toml"
+      - "scripts/deploy_railway.sh"
+      - ".github/workflows/deploy-railway.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: railway-api-production
+  cancel-in-progress: false
+
+jobs:
+  deploy-api:
+    name: Deploy apex-arena-backend
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+      RAILWAY_PROJECT_ID: ${{ secrets.RAILWAY_PROJECT_ID }}
+      RAILWAY_ENVIRONMENT: production
+      RAILWAY_API_SERVICE: ${{ vars.RAILWAY_API_SERVICE || 'apex-arena-backend' }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Validate Railway deployment secrets
+        run: |
+          test -n "${RAILWAY_TOKEN}" || { echo "RAILWAY_TOKEN is missing"; exit 1; }
+          test -n "${RAILWAY_PROJECT_ID}" || { echo "RAILWAY_PROJECT_ID is missing"; exit 1; }
+
+      - name: Install Railway CLI
+        run: npm install --global @railway/cli
+
+      - name: Deploy API service only
+        run: scripts/deploy_railway.sh api
