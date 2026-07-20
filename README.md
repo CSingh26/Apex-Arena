@@ -205,9 +205,9 @@ Only verified builds can publish images. Version tags publish multi-platform rel
 - `ghcr.io/csingh26/apex-arena-backend`
 - `ghcr.io/csingh26/apex-arena-frontend`
 
-Published images receive semantic-version, major/minor, major, `latest`, and commit-SHA tags.
-After the full `main` verification workflow succeeds, a dedicated backend image workflow also
-publishes the Railway-ready multi-platform backend image as:
+Published release images receive semantic-version, major/minor, major, `latest`, and commit-SHA
+tags. The same verified publish matrix also publishes the Railway-ready multi-platform backend
+image after the full `main` workflow succeeds:
 
 - `ghcr.io/csingh26/apex-arena-backend:main`
 - `ghcr.io/csingh26/apex-arena-backend:<full-commit-sha>`
