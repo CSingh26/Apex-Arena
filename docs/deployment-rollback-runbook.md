@@ -180,7 +180,7 @@ regression.
 If the failure is a **variable**, not code: fix the variable and let Railway restart the
 service. A settings validation error surfaces as an immediate crash on start with the
 `ValueError` text from `validate_runtime_contract` in the logs — for example
-`APP_PROCESS_ROLE=all is not allowed in production`,
+`Recent-session reconciliation requires ingestor or combined role`,
 `Production DATABASE_URL must require TLS`, or
 `Production REDIS_URL must use rediss://`. These are startup failures, not request failures;
 the container never becomes healthy.
@@ -479,8 +479,8 @@ calls.
 | --- | --- | --- |
 | Ingestor on the **pooled** DSN | Does `DATABASE_MIGRATION_URL` on the ingestor contain `-pooler`? Is it set at all? | Set it to the **direct** endpoint and restart. If it is unset, `async_migration_database_url` silently falls back to `DATABASE_URL` — the pooled one |
 | `numReplicas > 1` on the ingestor | Railway service settings | Set to 1 |
-| Combined mode over a **pooled** DSN | `APP_PROCESS_ROLE=all` | `app/main.py` *does* take the lease, but over `DATABASE_URL` — `container.py` only substitutes the direct DSN for role `ingestor`. Point `DATABASE_URL` at the direct endpoint, or move to split roles |
-| Combined mode with `OPENF1_LIVE_AUTO_CONNECT=false` on one container and `true` on another | Railway variables | The lease is only taken on the auto-connect branch. Keep the setting consistent |
+| Combined mode without a direct DSN | `APP_PROCESS_ROLE=combined` and missing `DATABASE_MIGRATION_URL` | Set `DATABASE_MIGRATION_URL` to the direct endpoint and restart |
+| Combined mode with worker settings inconsistent across containers | Railway variables | Keep replicas at 1 while reconciliation or live ingestion is enabled |
 | An API service with `OPENF1_LIVE_AUTO_CONNECT=true` | Railway API variables | Set `false`. In production the validator already rejects this combination |
 | A leftover staging ingestor on the same database | Which services point at this Neon project? | Give staging its own Neon branch |
 

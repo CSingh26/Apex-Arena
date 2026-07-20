@@ -47,7 +47,12 @@ services:
     env_file:
       - .env
     environment:
+      APP_ENV: local
       APP_PROCESS_ROLE: api
+      OPENF1_INGESTION_MODE: rest
+      OPENF1_LIVE_AUTO_CONNECT: "false"
+      RECENT_SESSION_RECONCILIATION_ENABLED: "false"
+      RECENT_SESSION_AUTO_BACKFILL_ENABLED: "false"
       DATABASE_URL: postgresql://${POSTGRES_USER:-apex}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-apex_arena}
       DATABASE_MIGRATION_URL: postgresql://${POSTGRES_USER:-apex}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-apex_arena}
       POSTGRES_HOST: postgres
@@ -68,7 +73,12 @@ services:
     env_file:
       - .env
     environment:
-      APP_PROCESS_ROLE: all
+      APP_ENV: local
+      APP_PROCESS_ROLE: combined
+      OPENF1_INGESTION_MODE: rest
+      OPENF1_LIVE_AUTO_CONNECT: "false"
+      RECENT_SESSION_RECONCILIATION_ENABLED: "false"
+      RECENT_SESSION_AUTO_BACKFILL_ENABLED: "false"
       DATABASE_URL: postgresql://${POSTGRES_USER:-apex}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-apex_arena}
       DATABASE_MIGRATION_URL: postgresql://${POSTGRES_USER:-apex}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-apex_arena}
       POSTGRES_HOST: postgres

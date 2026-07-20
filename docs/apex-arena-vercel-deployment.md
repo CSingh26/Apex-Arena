@@ -40,7 +40,7 @@ Three rules the whole design depends on:
 | Install Command | `npm ci` (default) |
 | Output Directory | leave empty — the Next.js preset handles it |
 | Node.js Version | 22.x (`@types/node` ^26 and Next 16 both target modern Node; do not pin below 20.x) |
-| Production Branch | `deployment/low-cost-production` |
+| Production Branch | `main` |
 
 Next.js version in use: **16.2.x** (`next: ^16.2.10`, React 19).
 

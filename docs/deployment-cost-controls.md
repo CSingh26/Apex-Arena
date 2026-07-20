@@ -52,18 +52,15 @@ Keep it there.
 
 ### Combined mode as a cost lever
 
-`APP_PROCESS_ROLE=all` runs FastAPI and ingestion in one container, halving the container
-spend. It is a legitimate cost lever **for staging and controlled beta only**:
-`validate_runtime_contract` rejects `app_process_role="all"` when `app_env="production"`,
-so combined mode requires `APP_ENV=staging`, and it must stay at **one replica**.
+`APP_PROCESS_ROLE=combined` runs FastAPI and narrowly scoped worker duties in one container,
+halving the container spend. It must stay at **one replica** while reconciliation or live
+ingestion is enabled.
 
-`app/main.py` **does** acquire the singleton advisory lease for `APP_PROCESS_ROLE=all`
-before starting live services, and raises if another process holds it — so combined mode is
-not without duplicate-ingestion protection. What it gives up is isolation: an ingestion
-crash takes the API down with it, and every redeploy drops every open SSE connection. Note
-also that a combined container takes the lease over `DATABASE_URL`, so that variable should
-point at the Neon **direct** endpoint in staging. Read the trade-off section of the
-architecture document before choosing it.
+`app/main.py` acquires the singleton advisory lease before starting worker duties, and raises
+if another process holds it — so combined mode is not without duplicate-ingestion protection.
+What it gives up is isolation: a worker crash can take the API down with it, and every redeploy
+drops every open SSE connection. Keep `DATABASE_MIGRATION_URL` set so the worker lease uses the
+direct Neon endpoint.
 
 ### No preview services by default
 
@@ -380,7 +377,7 @@ Run this once a month, and again after every race weekend:
 
 | Lever | Setting | Effect |
 | --- | --- | --- |
-| Fewest containers | `APP_PROCESS_ROLE=all` + `APP_ENV=staging` | ~half the Railway spend; lease is taken, but no isolation; staging/beta only, one replica |
+| Fewest containers | `APP_PROCESS_ROLE=combined` + one replica | ~half the Railway spend; lease is taken, but no isolation |
 | Neon connections | `DB_POOL_SIZE=3`, `DB_MAX_OVERFLOW=2` | 5 per process + 1 lease connection on the ingestor |
 | Upstash commands | `REDIS_HEALTH_CHECK_INTERVAL_SECONDS=0`, longer `SSE_HEARTBEAT_SECONDS`, close idle streams | See the formula in `upstash-setup.md` |
 | Uptime monitoring | probe `/health/live`, never `/health/ready` | Avoids a DB query and a Redis `PING` per probe |

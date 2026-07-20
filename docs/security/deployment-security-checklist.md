@@ -18,10 +18,10 @@ browser -> chaitanyasingh.org (portfolio, Vercel project 1, owns the public doma
 ```
 
 ## Application configuration
-- [ ] `APP_ENV=staging` (never `local`/`test`) so debug/diagnostics endpoints stay gated.
+- [ ] `APP_ENV=production` (never `local`/`test`) so debug/diagnostics endpoints stay gated.
 - [ ] `CORS_ALLOWED_ORIGINS` set to the exact staging frontend origin (no wildcard). Credentials remain disabled.
 - [ ] `INTERNAL_API_KEY` set to a strong, unique random value (rotate from any CI/test value). Without it, ingestion/sync/generate return 503 (safe default).
-- [ ] `ROOM_DIAGNOSTICS_ENABLED=false` and `DEVELOPMENT_FIXTURE_ENABLED=false` in staging.
+- [ ] `ROOM_DIAGNOSTICS_ENABLED=false` and `DEVELOPMENT_FIXTURE_ENABLED=false` in production.
 - [ ] `DEBUG_INGESTION_ENABLED` left off unless an operator actively needs a one-off ingest; re-disable afterward.
 - [ ] `LOG_FORMAT=json`, `LOG_LEVEL=info` (or higher); confirm logs contain no secrets/tokens/authorization headers (code emits exception *types* only).
 - [ ] OpenF1 live credentials (`OPENF1_USERNAME`/`OPENF1_PASSWORD`) are staging-scoped, distinct from production.

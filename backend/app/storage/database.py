@@ -106,6 +106,30 @@ class Database:
                     pass
             await connection.close()
 
+    @asynccontextmanager
+    async def reconciliation_lease(self) -> AsyncIterator[bool]:
+        """Serialize recent-session reconciliation across API/worker processes."""
+
+        connection = await self.engine.connect()
+        acquired = bool(
+            await connection.scalar(
+                text("SELECT pg_try_advisory_lock(:lock_id)"),
+                {"lock_id": 1_095_782_233},
+            )
+        )
+        try:
+            yield acquired
+        finally:
+            if acquired:
+                try:
+                    await connection.execute(
+                        text("SELECT pg_advisory_unlock(:lock_id)"),
+                        {"lock_id": 1_095_782_233},
+                    )
+                except Exception:
+                    pass
+            await connection.close()
+
     async def health_check(self, timeout_seconds: float = 2.0) -> tuple[bool, str]:
         try:
             async with asyncio.timeout(timeout_seconds):

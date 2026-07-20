@@ -26,6 +26,7 @@ from app.services.normalization import OpenF1EventNormalizer
 from app.services.openf1_backfill import OpenF1HistoricalBackfillService, OpenF1RoomFinalizer
 from app.services.race_state import RaceStateEngine
 from app.services.raw_events import RawProviderEventService
+from app.services.recent_sessions import RecentSessionReconciliationService
 from app.services.room_eligibility import RoomEligibilityService
 from app.services.room_replay import RoomReplayCoordinator
 from app.services.rooms import RaceRoomService
@@ -68,7 +69,7 @@ class AppServices:
         self.openf1_auth = OpenF1AuthService(settings)
         self.openf1 = OpenF1RestClient(
             settings,
-            token_provider=self.openf1_auth.get_access_token,
+            token_provider=lambda: self.openf1_auth.get_access_token(force_refresh=True),
         )
         self.circuit_intelligence = CircuitIntelligenceService()
         self.circuit_weather = CircuitWeatherService(self.openf1)
@@ -149,14 +150,48 @@ class AppServices:
             finalizer=self.room_finalizer,
         )
         self._live_catalog_task: asyncio.Task[None] | None = None
+        self.recent_reconciliation = RecentSessionReconciliationService(
+            settings=settings,
+            database=self.database,
+            rooms=self.rooms,
+            room_repository=self.room_repository,
+            client=self.openf1,
+            backfill=self.backfill,
+        )
+        self._recent_reconciliation_task: asyncio.Task[None] | None = None
 
     async def start_live_services(self) -> None:
         """Connect live telemetry and reconcile provider sessions in the background."""
-        await self.openf1_live.connect()
+        ingestion_mode = getattr(self.settings, "openf1_ingestion_mode", "auto")
+        auto_connect = getattr(self.settings, "openf1_live_auto_connect", True)
+        if ingestion_mode != "rest" and auto_connect:
+            await self.openf1_live.connect()
         if self._live_catalog_task is None or self._live_catalog_task.done():
             self._live_catalog_task = asyncio.create_task(
                 self._maintain_live_catalog(), name="openf1-live-catalog"
             )
+
+    async def start_recent_reconciliation(self) -> None:
+        if not self.settings.recent_session_reconciliation_enabled:
+            return
+        if self._recent_reconciliation_task is None or self._recent_reconciliation_task.done():
+            self._recent_reconciliation_task = asyncio.create_task(
+                self._maintain_recent_reconciliation(),
+                name="openf1-recent-session-reconciliation",
+            )
+
+    async def _maintain_recent_reconciliation(self) -> None:
+        while True:
+            try:
+                await self.recent_reconciliation.run_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning(
+                    "Recent session reconciliation failed error=%s",
+                    type(exc).__name__,
+                )
+            await asyncio.sleep(self.settings.recent_session_reconciliation_interval_seconds)
 
     async def _maintain_live_catalog(self) -> None:
         while True:
@@ -169,6 +204,11 @@ class AppServices:
             await asyncio.sleep(self.settings.openf1_live_catalog_sync_seconds)
 
     async def close(self) -> None:
+        if self._recent_reconciliation_task is not None:
+            self._recent_reconciliation_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._recent_reconciliation_task
+            self._recent_reconciliation_task = None
         if self._live_catalog_task is not None:
             self._live_catalog_task.cancel()
             with suppress(asyncio.CancelledError):

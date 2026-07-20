@@ -83,6 +83,12 @@ class RaceRoomService:
             self._provider_sessions = await self._historical_sessions()
             self._catalog_ready = True
 
+    def invalidate_catalog(self) -> None:
+        """Force the next public catalog read to observe fresh provider metadata."""
+
+        self._catalog_ready = False
+        self._retry_after = 0.0
+
     async def sync_meetings(
         self,
         meetings: list[RaceMeeting],

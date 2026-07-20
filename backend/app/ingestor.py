@@ -14,8 +14,10 @@ from app.services.container import AppServices
 
 def create_ingestor_app(settings_override: Settings | None = None) -> FastAPI:
     settings = settings_override or get_settings()
-    if settings.app_process_role not in {"ingestor", "all"}:
-        raise RuntimeError("The ingestor command requires APP_PROCESS_ROLE=ingestor or all")
+    if settings.app_process_role not in {"ingestor", "combined", "all"}:
+        raise RuntimeError(
+            "The ingestor command requires APP_PROCESS_ROLE=ingestor, combined, or all"
+        )
 
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
@@ -27,6 +29,7 @@ def create_ingestor_app(settings_override: Settings | None = None) -> FastAPI:
                 raise RuntimeError("Another Apex Arena ingestor owns the singleton lease")
             if settings.openf1_live_auto_connect:
                 await services.start_live_services()
+            await services.start_recent_reconciliation()
             yield
         finally:
             await services.close()
@@ -57,6 +60,7 @@ def create_ingestor_app(settings_override: Settings | None = None) -> FastAPI:
             "current_session_key": live["current_session_key"],
             "last_event_at": live["last_event_at"],
             "reconnect_attempts": live["reconnect_attempts"],
+            "reconciliation": services.recent_reconciliation.status,
         }
 
     return application

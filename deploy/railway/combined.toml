@@ -1,14 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-only
-# Apex Arena combined service (LOW-COST INITIAL MODE).
+# Apex Arena combined service.
 #
-# Runs the FastAPI API and OpenF1 ingestion in ONE Railway service to halve the
-# service count. Intended for staging and an early, controlled, single-instance
-# beta only.
-#
-# IMPORTANT: settings.py rejects APP_PROCESS_ROLE=all when APP_ENV=production.
-# This mode therefore requires APP_ENV=staging. That guard is deliberate - it
-# stops a cost-saving staging shortcut from silently becoming the production
-# topology, where a restart or scale event could duplicate MQTT ingestion.
+# Runs the FastAPI API and the narrow recent-session REST reconciliation worker
+# in one Railway service. Deploy from main and keep replicas at 1 while worker
+# duties are enabled.
 #
 # Railway service settings to set in the UI:
 #   Root directory     : backend
@@ -29,10 +24,13 @@ restartPolicyMaxRetries = 10
 numReplicas = 1
 
 # Required variables:
-#   APP_ENV=staging          (production is rejected with APP_PROCESS_ROLE=all)
-#   APP_PROCESS_ROLE=all
+#   APP_ENV=production
+#   APP_PROCESS_ROLE=combined
 #   APP_BASE_PATH=/apex-arena
-#   OPENF1_LIVE_AUTO_CONNECT=true
+#   OPENF1_INGESTION_MODE=rest
+#   OPENF1_LIVE_AUTO_CONNECT=false
+#   RECENT_SESSION_RECONCILIATION_ENABLED=true
+#   RECENT_SESSION_AUTO_BACKFILL_ENABLED=true
 #   DATABASE_URL             (secret, Neon POOLED endpoint)
 #   DATABASE_MIGRATION_URL   (secret, Neon DIRECT endpoint for the lease)
 #   REDIS_URL                (secret, Upstash rediss://)

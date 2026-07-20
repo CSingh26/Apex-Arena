@@ -1,7 +1,8 @@
 <!-- SPDX-License-Identifier: AGPL-3.0-only -->
 # Apex Arena — Low-Cost Production Deployment Audit
 
-_Audited 2026-07-19 on branch `deployment/low-cost-production`. Every claim below was checked against the actual repository, not assumed._
+_Historical audit from 2026-07-19 on branch `deployment/low-cost-production`. Current work is
+consolidated on `main`; use `APP_PROCESS_ROLE=combined` for the one-service backend._
 
 Target architecture: Vercel (portfolio domain + Apex Arena frontend origin) → Railway
 (FastAPI API + OpenF1 ingestor) → Neon PostgreSQL + Upstash Redis.
@@ -37,8 +38,8 @@ Target architecture: Vercel (portfolio domain + Apex Arena frontend origin) → 
 
 | Component | Evidence | Status |
 |---|---|---|
-| Process roles `api` / `ingestor` / `all` | `backend/app/core/settings.py`, `app/runtime.py`, `app/ingestor.py` | ✅ Ready |
-| Production rejects `APP_PROCESS_ROLE=all` | `validate_runtime_contract` | ✅ Ready |
+| Process roles `api` / `ingestor` / `combined` | `backend/app/core/settings.py`, `app/runtime.py`, `app/ingestor.py` | ✅ Ready |
+| API-only role cannot run worker duties | `validate_runtime_contract` | ✅ Ready |
 | API role cannot auto-connect MQTT in production | `validate_runtime_contract` | ✅ Ready |
 | Singleton ingestor lease | `pg_try_advisory_lock` held for process lifetime, `storage/database.py` | ✅ Ready |
 | Railway-injected `PORT` | Entrypoint hardcoded 8000 | 🔧 Code — now reads `PORT` |

@@ -217,14 +217,16 @@ Apex Arena frontend on Vercel. The frontend proxies API calls server-side to the
 backend on Railway, which reads from Neon PostgreSQL and Upstash Redis. No infrastructure
 hostname is ever exposed to the browser.
 
-The backend supports two operating modes, selected by `APP_PROCESS_ROLE`:
+`main` is the canonical deployment source branch. The backend supports three process roles:
 
-- **Recommended production** — two services: an `api` process that serves HTTP and SSE, and
-  an `ingestor` process that owns the OpenF1 subscription behind a singleton advisory lease.
-- **Low-cost** — a single combined `all` process that both serves and ingests. It is
-  restricted to `APP_ENV=staging`; the application refuses to start with
-  `APP_PROCESS_ROLE=all` in production. When live ingestion is enabled, combined mode uses the
-  direct database endpoint and acquires the same singleton advisory lease as the ingestor.
+- **`api`** — serves HTTP and SSE only.
+- **`ingestor`** — owns OpenF1 worker duties behind a singleton advisory lease.
+- **`combined`** — serves the API and runs narrowly scoped worker duties in one process.
+
+For the next deployment pass, Apex Arena is prepared around one `combined` backend service from
+`main`, with `OPENF1_INGESTION_MODE=rest`, live MQTT off, and recent-session reconciliation on.
+Full-season historical backfill remains manual-only; automatic recovery is limited to recently
+completed competitive sessions after OpenF1 publishes real data.
 
 ### Deployment documentation
 

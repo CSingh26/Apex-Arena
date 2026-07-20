@@ -15,6 +15,7 @@ from app.providers.openf1 import (
     OpenF1AuthUnavailable,
     OpenF1LiveClient,
     OpenF1RestClient,
+    ProviderAuthenticationError,
 )
 from app.services.raw_events import RawEventInput
 
@@ -114,6 +115,37 @@ async def test_access_token_is_requested_and_cached(settings: Settings) -> None:
 
 
 @pytest.mark.asyncio
+async def test_concurrent_access_token_requests_share_one_refresh(settings: Settings) -> None:
+    live_settings = Settings.model_validate(
+        {
+            **settings.model_dump(),
+            "openf1_username": "fan@example.test",
+            "openf1_password": "live-password",
+        }
+    )
+    requests = 0
+
+    async def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        await asyncio.sleep(0.01)
+        return httpx.Response(200, json={"access_token": "shared-token", "expires_in": 3600})
+
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    auth = OpenF1AuthService(live_settings, http_client)
+
+    tokens = await asyncio.gather(
+        auth.get_access_token(),
+        auth.get_access_token(),
+        auth.get_access_token(),
+    )
+
+    assert tokens == ["shared-token", "shared-token", "shared-token"]
+    assert requests == 1
+    await http_client.aclose()
+
+
+@pytest.mark.asyncio
 async def test_historical_query_helper_accepts_operators(settings: Settings) -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.params["session_key"] == "9839"
@@ -177,6 +209,28 @@ async def test_historical_query_retries_one_401_with_bearer_token_without_loggin
     assert token_requests == 1
     assert client.status["historical_auth_mode"] == "oauth_retry"
     assert "never-log-oauth-token" not in caplog.text
+    await http_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_historical_query_repeated_401_becomes_safe_auth_error(
+    settings: Settings,
+) -> None:
+    async def token_provider() -> str:
+        return "still-rejected"
+
+    async def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, json={"detail": "authentication required"})
+
+    http_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://api.openf1.test/v1/",
+    )
+    client = OpenF1RestClient(settings, http_client, token_provider=token_provider)
+
+    with pytest.raises(ProviderAuthenticationError, match="authentication retry failed"):
+        await client.sessions(year=2026)
+
     await http_client.aclose()
 
 

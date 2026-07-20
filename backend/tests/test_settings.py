@@ -76,19 +76,49 @@ def test_2026_only_mode_rejects_another_season() -> None:
         )
 
 
-def test_production_rejects_combined_role_and_plaintext_datastores(settings: Settings) -> None:
+def test_production_combined_role_requires_tls_and_direct_worker_dsn(
+    settings: Settings,
+) -> None:
     values = settings.model_dump()
     values.update(
         app_env="production",
-        app_process_role="all",
+        app_process_role="combined",
         debug_ingestion_enabled=False,
         openf1_live_auto_connect=False,
+        recent_session_reconciliation_enabled=True,
     )
-    with pytest.raises(ValidationError, match="APP_PROCESS_ROLE=all"):
+    with pytest.raises(ValidationError, match="DATABASE_MIGRATION_URL"):
         Settings.model_validate(values)
 
-    values["app_process_role"] = "api"
+    values.update(
+        database_url="postgresql://u:p@pooler.neon.tech/apex?ssl=require",
+        database_migration_url="postgresql://u:p@direct.neon.tech/apex?ssl=require",
+        redis_url="rediss://default:t@x.upstash.io:6379",
+        postgres_password=None,
+    )
+    configured = Settings.model_validate(values)
+    assert configured.app_process_role == "combined"
+
+    values["database_url"] = "postgresql://u:p@pooler.neon.tech/apex"
     with pytest.raises(ValidationError, match="DATABASE_URL must require TLS"):
+        Settings.model_validate(values)
+
+
+def test_api_role_cannot_enable_recent_reconciliation(settings: Settings) -> None:
+    values = settings.model_dump()
+    values.update(
+        app_env="production",
+        app_process_role="api",
+        recent_session_reconciliation_enabled=True,
+        openf1_live_auto_connect=False,
+        database_url="postgresql://u:p@pooler.neon.tech/apex?ssl=require",
+        redis_url="rediss://default:t@x.upstash.io:6379",
+        postgres_password=None,
+        debug_ingestion_enabled=False,
+        development_fixture_enabled=False,
+        room_diagnostics_enabled=False,
+    )
+    with pytest.raises(ValidationError, match="reconciliation requires"):
         Settings.model_validate(values)
 
 

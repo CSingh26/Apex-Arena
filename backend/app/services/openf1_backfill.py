@@ -320,7 +320,10 @@ class OpenF1HistoricalBackfillService:
         resume: bool = False,
         force_retry_failed: bool = False,
     ) -> BackfillSummary:
-        if self.settings.app_process_role != "ingestor" and not self.cli_safe:
+        if (
+            self.settings.app_process_role not in {"ingestor", "combined", "all"}
+            and not self.cli_safe
+        ):
             raise RuntimeError("Historical backfill requires the ingestor role or explicit CLI")
         selected = list(dict.fromkeys(endpoints or CORE_BACKFILL_ENDPOINTS))
         if include_high_frequency:

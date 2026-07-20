@@ -50,6 +50,10 @@ class ProviderPayloadError(RuntimeError):
     pass
 
 
+class ProviderAuthenticationError(RuntimeError):
+    pass
+
+
 class OpenF1RestClient:
     """Historical REST client that starts public and retries a 401 with backend OAuth."""
 
@@ -175,6 +179,8 @@ class OpenF1RestClient:
         if response is None:
             assert last_request_error is not None
             raise last_request_error
+        if response.status_code == 401 and self.token_provider is not None:
+            raise ProviderAuthenticationError("OpenF1 authentication retry failed")
         response.raise_for_status()
         data = response.json()
         if not isinstance(data, list) or not all(isinstance(row, dict) for row in data):
@@ -250,6 +256,7 @@ class OpenF1AuthService:
         self.client = client or httpx.AsyncClient(timeout=httpx.Timeout(10.0))
         self._access_token: str | None = None
         self._expires_at_monotonic: float | None = None
+        self._refresh_lock = asyncio.Lock()
 
     @property
     def credentials_present(self) -> bool:
@@ -270,39 +277,49 @@ class OpenF1AuthService:
         if not force_refresh and self._access_token and self.expires_in_seconds > refresh_buffer:
             return self._access_token
 
-        if not self.credentials_present:
-            raise OpenF1AuthUnavailable(
-                "OpenF1 live credentials are missing; historical REST remains available"
+        async with self._refresh_lock:
+            if (
+                not force_refresh
+                and self._access_token
+                and self.expires_in_seconds > refresh_buffer
+            ):
+                return self._access_token
+
+            if not self.credentials_present:
+                raise OpenF1AuthUnavailable(
+                    "OpenF1 live credentials are missing; historical REST remains available"
+                )
+
+            password = self.settings.openf1_password
+            assert password is not None  # Narrowed by credentials_present.
+            response = await self.client.post(
+                self.settings.openf1_auth_url,
+                data={
+                    "username": self.settings.openf1_username,
+                    "password": password.get_secret_value(),
+                },
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
             )
+            if response.status_code >= 400:
+                raise OpenF1AuthUnavailable(
+                    f"OpenF1 authentication failed with HTTP {response.status_code}"
+                )
 
-        password = self.settings.openf1_password
-        assert password is not None  # Narrowed by credentials_present.
-        response = await self.client.post(
-            self.settings.openf1_auth_url,
-            data={
-                "username": self.settings.openf1_username,
-                "password": password.get_secret_value(),
-            },
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-        )
-        if response.status_code >= 400:
-            raise OpenF1AuthUnavailable(
-                f"OpenF1 authentication failed with HTTP {response.status_code}"
-            )
+            payload = response.json()
+            token = payload.get("access_token")
+            if not isinstance(token, str) or not token:
+                raise OpenF1AuthUnavailable("OpenF1 authentication returned no access token")
 
-        payload = response.json()
-        token = payload.get("access_token")
-        if not isinstance(token, str) or not token:
-            raise OpenF1AuthUnavailable("OpenF1 authentication returned no access token")
+            try:
+                expires_in = int(payload.get("expires_in", 3600))
+            except (TypeError, ValueError) as exc:
+                raise OpenF1AuthUnavailable(
+                    "OpenF1 authentication returned an invalid expiry"
+                ) from exc
 
-        try:
-            expires_in = int(payload.get("expires_in", 3600))
-        except (TypeError, ValueError) as exc:
-            raise OpenF1AuthUnavailable("OpenF1 authentication returned an invalid expiry") from exc
-
-        self._access_token = token
-        self._expires_at_monotonic = time.monotonic() + max(1, expires_in)
-        return token
+            self._access_token = token
+            self._expires_at_monotonic = time.monotonic() + max(1, expires_in)
+            return token
 
     async def close(self) -> None:
         if self._owns_client:

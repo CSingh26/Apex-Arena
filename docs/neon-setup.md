@@ -21,7 +21,7 @@ into a file, a log line, a shell history, or a commit.
 > ## ⚠ `DATABASE_MIGRATION_URL` is REQUIRED for any ingesting role
 >
 > In `APP_ENV=staging` or `APP_ENV=production`, a process with
-> `APP_PROCESS_ROLE=ingestor` **or** `APP_PROCESS_ROLE=all` **will refuse to start** unless
+> `APP_PROCESS_ROLE=ingestor` **or** `APP_PROCESS_ROLE=combined` **will refuse to start** unless
 > `DATABASE_MIGRATION_URL` is set. `validate_runtime_contract` in `settings.py` raises:
 >
 > ```
@@ -265,9 +265,9 @@ On each Railway service, under **Variables**:
 | `APP_ENV` | `production` | `production` |
 | `APP_PROCESS_ROLE` | `api` | `ingestor` |
 
-`APP_PROCESS_ROLE=all` is rejected when `APP_ENV=production`, so the two services are mandatory,
-not optional. Enter the values through the Railway UI or `railway variables --set` — never
-commit them and never echo them in a build step.
+`APP_PROCESS_ROLE=combined` is the one-service worker role. Split `api` + `ingestor` remains
+available for later scaling. Enter the values through the Railway UI or `railway variables --set`
+— never commit them and never echo them in a build step.
 
 ### Conservative pool sizing for a free tier
 

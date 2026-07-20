@@ -426,8 +426,8 @@ Why it matters concretely:
 - A preview deployment is built from an unreviewed branch. If it shares production's token,
   any branch can reach production data.
 - Vercel preview URLs are guessable and are not access-controlled by default.
-- `APP_PROCESS_ROLE=all` is only legal with `APP_ENV=staging`, so a combined-mode staging
-  service **cannot** share a variable set with production anyway.
+- `APP_PROCESS_ROLE=combined` runs worker duties and the API together, so it needs the direct
+  database URL and must not share preview credentials with production.
 - Sharing one Neon database means a preview migration alters production's schema.
 
 Vercel binds environment variables per environment (Production / Preview / Development).

@@ -66,7 +66,7 @@ setting them by hand:
 
 - [`deploy/railway/api.toml`](../deploy/railway/api.toml) — API service (recommended production)
 - [`deploy/railway/ingestor.toml`](../deploy/railway/ingestor.toml) — ingestor service (recommended production)
-- [`deploy/railway/combined.toml`](../deploy/railway/combined.toml) — single combined service (staging only)
+- [`deploy/railway/combined.toml`](../deploy/railway/combined.toml) — single combined service
 - [`railway.toml`](../railway.toml) — repository default for a single-service deployment
 
 Note that [`railway.toml`](../railway.toml) uses `dockerfilePath = "backend/Dockerfile"`
@@ -110,31 +110,24 @@ the explicit, one-session historical REST workflow in
 [`openf1-rest-backfill.md`](./openf1-rest-backfill.md). Historical backfill never starts merely
 because the Railway service boots.
 
-Two production validators in
-[`backend/app/core/settings.py`](../backend/app/core/settings.py) enforce this split:
-`APP_PROCESS_ROLE=all` is rejected outright in production, and `APP_PROCESS_ROLE=api`
-combined with `OPENF1_LIVE_AUTO_CONNECT=true` is rejected as well — so an API container
-cannot begin ingesting by accident.
+Production validators in [`backend/app/core/settings.py`](../backend/app/core/settings.py)
+keep API-only containers from doing worker duties: `APP_PROCESS_ROLE=api` combined with
+`OPENF1_LIVE_AUTO_CONNECT=true` is rejected, and recent-session reconciliation requires an
+`ingestor` or `combined` role.
 
-### 4b. LOW-COST — one combined service (`all`)
+### 4b. Combined — one backend service (`combined`)
 
-One service running both roles in a single process. It halves the container count, and it
-**cannot run in production**:
+One service running API routes and narrowly scoped worker duties in a single process:
 
 ```python
-if self.app_env == "production" and self.app_process_role == "all":
-    raise ValueError("APP_PROCESS_ROLE=all is not allowed in production")
+if self.recent_session_reconciliation_enabled and self.app_process_role == "api":
+    raise ValueError("Recent-session reconciliation requires ingestor or combined role")
 ```
 
-The failure happens while settings are constructed, so the process never reaches request
-handling. There is no override. Combined mode therefore requires `APP_ENV=staging`, and
-that is deliberate: `app/main.py` never acquires the singleton ingestor lease, so combined
-mode has no protection against two overlapping containers double-subscribing to OpenF1
-during a rolling deploy.
-
-Use it for staging or a controlled single-instance beta. Set `APP_ENV=staging`,
-`APP_PROCESS_ROLE=all`, `OPENF1_LIVE_AUTO_CONNECT=true`, both Neon DSNs, `REDIS_URL`, the
-OpenF1 credentials, and a **staging-specific** `APEX_ARENA_PROXY_TOKEN`. Keep replicas at 1.
+Use it for the next production pass. Set `APP_ENV=production`, `APP_PROCESS_ROLE=combined`,
+`OPENF1_INGESTION_MODE=rest`, `OPENF1_LIVE_AUTO_CONNECT=false`, both Neon DSNs, `REDIS_URL`,
+OpenF1 credentials, the proxy/internal keys, and the `RECENT_SESSION_*` controls. Keep replicas
+at 1 while worker duties are enabled.
 
 ### Variables
 
@@ -354,7 +347,7 @@ restart.
   deploy anything.
 - Prefer a restart-style rollout over an overlapping one for the ingestor and for combined
   mode. An overlapping deploy briefly runs two containers; the lease makes that safe for
-  both the dedicated ingestor and `APP_PROCESS_ROLE=all` (the new instance fails to start
+  both the dedicated ingestor and `APP_PROCESS_ROLE=combined` (the new instance fails to start
   and retries rather than double-ingesting). A restart-style rollout still avoids the
   failed-start noise, and for combined mode it also avoids serving API traffic from a
   container that could not take the lease.
@@ -433,7 +426,7 @@ Run in this order. Do not proceed past a failing step.
 | **Startup fails with `Production DATABASE_URL must require TLS`** | The DSN has no `ssl`/`sslmode` parameter, or one with an accepted-but-weaker value | Append `?ssl=require`. Accepted values are `require`, `verify-ca`, `verify-full`, `true` |
 | **Startup fails with `Production REDIS_URL must use rediss://`** | A plaintext Upstash URL | Use the TLS endpoint from the Upstash console |
 | **`DATABASE_URL password must match POSTGRES_PASSWORD` while using Neon** | An older revision applied the local Compose credential check to every host because the development `.env` also contained `POSTGRES_PASSWORD` | Use the local-host-scoped validator. External managed URLs may coexist with local Compose variables; do not delete `.env`, reset the Neon password, or copy managed credentials into `POSTGRES_PASSWORD` |
-| **Startup fails with `APP_PROCESS_ROLE=all is not allowed in production`** | Combined mode with `APP_ENV=production` | Either split into `api` + `ingestor`, or set `APP_ENV=staging`. There is no override |
+| **Startup fails because `DATABASE_MIGRATION_URL` is missing** | A worker role is enabled without the direct Neon endpoint | Add the direct Neon URL; advisory locks are unreliable through the pooled endpoint |
 | **SSE connections flap to `degraded`** | Historically a Redis socket timeout below the blocking `XREAD` window aborted every idle heartbeat. The blocking read is now capped at 10s and `effective_redis_socket_timeout` keeps a margin above it | Do not lower `REDIS_SOCKET_TIMEOUT_SECONDS` below `SSE_HEARTBEAT_SECONDS`. If flapping continues, check `/health/provider` — a genuinely disconnected ingestor also reports `degraded`. Note that Vercel's function duration cap ends long streams by design; the client resumes with `Last-Event-ID` |
 | **First request after a quiet period times out** | Neon compute autosuspended and is cold-starting | Expected on a small plan. `pool_pre_ping` recovers the connection; retry. If it happens under real traffic, the health check timeout (30s) is the value to review, not the pool |
 | **Health check fails but the app looks healthy in logs** | The health check path is not `/health/live`, or `PORT` was set manually | Set the path to `/health/live` and remove any manual `PORT` variable |

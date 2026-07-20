@@ -23,7 +23,7 @@ class Settings(BaseSettings):
 
     app_name: str = "Apex Arena"
     app_env: Literal["local", "test", "staging", "production"] = "local"
-    app_process_role: Literal["api", "ingestor", "all"] = "api"
+    app_process_role: Literal["api", "ingestor", "combined", "all"] = "api"
     node_env: str = "development"
 
     season_year: int = 2026
@@ -80,6 +80,13 @@ class Settings(BaseSettings):
     openf1_rest_include_high_frequency: bool = False
     openf1_mqtt_connect_timeout_seconds: int = Field(default=10, ge=1, le=120)
     openf1_live_catalog_sync_seconds: int = Field(default=60, ge=15, le=900)
+    recent_session_reconciliation_enabled: bool = False
+    recent_session_auto_backfill_enabled: bool = False
+    recent_session_reconciliation_lookback_days: int = Field(default=14, ge=1, le=60)
+    recent_session_provider_grace_minutes: int = Field(default=15, ge=0, le=360)
+    recent_session_reconciliation_interval_seconds: int = Field(default=900, ge=60, le=21600)
+    recent_session_auto_backfill_max_sessions: int = Field(default=1, ge=1, le=5)
+    recent_session_auto_backfill_max_concurrent: int = Field(default=1, ge=1, le=3)
     openf1_live_topics: str = (
         "v1/sessions,v1/drivers,v1/position,v1/intervals,v1/laps,v1/pit,"
         "v1/stints,v1/race_control,v1/weather"
@@ -266,8 +273,16 @@ class Settings(BaseSettings):
 
         if self.openf1_reconnect_base_delay_ms > self.openf1_reconnect_max_delay_ms:
             raise ValueError("OpenF1 reconnect base delay cannot exceed maximum delay")
+        worker_role = self.app_process_role in {"ingestor", "combined", "all"}
         if self.openf1_rest_backfill_enabled and self.app_process_role == "api":
             raise ValueError("API processes cannot enable OpenF1 historical backfill")
+        if self.recent_session_reconciliation_enabled and not worker_role:
+            raise ValueError("Recent-session reconciliation requires ingestor or combined role")
+        if (
+            self.recent_session_auto_backfill_enabled
+            and not self.recent_session_reconciliation_enabled
+        ):
+            raise ValueError("Recent-session auto backfill requires reconciliation to be enabled")
         if self.app_env == "production" and self.app_process_role == "all":
             raise ValueError("APP_PROCESS_ROLE=all is not allowed in production")
         # The singleton lease is a session-scoped advisory lock. Through a
@@ -275,7 +290,7 @@ class Settings(BaseSettings):
         # deployed environment must be given the direct endpoint explicitly.
         if (
             self.app_env in {"staging", "production"}
-            and self.app_process_role in {"ingestor", "all"}
+            and worker_role
             and self.database_migration_url is None
         ):
             raise ValueError(
@@ -366,7 +381,8 @@ class Settings(BaseSettings):
     def async_process_database_url(self) -> str:
         """Choose the DSN that preserves the process role's connection semantics."""
         needs_session_lease = self.app_process_role == "ingestor" or (
-            self.app_process_role == "all" and self.openf1_live_auto_connect
+            self.app_process_role in {"combined", "all"}
+            and (self.openf1_live_auto_connect or self.recent_session_reconciliation_enabled)
         )
         if needs_session_lease:
             return self.async_migration_database_url

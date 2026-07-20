@@ -5,6 +5,9 @@
 How Apex Arena is deployed for the lowest sustainable cost without pretending the
 compromises do not exist.
 
+> Current direction, 2026-07-20: deploy from `main` and use `APP_PROCESS_ROLE=combined`
+> for the one-service backend. The older `APP_PROCESS_ROLE=all` notes are superseded.
+
 Grounded in:
 
 - `backend/app/core/settings.py` — `app_process_role`, `validate_runtime_contract`,
@@ -147,29 +150,28 @@ Consequences worth knowing:
 
 ---
 
-## Mode 1 — LOW-COST INITIAL MODE (one Railway service)
+## Mode 1 — Combined mode (one Railway service)
 
-One Railway service, `APP_PROCESS_ROLE=all`, **one replica**, FastAPI and ingestion in the
-same process. `app/main.py` takes the singleton lease and then starts live services inline:
+One Railway service, `APP_PROCESS_ROLE=combined`, **one replica**, FastAPI and worker duties in
+the same process. `app/main.py` takes the singleton lease before starting live services or
+recent-session reconciliation:
 
 ```python
-if settings.app_process_role == "all" and settings.openf1_live_auto_connect:
+if settings.app_process_role == "combined" and worker_enabled:
     if not await services.database.acquire_ingestor_lease():
         raise RuntimeError("Another Apex Arena ingestor owns the singleton lease")
-    await services.start_live_services()
 ```
 
-**This mode requires `APP_ENV=staging`. It cannot run in production.**
-`validate_runtime_contract` in `settings.py` refuses to construct settings at all:
+This mode is production-capable when `DATABASE_MIGRATION_URL` is set for the direct Neon endpoint
+and replicas stay at 1 while worker duties are enabled. `validate_runtime_contract` refuses an
+API-only process with worker settings:
 
 ```python
-if self.app_env == "production" and self.app_process_role == "all":
-    raise ValueError("APP_PROCESS_ROLE=all is not allowed in production")
+if self.recent_session_reconciliation_enabled and self.app_process_role == "api":
+    raise ValueError("Recent-session reconciliation requires ingestor or combined role")
 ```
 
-The process crashes at import time, not at request time. There is no flag, no override,
-and no environment variable that relaxes this. Combined mode is therefore for **staging or
-a controlled beta only** — never for the production deployment.
+The process fails during settings construction, not after it starts serving requests.
 
 ### Combined mode does take the singleton lease
 
@@ -185,14 +187,11 @@ Two conditions bound that guarantee, and both matter:
   `OPENF1_LIVE_AUTO_CONNECT=true`. A combined container with auto-connect off takes no lease,
   which is correct, because it also ingests nothing.
 - **The lease is only as reliable as the connection under it.** `container.py` selects
-  `async_migration_database_url` for `APP_PROCESS_ROLE=ingestor`; for `all` it uses
-  `async_database_url`. So a combined container takes its session-scoped lock over whatever
-  `DATABASE_URL` points at. If that is a pooled endpoint, the lock is not trustworthy — see
-  [The singleton advisory lease](#the-singleton-advisory-lease). In staging, point
-  `DATABASE_URL` at the Neon **direct** endpoint when running combined mode.
+  `async_migration_database_url` for `APP_PROCESS_ROLE=ingestor` and for `combined` when worker
+  duties are enabled. If that direct endpoint is missing, startup fails before serving traffic.
 
-Settings still requires `DATABASE_MIGRATION_URL` for `APP_PROCESS_ROLE=all` in staging, so
-migrations and any future direct-endpoint use are configured either way.
+Settings requires `DATABASE_MIGRATION_URL` for worker duties in staging or production, so
+migrations and advisory locks are configured on the direct endpoint either way.
 
 Operational discipline still applies:
 
@@ -293,7 +292,7 @@ Mechanics:
 3. The connection is deliberately **kept outside the pool**, stored on
    `_ingestor_lease_connection`, so nothing can return it to the pool and recycle it.
 4. Both ingesting entrypoints treat failure as fatal — `app/ingestor.py` and, for
-   `APP_PROCESS_ROLE=all`, `app/main.py`:
+   `APP_PROCESS_ROLE=combined`, `app/main.py`:
    `raise RuntimeError("Another Apex Arena ingestor owns the singleton lease")`.
    The container exits and Railway's `ON_FAILURE` policy retries.
 5. `release_ingestor_lease` runs `pg_advisory_unlock` and closes the connection; `close()`
@@ -366,12 +365,11 @@ locks, so the pooled endpoint is correct and cheaper there.
 | Allowed with `APP_ENV=production` | **no** — validator rejects it | yes |
 | Neon connections | one pool, one endpoint | two pools; ingestor also holds one lease connection outside its pool |
 
-The honest summary: combined mode saves one container's worth of money and gives up
-isolation — an ingestion crash takes the read path with it, and every redeploy drops every
-open SSE connection. It keeps the singleton lease, but over whichever endpoint `DATABASE_URL`
-names rather than an enforced direct one. That is an acceptable trade for staging and a
-controlled beta. It is not an acceptable trade for production, and the codebase agrees —
-which is why the validator exists. Combined mode remains **staging-only and single-replica**.
+The honest summary: combined mode saves one container's worth of money and gives up isolation.
+A worker crash can take the read path with it, and every redeploy drops every open SSE
+connection. It keeps the singleton lease and uses the direct Neon endpoint when
+`DATABASE_MIGRATION_URL` is configured. Combined mode remains **single-replica while worker
+duties are enabled**.
 
 Other costs this architecture accepts deliberately:
 

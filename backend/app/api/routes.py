@@ -83,6 +83,7 @@ async def health_ready(services: Services) -> JSONResponse:
 
 
 @router.get("/health/provider", response_model=None)
+@router.get("/health/providers", response_model=None, include_in_schema=False)
 async def health_provider(services: Services) -> JSONResponse:
     """Report the latest OpenF1 ingestion state without exposing credentials or tokens."""
     provider: dict[str, object] | None
@@ -96,8 +97,15 @@ async def health_provider(services: Services) -> JSONResponse:
     else:
         provider = services.openf1_live.status()
 
+    live_disabled = (
+        not services.settings.live_mode_enabled
+        or services.settings.openf1_ingestion_mode == "rest"
+        or not services.settings.openf1_live_auto_connect
+    )
     state = str((provider or {}).get("connection_state") or "unknown").upper()
-    healthy = not services.settings.live_mode_enabled or state in {"CONNECTED", "DISABLED"}
+    if live_disabled and state in {"UNKNOWN", "DISCONNECTED"}:
+        state = "DISABLED"
+    healthy = live_disabled or state in {"CONNECTED", "DISABLED"}
     return JSONResponse(
         status_code=status.HTTP_200_OK if healthy else status.HTTP_503_SERVICE_UNAVAILABLE,
         content={
@@ -106,6 +114,7 @@ async def health_provider(services: Services) -> JSONResponse:
             "connection_state": state,
             "current_session_key": (provider or {}).get("current_session_key"),
             "last_event_at": str((provider or {}).get("last_event_at") or "") or None,
+            "reconciliation": services.recent_reconciliation.status,
             "checked_at": datetime.now(UTC).isoformat(),
         },
     )
@@ -182,9 +191,11 @@ async def openf1_backfill_status(
     latest = await services.backfill_jobs.latest()
     live = services.openf1_live.status()
     return {
+        "process_role": services.settings.app_process_role,
         "ingestion_mode": services.settings.openf1_ingestion_mode,
         "mqtt_state": live["connection_state"],
         "rest_backfill_enabled": services.settings.openf1_rest_backfill_enabled,
+        "recent_session_reconciliation": services.recent_reconciliation.status,
         "current_job": backfill_job_status(latest),
         "advisory_lease_owner": services.database.ingestor_lease_owned,
         "last_provider_event_timestamp": live["last_event_at"],

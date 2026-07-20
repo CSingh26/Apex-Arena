@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from sqlalchemy import and_, case, delete, func, or_, select, update
@@ -19,6 +19,7 @@ from app.domain.rooms import (
     RoomMode,
     RoomPlaybackState,
     RoomStatus,
+    SessionType,
     SourceAvailability,
 )
 from app.storage.database import Database
@@ -177,6 +178,68 @@ class SqlRaceRoomRepository:
                 [RaceRoom.model_validate(record, from_attributes=True) for record in records],
                 total,
             )
+
+    async def list_recent_reconciliation_candidates(
+        self,
+        *,
+        now: datetime,
+        lookback_days: int,
+        grace_minutes: int,
+        limit: int,
+    ) -> list[RaceRoom]:
+        """Find completed competitive rooms that may improve after provider delay."""
+
+        lower_bound = now - timedelta(days=lookback_days)
+        upper_bound = now - timedelta(minutes=grace_minutes)
+        statement = (
+            select(RaceRoomRecord)
+            .where(
+                RaceRoomRecord.is_development.is_(False),
+                RaceRoomRecord.session_type.in_(
+                    [
+                        SessionType.QUALIFYING.value,
+                        SessionType.SPRINT_QUALIFYING.value,
+                        SessionType.SPRINT.value,
+                        SessionType.RACE.value,
+                    ]
+                ),
+                RaceRoomRecord.scheduled_start >= lower_bound,
+                RaceRoomRecord.scheduled_start <= upper_bound,
+                or_(
+                    RaceRoomRecord.session_key.is_(None),
+                    RaceRoomRecord.replay_available.is_(False),
+                    RaceRoomRecord.status.in_(
+                        [
+                            RoomStatus.PENDING.value,
+                            RoomStatus.INGESTING.value,
+                            RoomStatus.UNAVAILABLE.value,
+                            RoomStatus.FAILED.value,
+                        ]
+                    ),
+                    RaceRoomRecord.ingestion_status.in_(
+                        [
+                            IngestionStatus.PENDING.value,
+                            IngestionStatus.MATCHING.value,
+                            IngestionStatus.PARTIAL.value,
+                            IngestionStatus.FAILED.value,
+                            IngestionStatus.UNAVAILABLE.value,
+                        ]
+                    ),
+                    RaceRoomRecord.source_availability.in_(
+                        [
+                            SourceAvailability.UNAVAILABLE.value,
+                            SourceAvailability.RESULTS_ONLY.value,
+                            SourceAvailability.TIMING_ONLY.value,
+                        ]
+                    ),
+                ),
+            )
+            .order_by(RaceRoomRecord.scheduled_start.desc(), RaceRoomRecord.slug.asc())
+            .limit(limit)
+        )
+        async with self.database.session_factory() as session:
+            records = (await session.execute(statement)).scalars().all()
+            return [RaceRoom.model_validate(record, from_attributes=True) for record in records]
 
     async def get_room(self, slug: str) -> RaceRoom | None:
         async with self.database.session_factory() as session:

@@ -12,10 +12,11 @@ OpenF1 MQTT -> authenticated backend -> raw + normalized events -> race state
             -> grounded agent debate -> Redis/SSE -> browser Race Room
 ```
 
-The backend connects automatically when `OPENF1_LIVE_AUTO_CONNECT=true` and credentials are
-present. Every 60 seconds the catalog reconciler checks for newly published OpenF1 sessions. Once
-the provider session is matched confidently, the scheduled row becomes a live room and incoming
-MQTT records use its `session_key`.
+The backend connects to MQTT only when `OPENF1_INGESTION_MODE` is not `rest`,
+`OPENF1_LIVE_AUTO_CONNECT=true`, and credentials are present. Recent-session reconciliation is a
+separate REST worker: when enabled in an `ingestor` or `combined` process, it checks completed
+competitive sessions after a provider grace period and upgrades stale `provider_pending` rooms
+after OpenF1 publishes real metadata and endpoint data.
 
 The default live topics cover sessions, drivers, positions, intervals, laps, pits, stints,
 race-control, and weather. High-frequency car/location telemetry is intentionally excluded to
@@ -34,9 +35,10 @@ keep provider load and storage bounded.
 
 ## Missing qualifying data
 
-The previous Qualifying session was not captured because live auto-connect was off. Apex Arena can
-backfill it through the historical REST pipeline if OpenF1 publishes a matching session. If the
-provider does not publish that session or the subscription cannot access it, the UI remains
+The previous Qualifying session may not be available immediately after the flag. Apex Arena keeps
+that room in `provider_pending`, retries within the configured recent-session horizon, and
+backfills it through historical REST only after OpenF1 publishes a confident session match and
+usable endpoint data. If the provider does not publish enough data, the UI remains
 `Provider data not published yet`; the system will not fabricate laps, classifications, or debate.
 
 For the resumable, production-safe recovery procedure, endpoint checkpoints, advisory locking,

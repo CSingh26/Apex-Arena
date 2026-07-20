@@ -35,7 +35,7 @@ def test_combined_role_takes_the_singleton_lease_before_ingesting(
     """Combined mode ingests as well as serves, so it must hold the same lease."""
     combined = settings_with(
         settings,
-        app_process_role="all",
+        app_process_role="combined",
         openf1_live_auto_connect=True,
     )
     with (
@@ -57,7 +57,7 @@ def test_combined_role_refuses_to_ingest_without_the_lease(settings: Settings) -
     """A second combined instance must not open a duplicate MQTT subscription."""
     combined = settings_with(
         settings,
-        app_process_role="all",
+        app_process_role="combined",
         openf1_live_auto_connect=True,
     )
     with (
@@ -73,6 +73,34 @@ def test_combined_role_refuses_to_ingest_without_the_lease(settings: Settings) -
             pass
 
     start.assert_not_awaited()
+
+
+def test_combined_reconciliation_takes_lease_without_live_mqtt(settings: Settings) -> None:
+    combined = settings_with(
+        settings,
+        app_process_role="combined",
+        openf1_ingestion_mode="rest",
+        openf1_live_auto_connect=False,
+        recent_session_reconciliation_enabled=True,
+    )
+    with (
+        patch(
+            "app.services.container.Database.acquire_ingestor_lease",
+            new_callable=AsyncMock,
+            return_value=True,
+        ) as lease,
+        patch("app.main.AppServices.start_live_services", new_callable=AsyncMock) as start,
+        patch(
+            "app.main.AppServices.start_recent_reconciliation",
+            new_callable=AsyncMock,
+        ) as reconciliation,
+    ):
+        with TestClient(create_app(combined)) as client:
+            assert client.get("/health/live").status_code == 200
+
+    lease.assert_awaited_once()
+    start.assert_not_awaited()
+    reconciliation.assert_awaited_once()
 
 
 def test_ingestor_role_owns_live_startup_and_health(settings: Settings) -> None:
