@@ -37,7 +37,7 @@ async def run(args: argparse.Namespace) -> int:
         pool_recycle=settings.db_pool_recycle_seconds,
     )
     try:
-        health = await database.health_check()
+        healthy, health_detail = await database.health_check()
         async with database.session_factory() as session:
             version = (
                 await session.execute(text("select version_num from alembic_version limit 1"))
@@ -54,7 +54,8 @@ async def run(args: argparse.Namespace) -> int:
             "database_host": settings.safe_runtime_metadata["database_host"],
             "environment": settings.app_env,
             "process_role": settings.app_process_role,
-            "healthy": health.healthy,
+            "healthy": healthy,
+            "health_detail": health_detail,
             "alembic_current": version,
             "alembic_expected_head": migration_head(),
             "race_rooms": int(room_count),
@@ -67,7 +68,7 @@ async def run(args: argparse.Namespace) -> int:
                 f"DB healthy={payload['healthy']} alembic={version} "
                 f"rooms={payload['race_rooms']} messages={payload['active_room_messages']}"
             )
-        return 0 if health.healthy and version == payload["alembic_expected_head"] else 2
+        return 0 if healthy and version == payload["alembic_expected_head"] else 2
     finally:
         await database.close()
 
