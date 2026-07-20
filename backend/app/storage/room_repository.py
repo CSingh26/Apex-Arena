@@ -439,14 +439,12 @@ class SqlRaceRoomRepository:
             values = stored_message.model_dump()
             for key in ("topic", "message_type", "confidence", "evidence_status"):
                 values[key] = getattr(stored_message, key).value
-            statement = insert(RoomMessageRecord).values(**values)
-            if stored_message.generation_key:
-                statement = statement.on_conflict_do_nothing(
-                    constraint="uq_room_message_generation_key"
-                )
-            else:
-                statement = statement.on_conflict_do_nothing(constraint="uq_room_trigger_agent")
-            statement = statement.returning(RoomMessageRecord.id)
+            statement = (
+                insert(RoomMessageRecord)
+                .values(**values)
+                .on_conflict_do_nothing()
+                .returning(RoomMessageRecord.id)
+            )
             inserted_id = (await session.execute(statement)).scalar_one_or_none()
             if inserted_id is None:
                 return message, False

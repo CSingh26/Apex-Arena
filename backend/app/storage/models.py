@@ -18,6 +18,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
@@ -332,8 +333,21 @@ class RoomMessageRecord(Base):
     __tablename__ = "room_messages"
     __table_args__ = (
         UniqueConstraint("room_id", "sequence", name="uq_room_message_sequence"),
-        UniqueConstraint("room_id", "trigger_event_id", "agent_id", name="uq_room_trigger_agent"),
-        UniqueConstraint("room_id", "generation_key", name="uq_room_message_generation_key"),
+        Index(
+            "uq_room_message_active_trigger_agent",
+            "room_id",
+            "trigger_event_id",
+            "agent_id",
+            unique=True,
+            postgresql_where=text("archived_at IS NULL"),
+        ),
+        Index(
+            "uq_room_message_active_generation_key",
+            "room_id",
+            "generation_key",
+            unique=True,
+            postgresql_where=text("archived_at IS NULL AND generation_key IS NOT NULL"),
+        ),
         Index("ix_room_messages_room_lap", "room_id", "lap_number"),
         Index("ix_room_messages_room_agent", "room_id", "agent_id"),
         Index("ix_room_messages_created_at", "created_at"),
