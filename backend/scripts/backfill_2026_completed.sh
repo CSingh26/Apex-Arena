@@ -1,6 +1,18 @@
 #!/usr/bin/env bash
 set -u
 
+export APP_ENV=production
+export APP_PROCESS_ROLE=ingestor
+
+export DEBUG_INGESTION_ENABLED=false
+export DEVELOPMENT_FIXTURE_ENABLED=false
+export ROOM_DIAGNOSTICS_ENABLED=false
+
+export OPENF1_INGESTION_MODE=rest
+export OPENF1_LIVE_AUTO_CONNECT=false
+export OPENF1_REST_MAX_CONCURRENT_REQUESTS=1
+export HISTORICAL_PROVIDER_MIN_INTERVAL_MS=250
+
 QUALI_ENDPOINTS="drivers,laps,position,race_control,weather,session_result,starting_grid"
 RACE_ENDPOINTS="drivers,laps,position,intervals,pit,stints,race_control,weather,session_result,starting_grid"
 
