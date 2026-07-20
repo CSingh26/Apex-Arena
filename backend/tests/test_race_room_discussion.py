@@ -48,6 +48,22 @@ class FakeRoomRepository:
         return stored, True
 
 
+class OutcomeRoomRepository(FakeRoomRepository):
+    def __init__(self, outcomes: list[bool]) -> None:
+        super().__init__()
+        self.outcomes = outcomes
+        self.attempts = 0
+
+    async def insert_message(
+        self, message: RoomMessage, evidence: list[MessageEvidence]
+    ) -> tuple[RoomMessage, bool]:
+        self.attempts += 1
+        inserted = self.outcomes.pop(0)
+        if not inserted:
+            return message, False
+        return await super().insert_message(message, evidence)
+
+
 def test_roster_has_five_distinct_enabled_specialists() -> None:
     assert [agent.display_name for agent in DEFAULT_ROOM_AGENTS] == [
         "Mira Vale",
@@ -162,6 +178,72 @@ def test_trigger_dedup_memory_is_bounded() -> None:
     assert evaluator.evaluate(first) is not None
     assert evaluator.evaluate(second) is not None
     assert evaluator.evaluate(first) is not None
+
+
+@pytest.mark.asyncio
+async def test_chain_result_counts_all_inserted_messages() -> None:
+    repository = OutcomeRoomRepository([True, True, True])
+    evaluator = DiscussionTriggerEvaluator(topic_cooldown_seconds=0, agent_cooldown_seconds=0)
+    engine = RaceRoomDiscussionEngine(repository, evaluator)
+    event = race_room_event(RaceEventType.SAFETY_CAR)
+    trigger = evaluator.evaluate(event)
+    assert trigger is not None
+
+    result = await engine._generate_chain(
+        repository.room.id,
+        event,
+        trigger,
+        engine.context_builder.build(event, None),
+    )
+
+    assert result.attempted_count == 3
+    assert result.inserted_count == 3
+    assert result.skipped_count == 0
+    assert len(repository.messages) == 3
+
+
+@pytest.mark.asyncio
+async def test_chain_result_counts_mixed_inserted_and_skipped_messages() -> None:
+    repository = OutcomeRoomRepository([True, False, True])
+    evaluator = DiscussionTriggerEvaluator(topic_cooldown_seconds=0, agent_cooldown_seconds=0)
+    engine = RaceRoomDiscussionEngine(repository, evaluator)
+    event = race_room_event(RaceEventType.SAFETY_CAR)
+    trigger = evaluator.evaluate(event)
+    assert trigger is not None
+
+    result = await engine._generate_chain(
+        repository.room.id,
+        event,
+        trigger,
+        engine.context_builder.build(event, None),
+    )
+
+    assert result.attempted_count == 3
+    assert result.inserted_count == 2
+    assert result.skipped_count == 1
+    assert len(repository.messages) == 2
+
+
+@pytest.mark.asyncio
+async def test_chain_result_counts_existing_primary_as_skipped() -> None:
+    repository = OutcomeRoomRepository([False])
+    evaluator = DiscussionTriggerEvaluator(topic_cooldown_seconds=0, agent_cooldown_seconds=0)
+    engine = RaceRoomDiscussionEngine(repository, evaluator)
+    event = race_room_event(RaceEventType.SAFETY_CAR)
+    trigger = evaluator.evaluate(event)
+    assert trigger is not None
+
+    result = await engine._generate_chain(
+        repository.room.id,
+        event,
+        trigger,
+        engine.context_builder.build(event, None),
+    )
+
+    assert result.attempted_count == 1
+    assert result.inserted_count == 0
+    assert result.skipped_count == 1
+    assert len(repository.messages) == 0
 
 
 def test_fixture_covers_ten_laps_and_critical_moments() -> None:

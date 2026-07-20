@@ -6,6 +6,7 @@ import logging
 import re
 from collections import defaultdict, deque
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from hashlib import sha256
 from typing import Any
 
@@ -56,6 +57,26 @@ class DiscussionMetrics(BaseModel):
     rejected_message_count: int = 0
     deterministic_fallback_count: int = 0
     generation_failure_count: int = 0
+
+
+@dataclass(frozen=True)
+class MessageStoreResult:
+    message: RoomMessage | None
+    attempted_count: int
+    inserted_count: int
+    skipped_count: int
+
+
+@dataclass
+class MessageChainResult:
+    attempted_count: int = 0
+    inserted_count: int = 0
+    skipped_count: int = 0
+
+    def add(self, result: MessageStoreResult) -> None:
+        self.attempted_count += result.attempted_count
+        self.inserted_count += result.inserted_count
+        self.skipped_count += result.skipped_count
 
 
 class GroundingContextBuilder:
@@ -678,15 +699,18 @@ class RaceRoomDiscussionEngine:
         event: NormalizedRaceEvent,
         trigger: DiscussionTrigger,
         context: GroundingContext,
-    ) -> None:
+    ) -> MessageChainResult:
+        result = MessageChainResult()
         primary = await self._build_message(
             room_id, event, trigger, trigger.agent_candidates[0], context
         )
         if primary is None:
-            return
-        primary = await self._store(primary, event, context)
+            return result
+        primary_result = await self._store(primary, event, context)
+        result.add(primary_result)
+        primary = primary_result.message
         if primary is None:
-            return
+            return result
         if trigger.needs_reply and len(trigger.agent_candidates) > 1:
             reply = await self._build_message(
                 room_id,
@@ -697,7 +721,7 @@ class RaceRoomDiscussionEngine:
                 reply_to=primary,
             )
             if reply is not None:
-                await self._store(reply, event, context)
+                result.add(await self._store(reply, event, context))
         if trigger.needs_host_summary and primary.agent_id != "nova":
             summary = await self._build_message(
                 room_id,
@@ -709,7 +733,8 @@ class RaceRoomDiscussionEngine:
                 host_summary=True,
             )
             if summary is not None:
-                await self._store(summary, event, context)
+                result.add(await self._store(summary, event, context))
+        return result
 
     async def _build_message(
         self,
@@ -814,12 +839,17 @@ class RaceRoomDiscussionEngine:
         message: RoomMessage,
         event: NormalizedRaceEvent,
         context: GroundingContext,
-    ) -> RoomMessage | None:
+    ) -> MessageStoreResult:
         stored, inserted = await self.repository.insert_message(
             message, self._evidence(event, message, context)
         )
         if not inserted:
-            return None
+            return MessageStoreResult(
+                message=None,
+                attempted_count=1,
+                inserted_count=0,
+                skipped_count=1,
+            )
         self.metrics.generated_message_count += 1
         self.metrics.deterministic_fallback_count += 1
         if self.publisher is not None:
@@ -827,7 +857,12 @@ class RaceRoomDiscussionEngine:
                 await self.publisher(stored)
             except Exception as exc:
                 logger.error("Room message publication failed error=%s", type(exc).__name__)
-        return stored
+        return MessageStoreResult(
+            message=stored,
+            attempted_count=1,
+            inserted_count=1,
+            skipped_count=0,
+        )
 
     @staticmethod
     def _evidence(

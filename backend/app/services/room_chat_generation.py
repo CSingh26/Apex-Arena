@@ -166,12 +166,9 @@ class HistoricalRoomChatGenerator:
                     continue
                 result.triggers_selected += 1
                 context = engine.context_builder.build(event, None)
-                before = engine.metrics.generated_message_count
-                await engine._generate_chain(room.id, event, trigger, context)
-                inserted = engine.metrics.generated_message_count - before
-                result.messages_inserted += inserted
-                if inserted == 0:
-                    result.messages_skipped += 1
+                chain = await engine._generate_chain(room.id, event, trigger, context)
+                result.messages_inserted += chain.inserted_count
+                result.messages_skipped += chain.skipped_count
             if result.status == ChatGenerationStatus.RUNNING.value:
                 result.status = ChatGenerationStatus.COMPLETED.value
             await self.rooms.mark_generation_status(
