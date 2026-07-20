@@ -11,6 +11,7 @@ RUN addgroup --system apex && adduser --system --ingroup apex apex
 
 COPY pyproject.toml ./
 COPY app ./app
+COPY scripts ./scripts
 COPY migrations ./migrations
 COPY alembic.ini ./
 
