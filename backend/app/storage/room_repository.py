@@ -9,6 +9,7 @@ from sqlalchemy.dialects.postgresql import insert
 
 from app.domain.rooms import (
     AgentProfile,
+    ChatGenerationStatus,
     IngestionStatus,
     MessageEvidence,
     MessageTopic,
@@ -59,10 +60,17 @@ class SqlRaceRoomRepository:
         values["eligibility_status"] = room.eligibility_status.value
         values["ingestion_status"] = room.ingestion_status.value
         values["source_availability"] = room.source_availability.value
+        values["chat_generation_status"] = room.chat_generation_status.value
         values["agent_count"] = len(agent_ids)
         dynamic_fields = {
             "id",
             "message_count",
+            "generated_message_count",
+            "last_generated_sequence",
+            "chat_generation_status",
+            "generation_error",
+            "generation_started_at",
+            "generation_completed_at",
             "current_lap",
             "last_event_at",
             "created_at",
@@ -267,6 +275,55 @@ class SqlRaceRoomRepository:
                 else None
             )
 
+    async def list_chat_generation_candidates(
+        self,
+        *,
+        season: int,
+        completed_only: bool = True,
+        room_slug: str | None = None,
+        limit: int | None = None,
+    ) -> list[RaceRoom]:
+        filters = [
+            RaceRoomRecord.season == season,
+            RaceRoomRecord.is_development.is_(False),
+            RaceRoomRecord.session_key.is_not(None),
+            RaceRoomRecord.session_type.in_(
+                [
+                    SessionType.QUALIFYING.value,
+                    SessionType.SPRINT_QUALIFYING.value,
+                    SessionType.SPRINT.value,
+                    SessionType.RACE.value,
+                ]
+            ),
+        ]
+        if completed_only:
+            filters.extend(
+                [
+                    RaceRoomRecord.scheduled_start <= datetime.now(UTC),
+                    RaceRoomRecord.status.in_(
+                        [
+                            RoomStatus.READY.value,
+                            RoomStatus.COMPLETED.value,
+                            RoomStatus.REPLAYING.value,
+                        ]
+                    ),
+                    RaceRoomRecord.replay_available.is_(True),
+                    RaceRoomRecord.source_availability != SourceAvailability.UNAVAILABLE.value,
+                ]
+            )
+        if room_slug:
+            filters.append(RaceRoomRecord.slug == room_slug)
+        statement = (
+            select(RaceRoomRecord)
+            .where(*filters)
+            .order_by(RaceRoomRecord.scheduled_start.asc(), RaceRoomRecord.session_type.asc())
+        )
+        if limit is not None:
+            statement = statement.limit(limit)
+        async with self.database.session_factory() as session:
+            records = (await session.execute(statement)).scalars().all()
+            return [RaceRoom.model_validate(record, from_attributes=True) for record in records]
+
     async def bind_provider_session(
         self, slug: str, *, meeting_key: str | None, session_key: str
     ) -> RaceRoom:
@@ -382,12 +439,14 @@ class SqlRaceRoomRepository:
             values = stored_message.model_dump()
             for key in ("topic", "message_type", "confidence", "evidence_status"):
                 values[key] = getattr(stored_message, key).value
-            statement = (
-                insert(RoomMessageRecord)
-                .values(**values)
-                .on_conflict_do_nothing(constraint="uq_room_trigger_agent")
-                .returning(RoomMessageRecord.id)
-            )
+            statement = insert(RoomMessageRecord).values(**values)
+            if stored_message.generation_key:
+                statement = statement.on_conflict_do_nothing(
+                    constraint="uq_room_message_generation_key"
+                )
+            else:
+                statement = statement.on_conflict_do_nothing(constraint="uq_room_trigger_agent")
+            statement = statement.returning(RoomMessageRecord.id)
             inserted_id = (await session.execute(statement)).scalar_one_or_none()
             if inserted_id is None:
                 return message, False
@@ -401,6 +460,9 @@ class SqlRaceRoomRepository:
                 .where(RaceRoomRecord.id == message.room_id)
                 .values(
                     message_count=RaceRoomRecord.message_count + 1,
+                    generated_message_count=RaceRoomRecord.generated_message_count + 1,
+                    last_generated_sequence=sequence,
+                    generation_version=stored_message.generation_version,
                     current_lap=func.coalesce(message.lap_number, RaceRoomRecord.current_lap),
                     updated_at=datetime.now(UTC),
                 )
@@ -425,6 +487,7 @@ class SqlRaceRoomRepository:
         filters = [
             RoomMessageRecord.room_id == room_id,
             RoomMessageRecord.sequence > after_sequence,
+            RoomMessageRecord.archived_at.is_(None),
         ]
         if agent_id:
             filters.append(RoomMessageRecord.agent_id == agent_id)
@@ -466,6 +529,7 @@ class SqlRaceRoomRepository:
         statement = select(func.count(RoomMessageRecord.id)).where(
             RoomMessageRecord.room_id == room_id,
             RoomMessageRecord.id == message_id,
+            RoomMessageRecord.archived_at.is_(None),
         )
         async with self.database.session_factory() as session:
             return bool((await session.execute(statement)).scalar_one())
@@ -474,6 +538,7 @@ class SqlRaceRoomRepository:
         statement = select(RoomMessageRecord).where(
             RoomMessageRecord.room_id == room_id,
             RoomMessageRecord.id == message_id,
+            RoomMessageRecord.archived_at.is_(None),
         )
         async with self.database.session_factory() as session:
             record = (await session.execute(statement)).scalar_one_or_none()
@@ -548,6 +613,7 @@ class SqlRaceRoomRepository:
             )
             .where(
                 RoomMessageRecord.room_id == room_id,
+                RoomMessageRecord.archived_at.is_(None),
                 NormalizedRaceEventRecord.session_key == session_key,
                 NormalizedRaceEventRecord.sequence_number <= event_sequence,
             )
@@ -573,6 +639,96 @@ class SqlRaceRoomRepository:
                 update(RaceRoomRecord).where(RaceRoomRecord.id == room_id).values(**values)
             )
             await session.commit()
+
+    async def mark_generation_status(
+        self,
+        room_id: UUID,
+        status: ChatGenerationStatus,
+        *,
+        generation_version: str,
+        error: str | None = None,
+    ) -> None:
+        now = datetime.now(UTC)
+        values: dict[str, object | None] = {
+            "chat_generation_status": status.value,
+            "generation_version": generation_version,
+            "generation_error": error[:500] if error else None,
+            "updated_at": now,
+        }
+        if status is ChatGenerationStatus.RUNNING:
+            values["generation_started_at"] = now
+            values["generation_completed_at"] = None
+        if status in {
+            ChatGenerationStatus.COMPLETED,
+            ChatGenerationStatus.PARTIAL,
+            ChatGenerationStatus.FAILED,
+            ChatGenerationStatus.SKIPPED,
+        }:
+            values["generation_completed_at"] = now
+        async with self.database.session_factory() as session:
+            await session.execute(
+                update(RaceRoomRecord).where(RaceRoomRecord.id == room_id).values(**values)
+            )
+            await session.commit()
+
+    async def archive_generated_messages(self, room_id: UUID, generation_version: str) -> int:
+        """Soft-hide one generated version without deleting evidence or user content."""
+        now = datetime.now(UTC)
+        async with self.database.session_factory() as session:
+            result = await session.execute(
+                update(RoomMessageRecord)
+                .where(
+                    RoomMessageRecord.room_id == room_id,
+                    RoomMessageRecord.generation_version == generation_version,
+                    RoomMessageRecord.generated_by.is_not(None),
+                    RoomMessageRecord.archived_at.is_(None),
+                )
+                .values(archived_at=now)
+            )
+            active_count = int(
+                (
+                    await session.execute(
+                        select(func.count(RoomMessageRecord.id)).where(
+                            RoomMessageRecord.room_id == room_id,
+                            RoomMessageRecord.archived_at.is_(None),
+                        )
+                    )
+                ).scalar_one()
+            )
+            generated_count = int(
+                (
+                    await session.execute(
+                        select(func.count(RoomMessageRecord.id)).where(
+                            RoomMessageRecord.room_id == room_id,
+                            RoomMessageRecord.archived_at.is_(None),
+                            RoomMessageRecord.generated_by.is_not(None),
+                        )
+                    )
+                ).scalar_one()
+            )
+            last_sequence = int(
+                (
+                    await session.execute(
+                        select(func.max(RoomMessageRecord.sequence)).where(
+                            RoomMessageRecord.room_id == room_id,
+                            RoomMessageRecord.archived_at.is_(None),
+                        )
+                    )
+                ).scalar_one_or_none()
+                or 0
+            )
+            await session.execute(
+                update(RaceRoomRecord)
+                .where(RaceRoomRecord.id == room_id)
+                .values(
+                    message_count=active_count,
+                    generated_message_count=generated_count,
+                    last_generated_sequence=last_sequence,
+                    updated_at=now,
+                )
+            )
+            await session.commit()
+            return int(result.rowcount or 0)
 
     async def reset_discussion(self, room_id: UUID) -> None:
         message_ids = select(RoomMessageRecord.id).where(RoomMessageRecord.room_id == room_id)

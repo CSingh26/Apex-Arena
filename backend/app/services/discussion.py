@@ -6,6 +6,7 @@ import logging
 import re
 from collections import defaultdict, deque
 from collections.abc import Awaitable, Callable
+from hashlib import sha256
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -629,6 +630,7 @@ class RaceRoomDiscussionEngine:
         evaluator: DiscussionTriggerEvaluator,
         publisher: RoomPublisher | None = None,
         state_reader: StateReader | None = None,
+        generation_version: str = "rooms-v4-stat-debate",
     ) -> None:
         self.repository = repository
         self.evaluator = evaluator
@@ -639,6 +641,7 @@ class RaceRoomDiscussionEngine:
         self.context_builder = GroundingContextBuilder()
         self.message_shaper = PublicMessageShaper()
         self.metrics = DiscussionMetrics()
+        self.generation_version = generation_version
         self._locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         self._recent_content: dict[str, deque[str]] = defaultdict(lambda: deque(maxlen=50))
 
@@ -760,10 +763,51 @@ class RaceRoomDiscussionEngine:
             reply_to_message_id=reply_to.id if reply_to else None,
             trigger_event_id=event.id,
             generated_by="deterministic",
-            prompt_version="rooms-v4-stat-debate",
+            prompt_version=self.generation_version,
+            generation_key=self._generation_key(
+                room_id=room_id,
+                event=event,
+                agent_id=agent_id,
+                message_type=generated.message_type.value,
+                role="host" if host_summary else ("reply" if reply_to else "primary"),
+                generation_version=self.generation_version,
+            ),
+            generation_version=self.generation_version,
+            source_provider=event.source,
+            source_reference=str(event.id),
+            generation_metadata={
+                "event_sequence": event.sequence_number,
+                "event_type": event.event_type.value,
+                "dedup_key": event.dedup_key,
+                "trigger_priority": trigger.priority.value,
+                "role": "host" if host_summary else ("reply" if reply_to else "primary"),
+            },
         )
         self._recent_content[str(room_id)].append(fingerprint)
         return message
+
+    @staticmethod
+    def _generation_key(
+        *,
+        room_id: Any,
+        event: NormalizedRaceEvent,
+        agent_id: str,
+        message_type: str,
+        role: str,
+        generation_version: str,
+    ) -> str:
+        material = "|".join(
+            [
+                str(room_id),
+                str(event.id),
+                event.dedup_key,
+                agent_id,
+                message_type,
+                role,
+                generation_version,
+            ]
+        )
+        return sha256(material.encode("utf-8")).hexdigest()
 
     async def _store(
         self,

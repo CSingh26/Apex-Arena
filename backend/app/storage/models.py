@@ -266,6 +266,7 @@ class RaceRoomRecord(Base, TimestampMixin):
         Index("ix_race_rooms_session_type", "session_type"),
         Index("ix_race_rooms_eligibility_status", "eligibility_status"),
         Index("ix_race_rooms_ingestion_status", "ingestion_status"),
+        Index("ix_race_rooms_chat_generation_status", "chat_generation_status"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
@@ -298,6 +299,17 @@ class RaceRoomRecord(Base, TimestampMixin):
     telemetry_quality: Mapped[str] = mapped_column(String(30), default="unknown")
     message_count: Mapped[int] = mapped_column(Integer, default=0)
     agent_count: Mapped[int] = mapped_column(Integer, default=0)
+    chat_generation_status: Mapped[str] = mapped_column(String(30), default="pending")
+    generated_message_count: Mapped[int] = mapped_column(Integer, default=0)
+    last_generated_sequence: Mapped[int] = mapped_column(Integer, default=0)
+    generation_version: Mapped[str] = mapped_column(String(80), default="rooms-v1")
+    generation_error: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    generation_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    generation_completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     last_event_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     is_featured: Mapped[bool] = mapped_column(Boolean, default=False)
     is_development: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -321,9 +333,13 @@ class RoomMessageRecord(Base):
     __table_args__ = (
         UniqueConstraint("room_id", "sequence", name="uq_room_message_sequence"),
         UniqueConstraint("room_id", "trigger_event_id", "agent_id", name="uq_room_trigger_agent"),
+        UniqueConstraint("room_id", "generation_key", name="uq_room_message_generation_key"),
         Index("ix_room_messages_room_lap", "room_id", "lap_number"),
         Index("ix_room_messages_room_agent", "room_id", "agent_id"),
         Index("ix_room_messages_created_at", "created_at"),
+        Index("ix_room_messages_generation_version", "room_id", "generation_version"),
+        Index("ix_room_messages_source_reference", "source_provider", "source_reference"),
+        Index("ix_room_messages_archived_at", "archived_at"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
@@ -350,6 +366,12 @@ class RoomMessageRecord(Base):
     generated_by: Mapped[str] = mapped_column(String(40))
     model_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
     prompt_version: Mapped[str] = mapped_column(String(40))
+    generation_key: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    generation_version: Mapped[str] = mapped_column(String(80), default="rooms-v1")
+    source_provider: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    source_reference: Mapped[str | None] = mapped_column(String(180), nullable=True)
+    generation_metadata: Mapped[dict[str, Any]] = mapped_column(JSON_TYPE, default=dict)
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

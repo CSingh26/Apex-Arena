@@ -105,6 +105,15 @@ class SourceAvailability(StrEnum):
     UNAVAILABLE = "unavailable"
 
 
+class ChatGenerationStatus(StrEnum):
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    PARTIAL = "partial"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+
+
 class MessageTopic(StrEnum):
     STRATEGY = "strategy"
     PACE = "pace"
@@ -191,6 +200,13 @@ class RaceRoom(BaseModel):
     telemetry_quality: str = "unknown"
     message_count: int = 0
     agent_count: int = 0
+    chat_generation_status: ChatGenerationStatus = ChatGenerationStatus.PENDING
+    generated_message_count: int = 0
+    last_generated_sequence: int = 0
+    generation_version: str = "rooms-v1"
+    generation_error: str | None = None
+    generation_started_at: datetime | None = None
+    generation_completed_at: datetime | None = None
     last_event_at: datetime | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
@@ -256,6 +272,12 @@ class RoomMessage(BaseModel):
     generated_by: str = "deterministic"
     model_name: str | None = None
     prompt_version: str = "rooms-v1"
+    generation_key: str | None = None
+    generation_version: str = "rooms-v1"
+    source_provider: str | None = None
+    source_reference: str | None = None
+    generation_metadata: dict[str, Any] = Field(default_factory=dict)
+    archived_at: datetime | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
