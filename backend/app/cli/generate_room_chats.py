@@ -6,6 +6,7 @@ import asyncio
 import json
 import sys
 
+from app.cli.safe_errors import format_safe_cli_error
 from app.core.logging import configure_logging
 from app.core.settings import Settings
 from app.services.container import AppServices
@@ -80,7 +81,7 @@ def main() -> None:
     try:
         code = asyncio.run(run(parser().parse_args()))
     except Exception as exc:
-        print(f"Generate room chats failed safely: {type(exc).__name__}", file=sys.stderr)
+        print(format_safe_cli_error("Generate room chats failed safely", exc), file=sys.stderr)
         code = 1
     raise SystemExit(code)
 

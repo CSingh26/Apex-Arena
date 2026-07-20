@@ -7,6 +7,7 @@ import json
 import sys
 from datetime import UTC, datetime
 
+from app.cli.safe_errors import format_safe_cli_error
 from app.core.logging import configure_logging
 from app.core.settings import Settings
 from app.services.container import AppServices
@@ -39,7 +40,9 @@ async def run(args: argparse.Namespace) -> int:
             include_development=True,
         )
         if not args.dry_run:
-            await services.rooms.force_sync(force_refresh=args.force_refresh)
+            if args.force_refresh:
+                services.rooms.invalidate_catalog()
+            await services.rooms.force_sync()
         rooms, total = await services.room_repository.list_rooms(
             season=args.season,
             limit=500,
@@ -74,7 +77,7 @@ def main() -> None:
     try:
         code = asyncio.run(run(parser().parse_args()))
     except Exception as exc:
-        print(f"Build race rooms failed safely: {type(exc).__name__}", file=sys.stderr)
+        print(format_safe_cli_error("Build race rooms failed safely", exc), file=sys.stderr)
         code = 1
     raise SystemExit(code)
 

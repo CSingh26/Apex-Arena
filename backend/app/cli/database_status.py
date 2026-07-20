@@ -9,6 +9,7 @@ from pathlib import Path
 
 from sqlalchemy import text
 
+from app.cli.safe_errors import format_safe_cli_error
 from app.core.logging import configure_logging
 from app.core.settings import Settings
 from app.storage.database import Database
@@ -77,7 +78,7 @@ def main() -> None:
     try:
         code = asyncio.run(run(parser().parse_args()))
     except Exception as exc:
-        print(f"Database status failed safely: {type(exc).__name__}", file=sys.stderr)
+        print(format_safe_cli_error("Database status failed safely", exc), file=sys.stderr)
         code = 1
     raise SystemExit(code)
 
