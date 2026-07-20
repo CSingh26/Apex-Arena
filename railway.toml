@@ -20,7 +20,7 @@ dockerfilePath = "backend/Dockerfile"
 
 [deploy]
 # The role is chosen by APP_PROCESS_ROLE; one entrypoint serves every role.
-startCommand = "python -m app.runtime"
+startCommand = "bash -lc 'if [ \"$RUN_HISTORICAL_BACKFILL\" = \"true\" ]; then bash scripts/backfill_2026_completed.sh; else python -m app.runtime; fi'"
 # Exempt from proxy-token enforcement so the platform probe can reach it.
 healthcheckPath = "/health/live"
 healthcheckTimeout = 30
