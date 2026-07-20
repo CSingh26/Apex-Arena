@@ -20,6 +20,7 @@ from app.api.room_schemas import (
     ReplayResponse,
     RoomDiagnosticsResponse,
     RoomGenerationResponse,
+    RoomGenerationStatusResponse,
     RoomMessagesResponse,
 )
 from app.api.room_streaming import race_room_stream
@@ -196,6 +197,27 @@ async def race_room_detail(room_slug: str, services: Services) -> RaceRoomDetail
         data_notice=notices[room.source_availability],
         diagnostics_available=(
             services.settings.app_env != "production" or services.settings.room_diagnostics_enabled
+        ),
+    )
+
+
+@router.get("/{room_slug}/generation-status", response_model=RoomGenerationStatusResponse)
+async def room_generation_status(
+    room_slug: str, services: Services
+) -> RoomGenerationStatusResponse:
+    room = await require_room(room_slug, services)
+    return RoomGenerationStatusResponse(
+        room_slug=room.slug,
+        status=room.chat_generation_status.value,
+        generation_version=room.generation_version,
+        generated_message_count=room.generated_message_count,
+        last_generated_sequence=room.last_generated_sequence,
+        generation_error=room.generation_error,
+        generation_started_at=(
+            room.generation_started_at.isoformat() if room.generation_started_at else None
+        ),
+        generation_completed_at=(
+            room.generation_completed_at.isoformat() if room.generation_completed_at else None
         ),
     )
 

@@ -48,6 +48,17 @@ class RoomMessagesResponse(BaseModel):
     next_cursor: int | None
 
 
+class RoomGenerationStatusResponse(BaseModel):
+    room_slug: str
+    status: str
+    generation_version: str
+    generated_message_count: int
+    last_generated_sequence: int
+    generation_error: str | None = None
+    generation_started_at: str | None = None
+    generation_completed_at: str | None = None
+
+
 class MessageEvidenceResponse(BaseModel):
     message_id: UUID
     evidence: list[MessageEvidence]

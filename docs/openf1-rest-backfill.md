@@ -186,3 +186,62 @@ Rollback is operational: stop the CLI, set `OPENF1_LIVE_AUTO_CONNECT=false`, lea
 `OPENF1_REST_BACKFILL_ENABLED=false`, and inspect the durable job. Resume later. Do not downgrade
 the migration or delete provider events; finalization never replaces a better availability state
 with a worse one.
+
+## Production race-room chat build
+
+Historical chat generation is now an explicit database job. The frontend reads persisted
+`room_messages` only; normal page requests do not generate conversations. This keeps production
+traffic predictable and makes every replay resumable.
+
+Recommended operator sequence:
+
+```bash
+python -m app.cli.database_status --json-summary
+python -m app.cli.build_race_rooms --season 2026 --completed-only --json-summary --force-refresh
+python -m app.cli.generate_room_chats \
+  --season 2026 \
+  --room-slug 2026-australian-grand-prix-race \
+  --completed-only \
+  --dry-run \
+  --json-summary
+```
+
+If the single-room dry run looks correct and the room already has normalized OpenF1 events, run it
+for real:
+
+```bash
+python -m app.cli.generate_room_chats \
+  --season 2026 \
+  --room-slug 2026-australian-grand-prix-race \
+  --completed-only \
+  --json-summary
+```
+
+Only after verifying that room through the public API should the full-season script be used:
+
+```bash
+backend/scripts/build_2026_rooms_and_chats.sh
+```
+
+Safety properties:
+
+- requires `APP_ENV=production`, `DATABASE_URL`, and `DATABASE_MIGRATION_URL`;
+- refuses obvious local database URLs;
+- runs migrations before generating chats;
+- creates rooms only through the reviewed room-catalog service;
+- selects completed competitive sessions only when `--completed-only` is present;
+- generates from persisted `normalized_race_events`, not from frontend page views;
+- stores a deterministic `generation_key` per room/event/agent/version so reruns are idempotent;
+- soft-archives generated messages for the selected version when `--force-regenerate` is used,
+  preserving evidence and non-generated content.
+
+Useful status query:
+
+```sql
+SELECT slug, session_type, status, ingestion_status, replay_available,
+       chat_generation_status, generated_message_count,
+       last_generated_sequence, generation_version, generation_error
+FROM race_rooms
+WHERE season = 2026
+ORDER BY scheduled_start, session_type;
+```
