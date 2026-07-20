@@ -149,6 +149,11 @@ jobs:
             if curl --fail --silent --show-error \
               --request POST \
               --header 'X-Internal-API-Key: apex-arena-ci-release' \
+              http://localhost:8764/api/v1/race-rooms/sync \
+              > /dev/null && \
+              curl --fail --silent --show-error \
+              --request POST \
+              --header 'X-Internal-API-Key: apex-arena-ci-release' \
               http://localhost:8764/api/v1/race-rooms/day3-validation-room/generate \
               > /dev/null; then
               exit 0
