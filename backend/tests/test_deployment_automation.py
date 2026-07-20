@@ -229,6 +229,7 @@ def test_historical_workflow_is_manual_only() -> None:
     text = (REPO_ROOT / ".github/workflows/run-historical-chat-build.yml").read_text()
 
     assert "workflow_dispatch:" in text
+    assert 'name: "observant-freedom / production"' in text
     assert "push:" not in text
     assert "scripts/deploy_railway.sh historical" in text
 
@@ -237,6 +238,7 @@ def test_api_workflow_deploys_only_api_service() -> None:
     text = (REPO_ROOT / ".github/workflows/deploy-railway.yml").read_text()
 
     assert "push:" in text
+    assert 'name: "observant-freedom / production"' in text
     assert "scripts/deploy_railway.sh api" in text
     assert "deploy_railway.sh historical" not in text
     assert "apex-arena-historical-chat" not in text

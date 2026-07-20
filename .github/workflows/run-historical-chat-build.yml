@@ -36,7 +36,8 @@ jobs:
   deploy-historical-service:
     name: Deploy apex-arena-historical-chat
     runs-on: ubuntu-latest
-    environment: production
+    environment:
+      name: "observant-freedom / production"
     env:
       RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
       RAILWAY_PROJECT_ID: ${{ secrets.RAILWAY_PROJECT_ID }}
