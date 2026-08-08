@@ -39,39 +39,25 @@ Pick the Neon and Upstash regions first: the Railway region should match them
 
 ---
 
-## 2. Create the Railway project and use the verified GHCR image
+## 2. Create the Railway project and connect GitHub
 
 1. Create a new Railway project (empty, not from a template).
-2. **New → Docker Image** and use:
-
-   ```text
-   ghcr.io/csingh26/apex-arena-backend:main
-   ```
-
-   The image is published only after the GitHub `Verify and publish` workflow succeeds on
-   `main`; the same workflow path also keeps immutable full-SHA tags for rollback.
-3. If the package is private, configure Railway registry credentials for GHCR with a GitHub
-   token that has `read:packages`. The cheaper path is to make the backend package public after
-   the first successful publish.
+2. **New → GitHub Repo**, select `CSingh26/Apex-Arena`, and watch the `main` branch.
+3. Configure the service-specific root and manifest described below. Railway then builds each
+   accepted `main` update directly from the repository.
 4. Do not attach a Railway PostgreSQL or Redis plugin. Both datastores are external
    (Neon and Upstash) and adding Railway equivalents only duplicates spend.
+
+GitHub Actions also publishes verified GHCR images and immutable SHA tags. They remain useful as
+release artifacts and emergency rollback inputs, but they are not the normal Railway deployment
+trigger.
 
 ---
 
 ## 3. Service source settings
 
-The recommended production source is the GHCR image above, so Railway should not build from
-the GitHub branch for the combined service. Keep the service source pointed at:
-
-```text
-ghcr.io/csingh26/apex-arena-backend:main
-```
-
-For exact rollback, switch the source to the full commit SHA tag that GitHub Actions publishes
-beside `main`.
-
-If you deliberately fall back to Railway building from GitHub, apply these to **every** backend
-service you create, in *Settings → Build*:
+The production source is the connected GitHub `main` branch. Apply these settings to **every**
+backend service in *Settings → Build*:
 
 | Setting | Value | Why |
 | --- | --- | --- |
@@ -79,7 +65,7 @@ service you create, in *Settings → Build*:
 | Builder | Dockerfile | Reproducible, non-root, and identical to the image CI builds |
 | Dockerfile path | `Dockerfile` (relative to the `backend` root directory) | With the root directory set to `backend`, the path is relative to it |
 
-The tracked manifests carry the same Dockerfile build values for branch-based fallback deploys:
+The tracked manifests carry the same Dockerfile build values for GitHub-connected deploys:
 
 - [`deploy/railway/api.toml`](../deploy/railway/api.toml) — API service (recommended production)
 - [`deploy/railway/ingestor.toml`](../deploy/railway/ingestor.toml) — ingestor service (recommended production)
@@ -354,14 +340,12 @@ restart.
 
 ## 13. Deploy triggers
 
-- Railway redeploys on every push to the watched branch by default. For production, disable
-  automatic deploys and promote deliberately, so that a migration can be run *before* the
-  new code rolls out.
+- Railway deploys every push to the watched `main` branch through its GitHub integration. Keep
+  automatic deploys enabled; the repository does not run a second Railway CLI deployment.
 - Deploy the API and ingestor services from the same commit. They share one image and one
   database schema; running them from different commits across a migration is unsupported.
-- CI in this repository gates deployment jobs behind opt-in flags
-  (`RAILWAY_DEPLOY_ENABLED` / `VERCEL_APEX_DEPLOY_ENABLED`), so merging alone does not
-  deploy anything.
+- CI validates builds and deployment configuration. Railway itself observes the accepted GitHub
+  push and deploys it; no `RAILWAY_TOKEN`, deploy workflow, or opt-in Railway flag is required.
 - Prefer a restart-style rollout over an overlapping one for the ingestor and for combined
   mode. An overlapping deploy briefly runs two containers; the lease makes that safe for
   both the dedicated ingestor and `APP_PROCESS_ROLE=combined` (the new instance fails to start

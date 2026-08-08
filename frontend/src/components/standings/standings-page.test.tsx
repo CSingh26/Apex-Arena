@@ -47,14 +47,15 @@ describe("StandingsPage", () => {
     const user = userEvent.setup();
     render(<StandingsPage />);
 
+    expect(document.getElementById("main-content")).toBeInTheDocument();
     expect(screen.getByText("Loading championship standings")).toBeInTheDocument();
-    expect(await screen.findByText("Live / provisional")).toBeVisible();
-    const driverRows = document.querySelectorAll(".standing-row");
-    expect(within(driverRows[0] as HTMLElement).getByText("Alex Rapid")).toBeVisible();
-    expect(within(driverRows[0] as HTMLElement).getByLabelText("Up 2 places")).toHaveTextContent("↑ 2");
+    expect(await screen.findByText("Live · Provisional")).toBeVisible();
+    const driverRows = screen.getAllByTestId("driver-standing");
+    expect(within(driverRows[0]).getByText("Alex Rapid")).toBeVisible();
+    expect(within(driverRows[0]).getByLabelText("Up 2 places")).toHaveTextContent("↑ 2");
 
-    await user.click(within(driverRows[0] as HTMLElement).getByRole("button"));
-    expect(screen.getByText("Race performance")).toBeVisible();
+    await user.click(within(driverRows[0]).getByRole("button"));
+    expect(screen.getByText("Race pace")).toBeVisible();
     expect(screen.getByText("Q3 appearances")).toBeVisible();
     expect(screen.getByText("Sprint")).toBeVisible();
 
@@ -75,11 +76,19 @@ describe("StandingsPage", () => {
     expect(screen.getByLabelText("Alex Rapid portrait unavailable")).toHaveTextContent("RAP");
   });
 
+  it("falls back to a team monogram when a constructor logo fails", async () => {
+    mockSuccess();
+    render(<StandingsPage />);
+    const image = (await screen.findAllByAltText("Velocity logo"))[0];
+    fireEvent.error(image);
+    expect(screen.getByLabelText("Velocity logo unavailable")).toHaveTextContent("VE");
+  });
+
   it("renders a recoverable unavailable state", async () => {
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("Feed offline")));
     render(<StandingsPage />);
     expect(await screen.findByText("The championship feed is taking a pit stop.")).toBeVisible();
-    expect(screen.getByText("Feed offline")).toBeVisible();
+    expect(screen.getByText(/couldn’t reach the championship feed/i)).toBeVisible();
     expect(screen.getByRole("button", { name: "Try again" })).toBeEnabled();
   });
 
@@ -95,8 +104,18 @@ describe("StandingsPage", () => {
       ? Promise.reject(new Error("Constructor feed offline"))
       : Promise.resolve(jsonResponse({ metadata: { ...metadata, live: false, provisional: false }, standings: [driver] }))));
     render(<StandingsPage />);
-    expect(await screen.findByText("Some championship data is temporarily unavailable")).toBeVisible();
+    expect(await screen.findByText(/Some championship data is temporarily unavailable/)).toBeVisible();
     expect(screen.getAllByText("Alex Rapid").length).toBeGreaterThan(0);
+  });
+
+  it("clearly labels a stale snapshot", async () => {
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => Promise.resolve(jsonResponse({
+      metadata: { ...metadata, live: false, provisional: false, stale: true },
+      standings: String(input).includes("constructors") ? [constructor] : [driver],
+    }))));
+    render(<StandingsPage />);
+    expect(await screen.findByText("Last available snapshot")).toBeVisible();
+    expect(screen.getByText(/Live data is delayed/)).toBeVisible();
   });
 
   it("uses accessible, correctly oriented movement labels", () => {
@@ -104,5 +123,16 @@ describe("StandingsPage", () => {
     expect(movementLabel(-2)).toBe("Down 2 places");
     expect(movementLabel(0)).toBe("No position change");
     expect(movementLabel(null)).toBe("Movement unavailable");
+  });
+
+  it("supports arrow-key tab navigation", async () => {
+    mockSuccess();
+    const user = userEvent.setup();
+    render(<StandingsPage />);
+    const driversTab = await screen.findByRole("tab", { name: /Drivers/ });
+    driversTab.focus();
+    await user.keyboard("{ArrowRight}");
+    expect(screen.getByRole("tab", { name: /Constructors/ })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("tab", { name: /Constructors/ })).toHaveFocus();
   });
 });

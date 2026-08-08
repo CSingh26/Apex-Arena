@@ -23,6 +23,8 @@ describe("RoomContext", () => {
     expect(screen.getByText("1,008.2 mbar")).toBeInTheDocument();
     expect(screen.getByText("3.4 m/s")).toBeInTheDocument();
     expect(screen.getByText("SW · 247°")).toBeInTheDocument();
+    expect(screen.getByText("Track dossier", { selector: "b" }).closest("details")).not.toHaveAttribute("open");
+    expect(screen.getByText("Track weather", { selector: "b" }).closest("details")).not.toHaveAttribute("open");
   });
 
   it("keeps a useful weather panel before OpenF1 publishes a session", () => {

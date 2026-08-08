@@ -10,6 +10,7 @@ import { roomMessageTime } from "@/lib/room-state";
 const TOPICS: MessageTopic[] = ["strategy", "pace", "racecraft", "incident", "race_control", "weather", "pit_stop", "tyres", "championship", "summary", "session"];
 const MESSAGE_TYPES: MessageType[] = ["observation", "analysis", "question", "reply", "agreement", "disagreement", "correction", "summary", "uncertainty_notice"];
 const MAX_RENDERED_MESSAGES = 300;
+const PRIORITY_TOPICS = new Set<MessageTopic>(["incident", "race_control", "pit_stop", "weather"]);
 const AGENT_SIDES: Record<string, "left" | "right" | "host"> = {
   "mira-vale": "right",
   "theo-voss": "left",
@@ -123,10 +124,12 @@ export function MessageTimeline({ messages, agents, selectedAgent, totalLaps, se
         const parent = message.reply_to_message_id ? messagesById.get(message.reply_to_message_id) : undefined;
         const parentAgent = parent ? agentsById.get(parent.agent_id) : undefined;
         const side = AGENT_SIDES[message.agent_id] ?? (message.sequence % 2 ? "left" : "right");
-        return <article className={`message message--${message.message_type} message--side-${side}`} data-testid="room-message" data-message-sequence={message.sequence} data-agent-id={message.agent_id} data-topic={message.topic} data-message-type={message.message_type} data-message-side={side} data-accent={agent?.ui_accent_key} key={message.id}>
+        const priority = PRIORITY_TOPICS.has(message.topic) || ["summary", "correction", "uncertainty_notice"].includes(message.message_type);
+        return <article className={`message message--${message.message_type} message--side-${side} ${priority ? "message--priority" : ""}`} data-testid="room-message" data-message-sequence={message.sequence} data-agent-id={message.agent_id} data-topic={message.topic} data-message-type={message.message_type} data-message-side={side} data-accent={agent?.ui_accent_key} data-priority={priority ? "important" : "normal"} key={message.id}>
           <div className="message__rail"><span className="agent-avatar" aria-hidden>{agent?.avatar_key ?? "AA"}</span><span className="timeline-line" /></div>
           <div className="message__body">
-            <header className="message__meta"><strong>{agent?.display_name ?? "Race Room"}</strong><span>{agent?.role ?? "Room voice"}</span><span>{message.session_phase ?? (qualifying ? "Session" : message.lap_number == null ? "Session" : `Lap ${message.lap_number}`)}</span></header>
+            {priority && <span className="message__event-marker"><i aria-hidden /> Important session update</span>}
+            <header className="message__meta"><strong>{agent?.display_name ?? "Race Room"}</strong><span>{agent?.role ?? "Room voice"}</span><span>{message.session_phase ?? (qualifying ? "Session" : message.lap_number == null ? "Session" : `Lap ${message.lap_number}`)}</span><time dateTime={message.created_at}>{roomMessageTime(message)}</time></header>
             <div className="message__labels"><span className={`message-type message-type--${message.message_type}`}>{MESSAGE_TYPE_LABELS[message.message_type]}</span><span>{message.topic.replaceAll("_", " ")}</span>{message.reply_to_message_id && <span className="reply-label">↳ Replying to {parentAgent?.display_name ?? "an earlier message"}</span>}</div>
             <p>{message.content}</p>
             <footer className="message__footer"><button className="evidence-button" type="button" aria-label={`See the data behind ${agent?.display_name ?? "this"} message`} onClick={() => onInspectEvidence(message)}><span className={`evidence-dot evidence-dot--${message.evidence_status}`} aria-hidden /> See the data <span className="sr-only">Evidence status: {message.evidence_status}. Message time: {roomMessageTime(message)}.</span></button></footer>

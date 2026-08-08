@@ -237,14 +237,15 @@ Only verified builds can publish images. Version tags publish multi-platform rel
 - `ghcr.io/csingh26/apex-arena-frontend`
 
 Published release images receive semantic-version, major/minor, major, `latest`, and commit-SHA
-tags. The same verified publish matrix also publishes the Railway-ready multi-platform backend
-image after the full `main` workflow succeeds:
+tags. The same verified publish matrix also publishes multi-platform backend release artifacts
+after the full `main` workflow succeeds:
 
 - `ghcr.io/csingh26/apex-arena-backend:main`
 - `ghcr.io/csingh26/apex-arena-backend:<full-commit-sha>`
 
-Railway should follow `:main` for simple continuous deployment and keep the SHA tags available
-for exact rollbacks.
+Railway deploys from the GitHub-connected `main` branch. The container tags remain available as
+verified release artifacts and exact rollback references; publishing them does not trigger a
+second Railway deployment.
 
 ## Deployment
 
@@ -265,6 +266,10 @@ For the next deployment pass, Apex Arena is prepared around one `combined` backe
 `main`, with `OPENF1_INGESTION_MODE=rest`, live MQTT off, and recent-session reconciliation on.
 Full-season historical backfill remains manual-only; automatic recovery is limited to recently
 completed competitive sessions after OpenF1 publishes real data.
+
+Backend deployment is automatic after a normal push to GitHub: Railway observes `main`, reads the
+tracked service manifest, builds, and deploys. The repository intentionally has no Railway CLI
+deploy wrapper or GitHub Actions job that uploads the same source a second time.
 
 ### Deployment documentation
 

@@ -3,8 +3,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import os
-import subprocess
+import re
 import tomllib
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -189,37 +188,6 @@ def test_api_config_does_not_invoke_historical_script() -> None:
     assert data["deploy"]["healthcheckPath"] == "/health/live"
 
 
-def test_deploy_script_argument_and_missing_variable_behavior(tmp_path: Path) -> None:
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
-    railway = fake_bin / "railway"
-    railway.write_text('#!/usr/bin/env bash\necho railway "$@"\n')
-    railway.chmod(0o755)
-    env = {**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}"}
-
-    missing = subprocess.run(
-        ["bash", "scripts/deploy_railway.sh", "api"],
-        cwd=REPO_ROOT,
-        env={key: value for key, value in env.items() if key != "RAILWAY_TOKEN"},
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    assert missing.returncode == 2
-    assert "RAILWAY_TOKEN is required" in missing.stderr
-
-    invalid = subprocess.run(
-        ["bash", "scripts/deploy_railway.sh", "bogus"],
-        cwd=REPO_ROOT,
-        env=env,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    assert invalid.returncode == 2
-    assert "unknown target" in invalid.stderr
-
-
 def test_dockerfile_copies_backend_scripts() -> None:
     dockerfile = (REPO_ROOT / "backend/Dockerfile").read_text()
 
@@ -227,28 +195,27 @@ def test_dockerfile_copies_backend_scripts() -> None:
     assert "COPY backend/scripts ./scripts" not in dockerfile
 
 
-def test_historical_workflow_is_manual_only() -> None:
-    text = (REPO_ROOT / ".github/workflows/run-historical-chat-build.yml").read_text()
+def test_railway_uses_github_connected_auto_deploy_only() -> None:
+    assert not (REPO_ROOT / "scripts/deploy_railway.sh").exists()
+    assert not (REPO_ROOT / ".github/workflows/deploy-railway.yml").exists()
+    assert not (REPO_ROOT / ".github/workflows/run-historical-chat-build.yml").exists()
 
-    assert "workflow_dispatch:" in text
-    assert 'name: "observant-freedom / production"' in text
-    assert "push:" not in text
-    assert "scripts/deploy_railway.sh historical" in text
+    release = (REPO_ROOT / ".github/workflows/release.yml").read_text()
+    assert "deploy-railway:" not in release
+    assert "RAILWAY_DEPLOY_ENABLED" not in release
+    assert "railway up" not in release
 
-
-def test_api_workflow_deploys_only_api_service() -> None:
-    text = (REPO_ROOT / ".github/workflows/deploy-railway.yml").read_text()
-
-    assert "push:" in text
-    assert 'name: "observant-freedom / production"' in text
-    assert "scripts/deploy_railway.sh api" in text
-    assert "deploy_railway.sh historical" not in text
-    assert "apex-arena-historical-chat" not in text
-    assert "Skipping GitHub Actions Railway CLI deploy" in text
-
-
-def test_historical_workflow_skips_without_railway_token() -> None:
-    text = (REPO_ROOT / ".github/workflows/run-historical-chat-build.yml").read_text()
-
-    assert "Skipping GitHub Actions Railway CLI deploy" in text
-    assert "Use Railway's GitHub-connected service" in text
+    deploy_surfaces = [
+        *sorted((REPO_ROOT / ".github/workflows").glob("*.yml")),
+        *sorted((REPO_ROOT / ".github/workflows").glob("*.yaml")),
+        *sorted((REPO_ROOT / "scripts").glob("*.sh")),
+        REPO_ROOT / "package.json",
+        REPO_ROOT / "frontend/package.json",
+    ]
+    manual_deploy = re.compile(r"\brailway\s+(?:up|deploy)\b", re.IGNORECASE)
+    offenders = [
+        str(path.relative_to(REPO_ROOT))
+        for path in deploy_surfaces
+        if path.exists() and manual_deploy.search(path.read_text())
+    ]
+    assert offenders == []

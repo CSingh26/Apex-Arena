@@ -7,6 +7,7 @@ import { useEffect, useRef, useState } from "react";
 
 import { ThemeToggle } from "@/components/race-rooms/theme-toggle";
 import { appRoutes, stripBasePath } from "@/lib/app-paths";
+import styles from "./app-navigation.module.css";
 
 type ConnectionState = "connecting" | "live" | "reconnecting" | "degraded";
 
@@ -73,7 +74,7 @@ export function AppNavigation({ contextLabel, connection }: AppNavigationProps) 
     {navigation.map((item) => {
     const active = item.matches(pathname);
     return <Link
-      className={active ? "app-nav__link app-nav__link--active" : "app-nav__link"}
+      className={`${styles.link} ${active ? styles.active : ""}`}
       href={item.href}
       aria-current={active ? "page" : undefined}
       key={item.href}
@@ -86,20 +87,20 @@ export function AppNavigation({ contextLabel, connection }: AppNavigationProps) 
     </>}
   </>;
 
-  return <header className="app-nav">
-    <div className="app-nav__inner">
-      <Link className="app-nav__brand" href={appRoutes.home} aria-label="Apex Arena home"><i className="brand-mark" /><span>APEX ARENA</span></Link>
-      <nav className="app-nav__desktop-links" aria-label="Primary navigation">{links()}</nav>
-      {contextLabel && <span className="app-nav__context" title={contextLabel}>{contextLabel}</span>}
-      <div className="app-nav__actions">
-        {connection && <span className={`connection connection--${connection}`} role="status"><span aria-hidden />{connectionLabel(connection)}</span>}
+  return <header className={styles.shell}>
+    <div className={styles.inner}>
+      <Link className={styles.brand} href={appRoutes.home} aria-label="Apex Arena home"><i className="brand-mark" /><span>APEX ARENA</span><small>Race intelligence</small></Link>
+      <nav className={styles.desktopLinks} aria-label="Primary navigation">{links()}</nav>
+      {contextLabel && <span className={styles.context} title={contextLabel}>{contextLabel}</span>}
+      <div className={styles.actions}>
+        {connection && <span className={`${styles.connection} ${styles[connection]}`} role="status"><span aria-hidden />{connectionLabel(connection)}</span>}
         <ThemeToggle />
-        <button ref={menuButtonRef} className="app-nav__menu-button" type="button" aria-label="Open navigation menu" aria-expanded={menuOpen} aria-controls="mobile-navigation" onClick={() => setMenuOpen(true)}><span aria-hidden /><span aria-hidden /><span aria-hidden /></button>
+        <button ref={menuButtonRef} className={styles.menuButton} type="button" aria-label="Open navigation menu" aria-expanded={menuOpen} aria-controls="mobile-navigation" onClick={() => setMenuOpen(true)}><span aria-hidden /><span aria-hidden /></button>
       </div>
     </div>
-    {menuOpen && <div className="app-nav__mobile-layer">
-      <button className="app-nav__backdrop" type="button" aria-label="Close navigation menu" onClick={() => setMenuOpen(false)} />
-      <nav ref={menuRef} id="mobile-navigation" className="app-nav__mobile-menu" aria-label="Mobile navigation" role="dialog" aria-modal="true">
+    {menuOpen && <div className={styles.mobileLayer}>
+      <button className={styles.backdrop} type="button" aria-label="Close navigation menu" onClick={() => setMenuOpen(false)} />
+      <nav ref={menuRef} id="mobile-navigation" className={styles.mobileMenu} aria-label="Mobile navigation" role="dialog" aria-modal="true">
         <div><span>Navigate</span><button type="button" aria-label="Close navigation menu" onClick={() => setMenuOpen(false)}>×</button></div>
         {links(true)}
         {contextLabel && <p><span>Current room</span><b>{contextLabel}</b></p>}

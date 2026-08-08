@@ -77,51 +77,18 @@ Existing secret/reference variables:
 
 Keep `RUN_ROOM_CHAT_BUILD=false` except during the manual historical job window.
 
-## GitHub Actions
+## Deployment trigger
 
-Railway's GitHub-connected auto-deploy does not require a GitHub Actions Railway token. If you use
-Railway's dashboard integration, leave these secrets unset; the deploy workflows will skip their CLI
-deploy step cleanly.
+Railway's GitHub integration is the only source-deployment trigger. Both services watch `main` and
+use their service-specific manifests. After the repository's normal checks pass, the flow is:
 
-Optional repository secrets for CLI deploys from GitHub Actions:
-
-- `RAILWAY_TOKEN`
-- `RAILWAY_PROJECT_ID`
-
-Optional repository variables:
-
-- `RAILWAY_API_SERVICE` defaults to `apex-arena-backend`
-- `RAILWAY_HISTORICAL_SERVICE` defaults to `apex-arena-historical-chat`
-
-`.github/workflows/deploy-railway.yml` deploys only the API service on pushes to `main` that touch
-backend/deployment files when `RAILWAY_TOKEN` and `RAILWAY_PROJECT_ID` are configured. If they are
-not configured, it exits successfully and relies on Railway's GitHub-connected auto-deploy. It never
-deploys the historical service and never runs the chat build.
-
-`.github/workflows/run-historical-chat-build.yml` is `workflow_dispatch` only. It deploys the
-historical service source, but it does not mutate Railway variables and does not generate chats
-inside GitHub Actions. If Railway CLI secrets are not configured, it exits successfully after the
-operator reminder. The Railway service must already have `RUN_ROOM_CHAT_BUILD=true` to execute the
-finite job.
-
-## Local deploy script
-
-```bash
-RAILWAY_TOKEN=... \
-RAILWAY_PROJECT_ID=... \
-scripts/deploy_railway.sh api
-
-RAILWAY_TOKEN=... \
-RAILWAY_PROJECT_ID=... \
-scripts/deploy_railway.sh historical
-
-RAILWAY_TOKEN=... \
-RAILWAY_PROJECT_ID=... \
-scripts/deploy_railway.sh all
+```text
+commit -> push to GitHub -> Railway detects main -> Railway builds and deploys
 ```
 
-The script validates the Railway CLI and required variables, deploys repository source, and never
-prints token values. It does not change Railway variables.
+The repository intentionally has no Railway CLI deploy script, no Railway deploy workflow, and no
+Railway deployment token requirement in GitHub Actions. Do not add a second `railway up` or manual
+source-upload step after a push; it duplicates the platform deployment and can race it.
 
 ## Safe historical run
 
@@ -130,7 +97,7 @@ Recommended production sequence inside the historical Railway service:
 1. Set `RUN_ROOM_CHAT_BUILD=true`.
 2. Keep `FORCE_REGENERATE=false`.
 3. Start with a small `MAX_ROOMS` or a single room via direct CLI if doing a pilot.
-4. Deploy the historical service manually or through `Run historical chat build`.
+4. Let the next deliberate push to `main` trigger the GitHub-connected historical service.
 5. Watch logs until the finite job exits.
 6. Set `RUN_ROOM_CHAT_BUILD=false` immediately after completion.
 
@@ -149,12 +116,8 @@ version before rewriting them, so leave it false unless deliberately refreshing 
 
 ## Verification
 
-Deployed commit:
-
-```bash
-railway status
-railway logs --service apex-arena-backend
-```
+Confirm the deployed commit and inspect service logs in the Railway dashboard, then verify
+`https://chaitanyasingh.org/apex-arena/api/health/live` through the public route.
 
 Neon migration state:
 
@@ -212,6 +175,5 @@ Historical rollback:
   `/backend/deploy/railway/chat-build.toml`.
 - Wrong Dockerfile path: with Railway Root Directory `/backend`, use `Dockerfile`.
 - Wrong root directory: these manifests assume Railway Root Directory `/backend`.
-- GitHub autodeploy not enabled: connect the API service to GitHub `main` and set the custom config
-  path. `RAILWAY_TOKEN` and `RAILWAY_PROJECT_ID` are needed only for optional Railway CLI deploys
-  from GitHub Actions.
+- GitHub auto-deploy not enabled: connect each service to GitHub `main` and set its custom config
+  path. No Railway deployment token is required in GitHub Actions.

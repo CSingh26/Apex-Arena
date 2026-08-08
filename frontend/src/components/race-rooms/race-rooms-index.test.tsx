@@ -73,10 +73,12 @@ describe("RaceRoomsIndex", () => {
 
   it("renders three grouped categories, concise session actions, and excludes validation fixtures", async () => {
     render(<RaceRoomsIndex />);
+    expect(document.querySelector("main")).toHaveAttribute("id", "main-content");
     expect(screen.getByRole("heading", { name: "Race Rooms" })).toBeVisible();
     expect(await screen.findByRole("heading", { name: "Live This Weekend" })).toBeVisible();
     expect(screen.getByRole("heading", { name: "Completed Events" })).toBeVisible();
     expect(screen.getByRole("heading", { name: "Upcoming Events" })).toBeVisible();
+    expect(screen.getByRole("navigation", { name: "Race calendar sections" })).toBeVisible();
     expect(screen.getByText("Live feed arms at session start")).toBeVisible();
     expect(screen.queryByText(/Validation Room/)).not.toBeInTheDocument();
     expect(screen.queryByText(/archived/i)).not.toBeInTheDocument();

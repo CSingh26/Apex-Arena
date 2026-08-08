@@ -95,9 +95,10 @@ export function RoomContext({ slug, detail, playback }: RoomContextProps) {
       </dl></details>
       {room.is_development && <p className="fixture-notice"><b>Validation fixture</b><span>This room uses deterministic synthetic race data. It does not represent a real event or championship result.</span></p>}
     </section>
-    <section className="context-card circuit-dossier" aria-labelledby="circuit-dossier-title">
-      <p className="section-kicker">Circuit intelligence</p>
-      <h2 id="circuit-dossier-title">Track dossier</h2>
+    <details className="context-card context-disclosure circuit-dossier">
+      <summary><span><span className="section-kicker">Circuit intelligence</span><b>Track dossier</b></span><span aria-hidden>+</span></summary>
+      <section aria-labelledby="circuit-dossier-title">
+      <h2 id="circuit-dossier-title" className="sr-only">Track dossier</h2>
       <p className="circuit-dossier__name">{detail.circuit.circuit_name}</p>
       {!!detail.circuit.records.length && <dl className="circuit-records">
         {detail.circuit.records.map((record) => <div key={record.label}>
@@ -108,11 +109,13 @@ export function RoomContext({ slug, detail, playback }: RoomContextProps) {
         {detail.circuit.facts.map((fact) => <li key={fact}>{fact}</li>)}
       </ul>
       {detail.circuit.source_url && <a className="context-source" href={detail.circuit.source_url} target="_blank" rel="noreferrer">Official circuit guide <span aria-hidden>↗</span></a>}
-    </section>
-    <section className={`context-card weather-card ${detail.weather.available ? "weather-card--live" : ""}`} aria-labelledby="weather-card-title">
+      </section>
+    </details>
+    <details className={`context-card context-disclosure weather-card ${detail.weather.available ? "weather-card--live" : ""}`}>
+      <summary><span><span className="section-kicker">OpenF1 conditions</span><b>Track weather</b></span><span className="weather-card__signal" aria-label={detail.weather.available ? "Weather sample available" : "Weather pending"} /></summary>
+      <section aria-labelledby="weather-card-title">
       <div className="weather-card__heading">
-        <div><p className="section-kicker">OpenF1 conditions</p><h2 id="weather-card-title">Track weather</h2></div>
-        <span className="weather-card__signal" aria-label={detail.weather.available ? "Weather sample available" : "Weather pending"} />
+        <h2 id="weather-card-title" className="sr-only">Track weather</h2>
       </div>
       {detail.weather.available && <>
         <p className="weather-card__sample">Latest sample · {formatDate(detail.weather.sampled_at)}</p>
@@ -127,7 +130,8 @@ export function RoomContext({ slug, detail, playback }: RoomContextProps) {
         </dl>
       </>}
       <p className="weather-card__notice">{detail.weather.notice}</p>
-    </section>
+      </section>
+    </details>
     {detail.diagnostics_available && <details className="diagnostics-card" onToggle={(event) => { if (event.currentTarget.open) loadDiagnostics(); }}>
       <summary><span><span className="section-kicker">Development tools</span><b>Pipeline diagnostics</b></span><span aria-hidden>+</span></summary>
       {loadingDiagnostics && <div className="diagnostic-state" role="status"><span className="spinner" /> Reading pipeline state…</div>}

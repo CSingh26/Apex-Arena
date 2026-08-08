@@ -93,7 +93,7 @@ Target architecture: Vercel (portfolio domain + Apex Arena frontend origin) → 
 | Compose datastores bound to loopback | `docker-compose.yml` | ✅ Ready (local only) |
 | CI quality gates | Lint, typecheck, tests, builds, Trivy CRITICAL | ✅ Ready |
 | Deployment validation | Did not exist | 🔧 Code — manifests, managed URL handling, production guards, role startup, scripts, secret scan, doc links |
-| Gated deployment jobs | Did not exist | 🔧 Code — disabled unless `RAILWAY_DEPLOY_ENABLED` / `VERCEL_APEX_DEPLOY_ENABLED` is `true` |
+| Deployment triggers | Duplicate CI deploy paths removed | ✅ Railway follows GitHub `main`; CI validates configuration without invoking Railway CLI |
 | GitHub Actions pinned by SHA | Only Trivy is pinned | 💡 Future |
 
 ## Remaining blockers before production traffic

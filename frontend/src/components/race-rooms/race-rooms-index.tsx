@@ -11,6 +11,8 @@ import { appRoutes } from "@/lib/app-paths";
 import { getRaceRoomEvents } from "@/lib/api";
 import type { EventSessionSummary, EventWeekendStatus, RaceRoomEvent } from "@/lib/types";
 
+import styles from "./race-rooms-revamp.module.css";
+
 const SESSION_ORDER = ["SPRINT_QUALIFYING", "SPRINT", "QUALIFYING", "RACE"];
 
 function formatDate(value: string, includeTime = false): string {
@@ -142,7 +144,7 @@ function CategorySection({ id, title, kicker, events, emptyCopy, onPreview }: { 
   </section>;
 }
 
-function UpcomingPreview({ event, focusSession, onClose }: { event: RaceRoomEvent; focusSession?: string; onClose: () => void }) {
+function UpcomingPreview({ event, focusSession, now, onClose }: { event: RaceRoomEvent; focusSession?: string; now: number; onClose: () => void }) {
   const closeRef = useRef<HTMLButtonElement>(null);
   const panelRef = useRef<HTMLElement>(null);
 
@@ -164,10 +166,13 @@ function UpcomingPreview({ event, focusSession, onClose }: { event: RaceRoomEven
     return () => { document.removeEventListener("keydown", onKeyDown); document.body.classList.remove("drawer-open"); previouslyFocused?.focus(); };
   }, [onClose]);
 
+  const firstSession = sortedSessions(event.sessions)[0];
+  const countdown = firstSession ? countdownParts(new Date(firstSession.scheduled_start).getTime() - now) : null;
   return <div className="upcoming-preview-layer">
     <button className="upcoming-preview__backdrop" type="button" aria-label="Close upcoming event details" onClick={onClose} />
     <aside ref={panelRef} className="upcoming-preview" role="dialog" aria-modal="true" aria-labelledby="upcoming-preview-title">
       <header><div><p className="section-kicker">Upcoming event</p><h2 id="upcoming-preview-title">{event.event_name}</h2><p>{event.circuit_name} · {event.country}</p></div><button ref={closeRef} className="icon-button" type="button" aria-label="Close upcoming event details" onClick={onClose}>×</button></header>
+      <div className="upcoming-preview__visual"><CircuitOutline circuitName={event.circuit_name} eventName={event.event_name} /><div><span>Race Room activates when session data becomes available.</span>{countdown && <p><b>{countdown.days}</b>d <b>{countdown.hours}</b>h <b>{countdown.minutes}</b>m until the first listed session</p>}</div></div>
       <div className="upcoming-preview__facts"><span>Round {event.round}</span><span>{formatDate(event.weekend_start)}</span>{event.is_sprint_weekend && <span className="sprint-badge">Sprint weekend</span>}</div>
       <section aria-labelledby="weekend-schedule-title"><h3 id="weekend-schedule-title">Weekend schedule</h3><ol>{sortedSessions(event.sessions).map((session) => <li className={focusSession === session.session_type ? "upcoming-preview__focused" : ""} key={session.session_type}><span><b>{session.display_name}</b><small>{friendlyStatus(session.status)}</small></span><time dateTime={session.scheduled_start}>{formatDate(session.scheduled_start, true)}</time></li>)}</ol></section>
       <div className="upcoming-preview__notice"><span aria-hidden>◷</span><div><b>Room opens when session data becomes available.</b><p>This preview uses the official schedule. Opening it does not create a room, start a replay, or generate a conversation.</p></div></div>
@@ -257,7 +262,7 @@ export function RaceRoomsIndex() {
     setPreviewSession(undefined);
   };
 
-  return <main className="rooms-shell track-grid">
+  return <main id="main-content" className={`rooms-shell track-grid ${styles.index}`}>
     <AppNavigation />
     <header className="rooms-hero"><p className="section-kicker">The 2026 season, session by session</p><h1>Race <em>Rooms</em></h1><p>Follow each Grand Prix weekend as one clear story. Open completed replays, join live sessions, or explore what is coming next.</p></header>
     <section className="room-controls" aria-label="Find Race Rooms" aria-busy={refreshing}>
@@ -272,15 +277,16 @@ export function RaceRoomsIndex() {
       </div>
     </section>
     <div className="results-summary" aria-live="polite"><span>{refreshing ? "Refreshing weekends…" : `${total} ${total === 1 ? "weekend" : "weekends"}`}</span>{filtersActive && <span>Grouped results</span>}</div>
-    {loading && <ApexRaceLoader label="Mapping the 2026 race grid" compact />}
-    {error && <div className="room-state room-state--error" role="alert"><b>Schedule unavailable</b><p>{error}</p><button className="control-button" type="button" onClick={() => setRetryKey((value) => value + 1)}>Try again</button></div>}
-    {!loading && !error && <div className="event-categories">
+    {loading && <div className={styles.scheduleSkeleton}><ApexRaceLoader label="Mapping the 2026 race grid" compact /><div aria-hidden><span /><span /></div></div>}
+    {error && <div className={`room-state room-state--error ${events.length ? styles.inlineError : ""}`} role="alert"><b>{events.length ? "Couldn’t refresh the schedule" : "Schedule unavailable"}</b><p>{events.length ? "You’re seeing the last schedule loaded on this device." : error}</p><button className="control-button" type="button" onClick={() => setRetryKey((value) => value + 1)}>Try again</button></div>}
+    {!loading && events.length > 0 && <nav className={styles.calendarRail} aria-label="Race calendar sections"><a href="#live-weekend-title"><span aria-hidden />Live <b>{sections.live.length}</b></a><a href="#completed-events-title">Completed <b>{sections.completed.length}</b></a><a href="#upcoming-events-title">Upcoming <b>{sections.upcoming.length}</b></a></nav>}
+    {!loading && events.length > 0 && <div className="event-categories">
       <WeekendCountdown events={events} now={now} onPreview={openPreview} />
       <CategorySection id="live-weekend-title" kicker="The weekend unfolding now" title="Live This Weekend" events={sections.live} emptyCopy="There is no active race weekend right now." onPreview={openPreview} />
       <CategorySection id="completed-events-title" kicker="Watch the season so far" title="Completed Events" events={sections.completed} emptyCopy="No completed events match these filters." onPreview={openPreview} />
       <CategorySection id="upcoming-events-title" kicker="What comes next" title="Upcoming Events" events={sections.upcoming} emptyCopy="No upcoming events match these filters." onPreview={openPreview} />
     </div>}
-    {!loading && !error && !events.length && filtersActive && <div className="room-state"><span aria-hidden>◌</span><b>No weekends match this view.</b><p>Try another event, session, or weekend format.</p><button className="control-button" type="button" onClick={resetFilters}>Reset filters</button></div>}
-    {previewEvent && <UpcomingPreview event={previewEvent} focusSession={previewSession} onClose={closePreview} />}
+    {!loading && !events.length && <div className="room-state"><span aria-hidden>◌</span><b>{filtersActive ? "No weekends match this view." : "The 2026 calendar is not available yet."}</b><p>{filtersActive ? "Try another event, session, or weekend format." : "Check back shortly while the official calendar is prepared."}</p>{filtersActive && <button className="control-button" type="button" onClick={resetFilters}>Reset filters</button>}</div>}
+    {previewEvent && <UpcomingPreview event={previewEvent} focusSession={previewSession} now={now} onClose={closePreview} />}
   </main>;
 }

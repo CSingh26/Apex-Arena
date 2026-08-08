@@ -11,6 +11,7 @@ import { agents, message } from "@/test/race-room-fixtures";
 const strategy = message();
 const pace = message({ id: "00000000-0000-0000-0000-000000000002", sequence: 2, agent_id: "theo-voss", lap_number: 9, topic: "pace", content: "The representative lap trend improved by 0.68 seconds." });
 const reply = message({ id: "00000000-0000-0000-0000-000000000003", sequence: 3, agent_id: "lena-cross", topic: "racecraft", message_type: "disagreement", content: "Track position still limits that strategy gain.", reply_to_message_id: strategy.id });
+const incident = message({ id: "00000000-0000-0000-0000-000000000004", sequence: 4, agent_id: "nova", topic: "incident", content: "A stopped car has brought out the safety car." });
 
 function TimelineHarness({ items = [strategy, pace, reply] }: { items?: RoomMessage[] }) {
   const [agent, setAgent] = useState("all");
@@ -48,5 +49,13 @@ describe("MessageTimeline", () => {
     expect(screen.getByText("The room is waiting for lights out.")).toBeVisible();
     await userEvent.click(screen.getByRole("button", { name: /at latest/i }));
     expect(HTMLElement.prototype.scrollIntoView).toHaveBeenCalled();
+  });
+
+  it("marks important race updates without relying on colour alone", () => {
+    render(<TimelineHarness items={[incident]} />);
+    const article = screen.getByText(incident.content).closest("article");
+    expect(article).toHaveAttribute("data-priority", "important");
+    expect(screen.getByText("Important session update")).toBeVisible();
+    expect(article?.querySelector("time")).toHaveAttribute("datetime", incident.created_at);
   });
 });

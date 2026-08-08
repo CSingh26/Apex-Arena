@@ -3,8 +3,53 @@
 
 :root {
   color-scheme: dark;
-  --background: #06080c;
-  --foreground: #eef1f5;
+  --background: #07090d;
+  --background-subtle: #0a0d13;
+  --surface: #10141c;
+  --surface-raised: #161b25;
+  --surface-active: #1c2230;
+  --foreground: #f4f6f8;
+  --foreground-muted: #9ca7b6;
+  --foreground-faint: #687386;
+  --border: rgb(178 190 208 / 14%);
+  --border-strong: rgb(178 190 208 / 26%);
+  --accent: #ff4d58;
+  --accent-strong: #ff6871;
+  --accent-soft: rgb(255 77 88 / 12%);
+  --signal-blue: #55b8ff;
+  --signal-violet: #9a7cff;
+  --signal-magenta: #f271c7;
+  --signal-cyan: #47d7d0;
+  --signal-orange: #ffad5c;
+  --success: #4adea6;
+  --apex-mint: var(--success);
+  --warning: #ffc15c;
+  --danger: #ff6b75;
+  --shadow-sm: 0 8px 24px rgb(0 0 0 / 16%);
+  --shadow-md: 0 24px 64px rgb(0 0 0 / 28%);
+  --radius-sm: 8px;
+  --radius-md: 14px;
+  --radius-lg: 22px;
+  --radius-xl: 32px;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+  --space-16: 64px;
+  --space-20: 80px;
+  --ease-out: cubic-bezier(.22, 1, .36, 1);
+  --ease-standard: cubic-bezier(.2, 0, 0, 1);
+  --duration-fast: 150ms;
+  --duration-ui: 220ms;
+  --duration-panel: 320ms;
+  --font-body: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-display: "Arial Narrow", "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
 }
 
 * {
@@ -14,18 +59,21 @@
 html {
   background: var(--background);
   scroll-behavior: smooth;
+  scrollbar-color: var(--border-strong) transparent;
 }
 
 body {
   min-height: 100vh;
   margin: 0;
   background:
-    radial-gradient(circle at 72% 4%, rgb(112 17 25 / 18%), transparent 27rem),
-    radial-gradient(circle at 0% 45%, rgb(30 48 65 / 14%), transparent 30rem),
+    radial-gradient(circle at 78% -10%, rgb(122 18 31 / 18%), transparent 32rem),
+    radial-gradient(circle at 0% 38%, rgb(25 74 110 / 11%), transparent 34rem),
     var(--background);
   color: var(--foreground);
-  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--font-body);
+  line-height: 1.5;
   text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
 }
 
 button,
@@ -34,15 +82,36 @@ a {
 }
 
 button:focus-visible,
-a:focus-visible {
-  outline: 2px solid #f87171;
+a:focus-visible,
+input:focus-visible,
+select:focus-visible,
+summary:focus-visible {
+  outline: 2px solid var(--accent-strong);
   outline-offset: 3px;
 }
 
 ::selection {
-  background: rgb(248 113 113 / 30%);
+  background: rgb(255 77 88 / 32%);
   color: white;
 }
+
+.skip-link {
+  position: fixed;
+  z-index: 999;
+  top: var(--space-3);
+  left: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-sm);
+  background: var(--foreground);
+  color: var(--background);
+  font-size: .82rem;
+  font-weight: 800;
+  text-decoration: none;
+  transform: translateY(-160%);
+  transition: transform var(--duration-ui) var(--ease-out);
+}
+
+.skip-link:focus { transform: translateY(0); }
 
 .track-grid {
   position: relative;
@@ -71,12 +140,65 @@ a:focus-visible {
 }
 
 .section-kicker {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-family: var(--font-mono);
   font-size: 0.66rem;
   font-weight: 700;
   letter-spacing: 0.22em;
   text-transform: uppercase;
-  color: #64748b;
+  color: var(--foreground-faint);
+}
+
+.theme-toggle {
+  display: grid;
+  width: 44px;
+  height: 44px;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--surface) 88%, transparent);
+  color: var(--foreground-muted);
+  cursor: pointer;
+  transition: color var(--duration-fast), border-color var(--duration-fast), background var(--duration-fast), transform var(--duration-fast);
+}
+
+.theme-toggle:hover { border-color: var(--border-strong); background: var(--surface-raised); color: var(--foreground); transform: rotate(8deg); }
+
+[data-theme="light"] {
+  color-scheme: light;
+  --background: #f3f1ed;
+  --background-subtle: #ebe8e2;
+  --surface: #faf9f6;
+  --surface-raised: #fff;
+  --surface-active: #f0ede7;
+  --foreground: #13171d;
+  --foreground-muted: #5e6877;
+  --foreground-faint: #7b8491;
+  --border: rgb(28 36 48 / 12%);
+  --border-strong: rgb(28 36 48 / 23%);
+  --accent: #df2434;
+  --accent-strong: #c81727;
+  --accent-soft: rgb(223 36 52 / 9%);
+  --shadow-sm: 0 8px 24px rgb(35 29 24 / 7%);
+  --shadow-md: 0 24px 64px rgb(35 29 24 / 12%);
+}
+
+[data-theme="light"] body {
+  background:
+    radial-gradient(circle at 78% -10%, rgb(223 36 52 / 9%), transparent 34rem),
+    radial-gradient(circle at 0% 40%, rgb(40 128 190 / 7%), transparent 34rem),
+    var(--background);
+}
+
+/* Race Center now leads the home page, so the editorial story no longer needs
+   a second full viewport before its content begins. */
+.landing-shell .landing-hero {
+  min-height: auto;
+  padding-block: clamp(84px, 9vw, 132px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
 }
 
 .target-panel {
@@ -1927,7 +2049,7 @@ body {
   min-height: 100vh;
   margin: 0 auto;
   padding: 0 42px;
-  overflow: hidden;
+  overflow-x: clip;
 }
 
 .landing-shell::after {
@@ -4243,4 +4365,54 @@ body {
 
 @media (prefers-reduced-motion: reduce) {
   .apex-race-loader__track, .apex-race-loader__mark, .apex-race-loader__signal { animation: none; }
+}
+
+/* Canonical application themes. Kept last so legacy component aliases cannot
+   override the product-level palette while those components migrate to tokens. */
+[data-theme="dark"] {
+  color-scheme: dark;
+  --background: #07090d;
+  --background-subtle: #0a0d13;
+  --surface: #10141c;
+  --surface-raised: #161b25;
+  --surface-active: #1c2230;
+  --foreground: #f4f6f8;
+  --foreground-muted: #9ca7b6;
+  --foreground-faint: #687386;
+  --border: rgb(178 190 208 / 14%);
+  --border-strong: rgb(178 190 208 / 26%);
+  --accent: #ff4d58;
+  --accent-strong: #ff6871;
+  --accent-soft: rgb(255 77 88 / 12%);
+}
+
+[data-theme="dark"] body {
+  background:
+    radial-gradient(circle at 78% -10%, rgb(122 18 31 / 18%), transparent 32rem),
+    radial-gradient(circle at 0% 38%, rgb(25 74 110 / 11%), transparent 34rem),
+    var(--background);
+}
+
+[data-theme="light"] {
+  color-scheme: light;
+  --background: #f3f1ed;
+  --background-subtle: #ebe8e2;
+  --surface: #faf9f6;
+  --surface-raised: #fff;
+  --surface-active: #f0ede7;
+  --foreground: #13171d;
+  --foreground-muted: #5e6877;
+  --foreground-faint: #7b8491;
+  --border: rgb(28 36 48 / 12%);
+  --border-strong: rgb(28 36 48 / 23%);
+  --accent: #df2434;
+  --accent-strong: #c81727;
+  --accent-soft: rgb(223 36 52 / 9%);
+}
+
+[data-theme="light"] body {
+  background:
+    radial-gradient(circle at 78% -10%, rgb(223 36 52 / 9%), transparent 34rem),
+    radial-gradient(circle at 0% 40%, rgb(40 128 190 / 7%), transparent 34rem),
+    var(--background);
 }

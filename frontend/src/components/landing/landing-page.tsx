@@ -2,6 +2,7 @@
 import Link from "next/link";
 
 import { AppNavigation } from "@/components/navigation/app-navigation";
+import { RaceCenterSpotlight } from "@/components/landing/race-center-spotlight";
 import { appRoutes } from "@/lib/app-paths";
 
 const agents = [
@@ -37,8 +38,10 @@ const features = [
 ] as const;
 
 export function LandingPage() {
-  return <main className="landing-shell track-grid">
+  return <main id="main-content" className="landing-shell track-grid">
     <AppNavigation />
+
+    <RaceCenterSpotlight />
 
     <section className="landing-hero" aria-labelledby="landing-title">
       <div className="landing-hero__copy">

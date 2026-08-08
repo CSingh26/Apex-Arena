@@ -362,31 +362,6 @@ jobs:
           print("documentation links OK")
           PY
 
-  deploy-railway:
-    name: Deploy backend to Railway (opt-in)
-    needs: [backend, frontend, containers, end-to-end, deployment-validation]
-    # Disabled until the repository variable is explicitly set to "true".
-    if: github.ref == 'refs/heads/main' && vars.RAILWAY_DEPLOY_ENABLED == 'true'
-    runs-on: ubuntu-latest
-    environment: staging
-    steps:
-      - uses: actions/checkout@v6
-      - name: Confirm deployment credentials are present
-        env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-        run: |
-          if [ -z "${RAILWAY_TOKEN}" ]; then
-            echo "RAILWAY_TOKEN is not configured; refusing to deploy." && exit 1
-          fi
-          echo "Railway deployment credentials present."
-      # Deployment steps are intentionally left unimplemented until the Railway
-      # project exists. See docs/railway-deployment-runbook.md.
-      - name: Deployment placeholder
-        run: |
-          echo "Railway services are not provisioned yet."
-          echo "Follow docs/railway-deployment-runbook.md before enabling this job."
-          exit 1
-
   deploy-vercel-frontend:
     name: Deploy Apex Arena frontend to Vercel (opt-in)
     needs: [backend, frontend, containers, end-to-end, deployment-validation]
