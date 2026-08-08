@@ -14,6 +14,8 @@ import type {
   ReplayAction,
   ReplayResponse,
   RoomDiagnostics,
+  DriverStandingsResponse,
+  ConstructorStandingsResponse,
 } from "@/lib/types";
 import { apiPath } from "@/lib/app-paths";
 
@@ -58,6 +60,14 @@ export function getSeason(signal?: AbortSignal): Promise<SeasonCalendarSummary> 
 
 export function getEngineStatus(signal?: AbortSignal): Promise<EngineStatus> {
   return request<EngineStatus>("/engine/status", signal);
+}
+
+export function getDriverStandings(signal?: AbortSignal): Promise<DriverStandingsResponse> {
+  return request<DriverStandingsResponse>("/championship/drivers", signal);
+}
+
+export function getConstructorStandings(signal?: AbortSignal): Promise<ConstructorStandingsResponse> {
+  return request<ConstructorStandingsResponse>("/championship/constructors", signal);
 }
 
 export function getSessionEvents(

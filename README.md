@@ -118,6 +118,36 @@ backend selects the latest sample and safely normalizes:
 Provider failures, empty responses, malformed samples, and sessions without a provider key all have
 tested fallback states.
 
+## 2026 championship standings
+
+`/standings` presents the current drivers' and constructors' championships without embedding any
+season results in the frontend. The backend builds a provider-neutral snapshot from OpenF1's
+championship and driver metadata endpoints, then enriches it with season-wide Jolpica race,
+qualifying, sprint, identity, and calendar data. Jolpica standings are also the fallback when an
+OpenF1 championship snapshot is unavailable.
+
+The public endpoints are:
+
+- `GET /api/v1/championship/drivers`
+- `GET /api/v1/championship/constructors`
+- `GET /api/v1/championship/summary`
+
+Driver statistics include wins, podiums, top-five and top-ten finishes, classified finishes, DNFs,
+DSQs, fastest laps, grid and qualifying averages, Q3 appearances, sprint performance, points per
+race, position gain/loss, and latest-event championship movement where the source data supports the
+metric. Constructor statistics aggregate race, qualifying, and sprint results without counting an
+event once per driver; the response also includes the current driver pairing and points
+contributions.
+
+Redis caches the three normalized responses for ten minutes during normal periods and 30 seconds
+during a live event. A seven-day `last_available` snapshot allows the API and UI to degrade to the
+last known standings when a provider refresh fails. Normalized session-finish and result events
+invalidate the current cache keys while retaining that fallback. Response metadata reports the
+season, source, generation time, cache age, latest completed event, race counts, and whether the
+snapshot is live, provisional, or stale. The UI polls in the background every five minutes normally
+and every 20 seconds while an event is live; provisional data is explicitly labelled
+`LIVE / PROVISIONAL` and returns to `CURRENT STANDINGS` once official event results are available.
+
 ## Data architecture
 
 ```mermaid
@@ -182,6 +212,7 @@ The V1 API is organized around stable public resources:
 | Evidence | source metrics, trigger events, and data-quality flags |
 | Streaming | live room messages and session events over SSE |
 | Replay | start, pause, resume, speed, lap, phase, and sequence control |
+| Championship | normalized 2026 driver, constructor, and title-battle standings |
 
 Interactive API documentation is exposed by the running backend through FastAPI's OpenAPI surface.
 

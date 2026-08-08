@@ -143,6 +143,48 @@ def test_session_events_and_state_are_exposed(settings: Settings) -> None:
     assert state_response.json()["state"]["is_replay"] is True
 
 
+def test_championship_endpoints_expose_normalized_responses(settings: Settings) -> None:
+    app = create_app(settings)
+    metadata = {
+        "season": 2026,
+        "generated_at": "2026-07-19T16:00:00Z",
+        "latest_completed_event": "Belgian Grand Prix",
+        "races_completed": 13,
+        "races_remaining": 11,
+        "source": "OpenF1 + Jolpica",
+        "live": False,
+    }
+    with TestClient(app) as client:
+        services = app.state.services
+        services.championship.drivers = AsyncMock(
+            return_value={"standings": [], "metadata": metadata}
+        )
+        services.championship.constructors = AsyncMock(
+            return_value={"standings": [], "metadata": metadata}
+        )
+        services.championship.summary = AsyncMock(
+            return_value={
+                "driver_leader": None,
+                "constructor_leader": None,
+                "races_completed": 13,
+                "races_remaining": 11,
+                "latest_race": "Belgian Grand Prix",
+                "next_race": "Hungarian Grand Prix",
+                "metadata": metadata,
+            }
+        )
+
+        drivers = client.get("/api/v1/championship/drivers")
+        constructors = client.get("/api/v1/championship/constructors")
+        summary = client.get("/api/v1/championship/summary")
+
+    assert drivers.status_code == 200
+    assert drivers.json()["metadata"]["source"] == "OpenF1 + Jolpica"
+    assert constructors.status_code == 200
+    assert summary.status_code == 200
+    assert summary.json()["next_race"] == "Hungarian Grand Prix"
+
+
 def test_historical_ingestion_requires_internal_key(settings: Settings) -> None:
     protected = Settings.model_validate(
         {**settings.model_dump(), "internal_api_key": "safe-internal-key"}

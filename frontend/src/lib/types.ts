@@ -4,6 +4,108 @@ export type ComponentStatus = {
   detail: string | null;
 };
 
+export type ChampionshipMetadata = {
+  season: number;
+  generated_at: string;
+  latest_completed_event: string | null;
+  races_completed: number;
+  races_remaining: number | null;
+  source: string;
+  cached: boolean;
+  cache_age_seconds: number | null;
+  live: boolean;
+  provisional: boolean;
+  stale: boolean;
+};
+
+export type DriverStanding = {
+  position: number;
+  driver_id: string;
+  driver_number: number | null;
+  first_name: string | null;
+  last_name: string | null;
+  full_name: string;
+  acronym: string | null;
+  country_code: string | null;
+  headshot_url: string | null;
+  team_id: string | null;
+  team_name: string | null;
+  team_colour: string | null;
+  points: number;
+  wins: number | null;
+  podiums: number | null;
+  poles: number | null;
+  fastest_laps: number | null;
+  race_starts: number | null;
+  classified_finishes: number | null;
+  dnfs: number | null;
+  dsqs: number | null;
+  sprint_starts?: number | null;
+  sprint_wins: number | null;
+  sprint_podiums: number | null;
+  sprint_points?: number | null;
+  best_sprint_finish?: number | null;
+  average_finish: number | null;
+  best_finish: number | null;
+  average_grid_position: number | null;
+  best_qualifying_result?: number | null;
+  q3_appearances?: number | null;
+  average_qualifying_position?: number | null;
+  positions_gained_lost: number | null;
+  championship_position_change: number | null;
+  points_change_from_previous_race: number | null;
+  latest_race_finish: number | null;
+  latest_race_points: number | null;
+  races_completed: number;
+  points_per_race?: number | null;
+  podium_percentage?: number | null;
+  points_finishing_percentage?: number | null;
+};
+
+export type ConstructorDriver = {
+  driver_id: string;
+  driver_number: number | null;
+  full_name: string;
+  acronym: string | null;
+  headshot_url: string | null;
+  points?: number | null;
+};
+
+export type ConstructorStanding = {
+  position: number;
+  constructor_id: string | null;
+  team_id?: string | null;
+  team_name: string;
+  team_colour: string | null;
+  logo_url: string | null;
+  points: number;
+  wins: number | null;
+  podiums: number | null;
+  poles: number | null;
+  fastest_laps: number | null;
+  race_starts: number | null;
+  double_podiums: number | null;
+  dnfs: number | null;
+  sprint_wins: number | null;
+  sprint_podiums?: number | null;
+  average_finish: number | null;
+  average_points_per_event?: number | null;
+  championship_position_change: number | null;
+  points_change_from_previous_race: number | null;
+  drivers: ConstructorDriver[];
+  races_completed: number;
+};
+
+export type DriverStandingsResponse = {
+  metadata: ChampionshipMetadata;
+  standings: DriverStanding[];
+};
+
+export type ConstructorStandingsResponse = {
+  metadata: ChampionshipMetadata;
+  standings: ConstructorStanding[];
+};
+
 export type HealthResponse = {
   status: "healthy" | "degraded";
   checked_at: string;

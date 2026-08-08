@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Any
 
 import httpx
@@ -160,6 +161,36 @@ async def test_historical_query_helper_accepts_operators(settings: Settings) -> 
     data = await client.laps(**{"session_key": 9839, "lap_number<=": 3})
 
     assert data == [{"lap_number": 1}]
+    await http_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_championship_query_helpers_use_normalized_endpoints(settings: Settings) -> None:
+    requests: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json=[{"position_current": 1, "points_current": 42}])
+
+    http_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="https://api.openf1.test/v1/"
+    )
+    client = OpenF1RestClient(settings, http_client)
+
+    drivers = await client.championship_drivers(session_key="latest")
+    teams = await client.championship_teams(session_key="latest")
+
+    assert drivers == teams == [{"position_current": 1, "points_current": 42}]
+    assert [request.url.path for request in requests] == [
+        "/v1/championship_drivers",
+        "/v1/championship_teams",
+    ]
+    assert all(request.url.params["session_key"] == "latest" for request in requests)
+    assert {"championship_drivers", "championship_teams"}.issubset(
+        client.status["supported_endpoints"]
+    )
+    assert client._cache
+    assert all(expires_at - time.monotonic() <= 30.1 for expires_at, _ in client._cache.values())
     await http_client.aclose()
 
 

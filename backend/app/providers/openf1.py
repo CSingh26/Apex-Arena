@@ -36,6 +36,8 @@ OPENF1_ENDPOINTS = frozenset(
         "stints",
         "race_control",
         "weather",
+        "championship_drivers",
+        "championship_teams",
         "session_result",
         "starting_grid",
         "car_data",
@@ -121,7 +123,13 @@ class OpenF1RestClient:
         if self._owns_client:
             await self.client.aclose()
 
-    async def _get(self, endpoint: str, filters: dict[str, Any]) -> list[dict[str, Any]]:
+    async def _get(
+        self,
+        endpoint: str,
+        filters: dict[str, Any],
+        *,
+        cache_ttl_seconds: float | None = None,
+    ) -> list[dict[str, Any]]:
         if endpoint not in OPENF1_ENDPOINTS:
             raise ValueError(f"Unsupported OpenF1 endpoint: {endpoint}")
         if len(filters) > 20:
@@ -186,8 +194,11 @@ class OpenF1RestClient:
         if not isinstance(data, list) or not all(isinstance(row, dict) for row in data):
             raise ProviderPayloadError("OpenF1 returned an unexpected response shape")
         rows = [dict(row) for row in data]
-        if self.cache_ttl_seconds:
-            self._cache[cache_key] = (time.monotonic() + self.cache_ttl_seconds, rows)
+        effective_cache_ttl = (
+            self.cache_ttl_seconds if cache_ttl_seconds is None else cache_ttl_seconds
+        )
+        if effective_cache_ttl:
+            self._cache[cache_key] = (time.monotonic() + effective_cache_ttl, rows)
         return [dict(row) for row in rows]
 
     async def _throttle(self) -> None:
@@ -229,6 +240,20 @@ class OpenF1RestClient:
 
     async def weather(self, **filters: Any) -> list[dict[str, Any]]:
         return await self._get("weather", filters)
+
+    async def championship_drivers(self, **filters: Any) -> list[dict[str, Any]]:
+        return await self._get(
+            "championship_drivers",
+            filters,
+            cache_ttl_seconds=min(self.cache_ttl_seconds, 30.0),
+        )
+
+    async def championship_teams(self, **filters: Any) -> list[dict[str, Any]]:
+        return await self._get(
+            "championship_teams",
+            filters,
+            cache_ttl_seconds=min(self.cache_ttl_seconds, 30.0),
+        )
 
     async def session_result(self, **filters: Any) -> list[dict[str, Any]]:
         return await self._get("session_result", filters)

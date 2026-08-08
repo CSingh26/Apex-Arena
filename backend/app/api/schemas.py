@@ -110,3 +110,127 @@ class SeasonCalendarSummary(BaseModel):
 class DebugConfigResponse(BaseModel):
     runtime: dict[str, Any]
     features: dict[str, bool]
+
+
+class ChampionshipMetadata(BaseModel):
+    season: int
+    generated_at: datetime
+    latest_completed_event: str | None = None
+    races_completed: int
+    races_remaining: int | None = None
+    source: str
+    cached: bool = False
+    cache_age_seconds: int = 0
+    live: bool = False
+    provisional: bool = False
+    stale: bool = False
+
+
+class ChampionshipDriverRef(BaseModel):
+    driver_id: str
+    driver_number: int | None = None
+    full_name: str
+    acronym: str | None = None
+    headshot_url: str | None = None
+    points: float | None = None
+
+
+class DriverStanding(BaseModel):
+    position: int
+    driver_id: str
+    driver_number: int | None = None
+    first_name: str | None = None
+    last_name: str | None = None
+    full_name: str
+    acronym: str | None = None
+    country_code: str | None = None
+    headshot_url: str | None = None
+    team_id: str | None = None
+    team_name: str | None = None
+    team_colour: str | None = None
+    points: float
+    wins: int | None = None
+    podiums: int | None = None
+    top_5_finishes: int | None = None
+    top_10_finishes: int | None = None
+    poles: int | None = None
+    fastest_laps: int | None = None
+    race_starts: int | None = None
+    classified_finishes: int | None = None
+    dnfs: int | None = None
+    dsqs: int | None = None
+    sprint_starts: int | None = None
+    sprint_wins: int | None = None
+    sprint_podiums: int | None = None
+    sprint_points: float | None = None
+    best_sprint_finish: int | None = None
+    average_finish: float | None = None
+    best_finish: int | None = None
+    worst_classified_finish: int | None = None
+    average_grid_position: float | None = None
+    average_qualifying_position: float | None = None
+    best_qualifying_result: int | None = None
+    q3_appearances: int | None = None
+    positions_gained_lost: int | None = None
+    championship_position_change: int | None = None
+    points_change_from_previous_race: float | None = None
+    latest_race_finish: int | None = None
+    latest_race_points: float | None = None
+    races_completed: int
+    points_per_race: float | None = None
+    podium_percentage: float | None = None
+    points_finishing_percentage: float | None = None
+
+
+class ConstructorStanding(BaseModel):
+    position: int
+    constructor_id: str
+    team_name: str
+    team_colour: str | None = None
+    logo_url: str | None = None
+    points: float
+    wins: int | None = None
+    podiums: int | None = None
+    poles: int | None = None
+    fastest_laps: int | None = None
+    race_starts: int | None = None
+    double_podiums: int | None = None
+    dnfs: int | None = None
+    sprint_wins: int | None = None
+    sprint_podiums: int | None = None
+    average_finish: float | None = None
+    average_points_per_event: float | None = None
+    championship_position_change: int | None = None
+    points_change_from_previous_race: float | None = None
+    drivers: list[ChampionshipDriverRef] = Field(default_factory=list)
+    races_completed: int
+
+
+class DriverStandingsResponse(BaseModel):
+    standings: list[DriverStanding]
+    metadata: ChampionshipMetadata
+
+
+class ConstructorStandingsResponse(BaseModel):
+    standings: list[ConstructorStanding]
+    metadata: ChampionshipMetadata
+
+
+class ChampionshipLeader(BaseModel):
+    id: str
+    name: str
+    points: float
+    advantage: float | None = None
+    headshot_url: str | None = None
+    team_colour: str | None = None
+
+
+class ChampionshipSummaryResponse(BaseModel):
+    driver_leader: ChampionshipLeader | None = None
+    constructor_leader: ChampionshipLeader | None = None
+    closest_title_battle: dict[str, Any] | None = None
+    races_completed: int
+    races_remaining: int | None = None
+    latest_race: str | None = None
+    next_race: str | None = None
+    metadata: ChampionshipMetadata

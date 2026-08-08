@@ -13,8 +13,11 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from app.api.schemas import (
     AppHealth,
+    ChampionshipSummaryResponse,
     ComponentHealth,
+    ConstructorStandingsResponse,
     DebugConfigResponse,
+    DriverStandingsResponse,
     EngineStatusResponse,
     HealthResponse,
     HistoricalIngestionRequest,
@@ -28,6 +31,7 @@ from app.api.schemas import (
 from app.api.streaming import session_event_stream
 from app.domain.models import MeetingLifecycleStatus
 from app.providers.jolpica import JolpicaPayloadError
+from app.services.championship import ChampionshipUnavailableError
 from app.services.container import AppServices
 from app.services.historical import HistoricalIngestionError
 from app.services.openf1_backfill import backfill_job_status
@@ -205,6 +209,48 @@ async def openf1_backfill_status(
 @router.get("/api/v1/live/status", response_model=LiveStatusResponse)
 async def live_status(services: Services) -> LiveStatusResponse:
     return LiveStatusResponse(**services.openf1_live.status())
+
+
+@router.get(
+    "/api/v1/championship/drivers",
+    response_model=DriverStandingsResponse,
+)
+async def championship_drivers(services: Services) -> DriverStandingsResponse:
+    try:
+        return await services.championship.drivers()
+    except ChampionshipUnavailableError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
+
+
+@router.get(
+    "/api/v1/championship/constructors",
+    response_model=ConstructorStandingsResponse,
+)
+async def championship_constructors(services: Services) -> ConstructorStandingsResponse:
+    try:
+        return await services.championship.constructors()
+    except ChampionshipUnavailableError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
+
+
+@router.get(
+    "/api/v1/championship/summary",
+    response_model=ChampionshipSummaryResponse,
+)
+async def championship_summary(services: Services) -> ChampionshipSummaryResponse:
+    try:
+        return await services.championship.summary()
+    except ChampionshipUnavailableError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
 
 
 @router.get("/api/v1/engine/status", response_model=EngineStatusResponse)

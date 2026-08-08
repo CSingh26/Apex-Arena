@@ -29,4 +29,10 @@ describe("AppNavigation", () => {
     expect(screen.getAllByRole("link", { name: "Experience" })[0]).toHaveAttribute("href", "#experience");
     expect(screen.getAllByRole("link", { name: "The room" })[0]).toHaveAttribute("href", "#agents");
   });
+
+  it("marks Standings active on the championship route", () => {
+    window.history.replaceState(null, "", "/standings");
+    render(<AppNavigation />);
+    expect(screen.getAllByRole("link", { name: "Standings" })[0]).toHaveAttribute("aria-current", "page");
+  });
 });

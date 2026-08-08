@@ -30,6 +30,12 @@ const nextConfig: NextConfig = {
   output: "standalone",
   basePath,
   allowedDevOrigins: ["127.0.0.1"],
+  images: {
+    remotePatterns: [
+      { protocol: "https", hostname: "media.formula1.com" },
+      { protocol: "https", hostname: "images.openf1.org" },
+    ],
+  },
   async redirects() {
     return [
       {

@@ -18,6 +18,7 @@ type AppNavigationProps = {
 const navigation = [
   { href: appRoutes.home, label: "Home", matches: (pathname: string) => pathname === "/" },
   { href: appRoutes.rooms, label: "Race Rooms", matches: (pathname: string) => pathname.startsWith("/rooms") },
+  { href: appRoutes.standings, label: "Standings", matches: (pathname: string) => pathname.startsWith("/standings") },
 ] as const;
 
 function connectionLabel(connection: ConnectionState): string {

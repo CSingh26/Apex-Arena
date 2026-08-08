@@ -8,6 +8,7 @@ from contextlib import suppress
 from app.core.settings import Settings
 from app.providers.jolpica import JolpicaClient
 from app.providers.openf1 import OpenF1AuthService, OpenF1LiveClient, OpenF1RestClient
+from app.services.championship import ChampionshipService
 from app.services.circuit_intelligence import (
     CircuitIntelligenceService,
     CircuitWeatherService,
@@ -74,6 +75,13 @@ class AppServices:
         self.circuit_intelligence = CircuitIntelligenceService()
         self.circuit_weather = CircuitWeatherService(self.openf1)
         self.season = SeasonService(settings, self.jolpica)
+        self.championship = ChampionshipService(
+            season=settings.season_year,
+            openf1=self.openf1,
+            jolpica=self.jolpica,
+            season_service=self.season,
+            redis=self.redis.client,
+        )
 
         self.raw_event_repository = SqlRawEventRepository(self.database)
         self.normalized_event_repository = SqlNormalizedEventRepository(self.database)
@@ -123,7 +131,12 @@ class AppServices:
             deduplicator=EventDeduplicator(settings.event_dedup_ttl_seconds),
             ordering_buffer=self.ordering_buffer,
             sequence_numbers=SequenceNumberService(self.normalized_event_repository),
-            consumers=[self.race_state, self.redis_publisher, self.room_discussion],
+            consumers=[
+                self.race_state,
+                self.redis_publisher,
+                self.room_discussion,
+                self.championship,
+            ],
         )
         self.openf1_live = OpenF1LiveClient(
             settings,

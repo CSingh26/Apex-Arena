@@ -9,6 +9,7 @@ export const APP_BASE_PATH = normalizeBasePath(process.env.NEXT_PUBLIC_APP_BASE_
 export const appRoutes = {
   home: "/",
   rooms: "/rooms",
+  standings: "/standings",
   room: (slug: string) => `/rooms/${encodeURIComponent(slug)}`,
 } as const;
 
