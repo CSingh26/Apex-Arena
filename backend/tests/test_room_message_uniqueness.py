@@ -161,9 +161,7 @@ def test_room_message_model_uses_active_partial_unique_indexes() -> None:
 
 
 def test_legacy_all_row_unique_constraints_are_removed_from_model() -> None:
-    constraint_names = {
-        constraint.name for constraint in RoomMessageRecord.__table__.constraints
-    }
+    constraint_names = {constraint.name for constraint in RoomMessageRecord.__table__.constraints}
 
     assert "uq_room_trigger_agent" not in constraint_names
     assert "uq_room_message_generation_key" not in constraint_names

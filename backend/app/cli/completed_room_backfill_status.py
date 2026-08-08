@@ -41,9 +41,7 @@ async def run(args: argparse.Namespace) -> int:
             "season": args.season,
             "rooms_seen": len(rows),
             "backfill_candidates": sum(1 for row in rows if row["backfill_candidate"]),
-            "ready_for_chat_generation": sum(
-                1 for row in rows if not row["backfill_candidate"]
-            ),
+            "ready_for_chat_generation": sum(1 for row in rows if not row["backfill_candidate"]),
             "results": rows,
         }
         if args.json_summary:
