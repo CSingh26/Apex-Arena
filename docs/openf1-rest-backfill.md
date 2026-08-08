@@ -137,7 +137,7 @@ Verify the public room state:
 ```sql
 SELECT slug, meeting_key, session_key, status, mode, ingestion_status,
        source_availability, replay_available, results_available,
-       eligibility_status, is_development, last_event_at
+       eligibility_status, last_event_at
 FROM race_rooms
 WHERE slug = '2026-belgian-grand-prix-qualifying';
 ```

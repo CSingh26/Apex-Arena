@@ -19,7 +19,7 @@ describe("EvidenceDrawer", () => {
       snapshot_reference: null, data_quality_flags: ["complete"], generation_mode: "deterministic", confidence: "high",
     });
     const onClose = vi.fn();
-    render(<EvidenceDrawer slug="day3-validation-room" message={selected} agent={agents[0]} onClose={onClose} />);
+    render(<EvidenceDrawer slug="belgian-grand-prix-race" message={selected} agent={agents[0]} onClose={onClose} />);
 
     expect(await screen.findByText("Event #7")).toBeVisible();
     expect(screen.getByText("Pit duration")).toBeVisible();
@@ -37,7 +37,7 @@ describe("EvidenceDrawer", () => {
     opener.textContent = "Evidence opener";
     document.body.append(opener);
     opener.focus();
-    const { unmount } = render(<EvidenceDrawer slug="day3-validation-room" message={selected} agent={agents[0]} onClose={vi.fn()} />);
+    const { unmount } = render(<EvidenceDrawer slug="belgian-grand-prix-race" message={selected} agent={agents[0]} onClose={vi.fn()} />);
     const close = within(await screen.findByRole("dialog")).getByRole("button", { name: "Close evidence panel" });
     await waitFor(() => expect(close).toHaveFocus());
     await userEvent.tab();

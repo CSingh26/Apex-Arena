@@ -16,6 +16,8 @@ import type {
   RoomDiagnostics,
   DriverStandingsResponse,
   ConstructorStandingsResponse,
+  SessionBootstrap,
+  SessionCapabilities,
 } from "@/lib/types";
 import { apiPath } from "@/lib/app-paths";
 
@@ -88,6 +90,17 @@ export function getSessionState(
     `/sessions/${encodeURIComponent(sessionKey)}/state`,
     signal,
   );
+}
+
+export function getSession(sessionId: string, signal?: AbortSignal): Promise<SessionBootstrap> {
+  return request<SessionBootstrap>(`/sessions/${encodeURIComponent(sessionId)}`, signal);
+}
+
+export function getSessionCapabilities(
+  sessionId: string,
+  signal?: AbortSignal,
+): Promise<SessionCapabilities> {
+  return request<SessionCapabilities>(`/sessions/${encodeURIComponent(sessionId)}/capabilities`, signal);
 }
 
 export function sessionStreamUrl(sessionKey: string, lastSequenceNumber: number): string {

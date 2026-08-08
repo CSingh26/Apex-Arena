@@ -89,8 +89,7 @@ class FakeRoomRepository:
         return [
             room
             for room in self.rooms
-            if not room.is_development
-            and room.session_type
+            if room.session_type
             in {
                 SessionType.QUALIFYING,
                 SessionType.SPRINT_QUALIFYING,

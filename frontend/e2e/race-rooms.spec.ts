@@ -2,7 +2,6 @@
 import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
 
 const API_BASE_URL = process.env.E2E_API_URL ?? "http://localhost:8764";
-const DEVELOPMENT_FIXTURE_ENABLED = process.env.E2E_DEVELOPMENT_FIXTURE === "true";
 const VIEWPORT_WIDTHS = [1440, 1280, 1024, 768, 390, 320] as const;
 
 type SessionSummary = {
@@ -54,29 +53,6 @@ async function replayRoom(request: APIRequestContext): Promise<{ event: EventWee
     const session = event.sessions.find((item) => item.room_slug && item.replay_available);
     if (session) return { event, session };
   }
-  if (DEVELOPMENT_FIXTURE_ENABLED) {
-    const fixture = await request.get(`${API_BASE_URL}/api/v1/race-rooms/day3-validation-room`);
-    expect(fixture.ok(), "the isolated CI replay fixture should be available").toBeTruthy();
-    return {
-      event: {
-        event_slug: "day3-validation",
-        event_name: "Day 3 Validation",
-        weekend_start: "2026-07-17T10:00:00Z",
-        weekend_status: "completed",
-        is_sprint_weekend: false,
-        sessions: [],
-      },
-      session: {
-        session_type: "RACE",
-        display_name: "Day 3 Validation Room",
-        scheduled_start: "2026-07-17T10:00:00Z",
-        status: "completed",
-        room_slug: "day3-validation-room",
-        eligibility: "replay_ready",
-        replay_available: true,
-      },
-    };
-  }
   throw new Error("The production smoke test needs at least one completed replay-ready session");
 }
 
@@ -88,6 +64,10 @@ async function expectNoHorizontalOverflow(page: Page): Promise<void> {
 
 function expectAscending(values: number[]): void {
   expect(values).toEqual([...values].sort((left, right) => left - right));
+}
+
+function expectDescending(values: number[]): void {
+  expect(values).toEqual([...values].sort((left, right) => right - left));
 }
 
 test.describe.configure({ mode: "serial" });
@@ -125,9 +105,15 @@ test("groups real standard and Sprint weekends in chronological public categorie
   const sprint = catalog.events.find((event) => event.is_sprint_weekend);
 
   expect(catalog.events.length).toBeGreaterThan(0);
-  expectAscending(completed.map((event) => Date.parse(event.weekend_start)));
+  expectDescending(completed.map((event) => Date.parse(event.weekend_start)));
   expectAscending(upcoming.map((event) => Date.parse(event.weekend_start)));
-  expect(standard?.sessions.map((session) => session.session_type)).toEqual(["QUALIFYING", "RACE"]);
+  expect(standard?.sessions.map((session) => session.session_type)).toEqual([
+    "PRACTICE_1",
+    "PRACTICE_2",
+    "PRACTICE_3",
+    "QUALIFYING",
+    "RACE",
+  ]);
   expect(sprint?.sessions.map((session) => session.session_type)).toEqual([
     "SPRINT_QUALIFYING",
     "SPRINT",
@@ -142,12 +128,9 @@ test("groups real standard and Sprint weekends in chronological public categorie
   await expect(page.getByRole("heading", { name: "Live This Weekend" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Completed Events" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Upcoming Events" })).toBeVisible();
-  await expect(page.getByText("Day 3 Validation Room")).toHaveCount(0);
   if (sprint) {
     await expect(page.locator(".event-card").filter({ hasText: sprint.event_name }).getByText("Sprint weekend")).toBeVisible();
   }
-  const fixture = await request.get(`${API_BASE_URL}/api/v1/race-rooms/day3-validation-room`);
-  expect(fixture.status()).toBe(DEVELOPMENT_FIXTURE_ENABLED ? 200 : 404);
   await expectNoHorizontalOverflow(page);
   expect(browserErrors).toEqual([]);
 });
@@ -192,9 +175,7 @@ test("keeps a replay conversation compact, inspectable, and session-aware", asyn
   await expect(page.getByRole("heading", { name: "Session conversation" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Session timeline" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Track dossier" })).toBeVisible();
-  if (!DEVELOPMENT_FIXTURE_ENABLED || session.room_slug !== "day3-validation-room") {
-    await expect(page.locator(".circuit-records > div")).toHaveCount(3);
-  }
+  await expect(page.locator(".circuit-records > div")).toHaveCount(3);
   await expect(page.getByRole("heading", { name: "Track weather" })).toBeVisible();
   await expect(page.locator(".weather-card__notice")).toBeVisible();
   await expect(page.getByTestId("playback-controls")).toBeVisible();

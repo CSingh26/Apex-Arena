@@ -13,7 +13,6 @@ from app.services.circuit_intelligence import (
     CircuitIntelligenceService,
     CircuitWeatherService,
 )
-from app.services.development_fixture import DevelopmentFixtureService
 from app.services.discussion import RaceRoomDiscussionEngine
 from app.services.discussion_triggers import DiscussionTriggerEvaluator
 from app.services.event_pipeline import (
@@ -96,17 +95,11 @@ class AppServices:
             settings.race_state_snapshot_every_n_events,
         )
         self.redis_publisher = RaceEventRedisPublisher(self.event_bus, self.race_state)
-        fixture = (
-            DevelopmentFixtureService(self.normalized_event_repository)
-            if settings.app_env in {"local", "test"} and settings.development_fixture_enabled
-            else None
-        )
         self.room_eligibility = RoomEligibilityService()
         self.rooms = RaceRoomService(
             self.room_repository,
             self.season,
             settings.season_year,
-            fixture=fixture,
             openf1=self.openf1,
             eligibility=self.room_eligibility,
         )

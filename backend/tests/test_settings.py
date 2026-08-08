@@ -115,7 +115,6 @@ def test_api_role_cannot_enable_recent_reconciliation(settings: Settings) -> Non
         redis_url="rediss://default:t@x.upstash.io:6379",
         postgres_password=None,
         debug_ingestion_enabled=False,
-        development_fixture_enabled=False,
         room_diagnostics_enabled=False,
     )
     with pytest.raises(ValidationError, match="reconciliation requires"):
@@ -223,7 +222,6 @@ def test_production_api_cannot_enable_historical_backfill(settings: Settings) ->
         redis_url="rediss://default:t@x.upstash.io:6379",
         postgres_password=None,
         debug_ingestion_enabled=False,
-        development_fixture_enabled=False,
         room_diagnostics_enabled=False,
     )
     with pytest.raises(ValidationError, match="API processes cannot enable"):

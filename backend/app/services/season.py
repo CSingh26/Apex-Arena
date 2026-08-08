@@ -50,9 +50,15 @@ class SeasonService:
             f"{race_date.isoformat()}T{race_time}".replace("Z", "+00:00")
         )
 
-        if race_start <= now < race_start + timedelta(hours=4):
+        sessions = self._sessions(race, race_start)
+        weekend_start = min(session.starts_at for session in sessions)
+        weekend_end = max(
+            session.ends_at or session.starts_at + self._session_duration(session.name)
+            for session in sessions
+        )
+        if weekend_start - timedelta(hours=12) <= now < weekend_end:
             status = MeetingLifecycleStatus.LIVE
-        elif now >= race_start + timedelta(hours=4):
+        elif now >= weekend_end:
             status = MeetingLifecycleStatus.COMPLETED
         else:
             status = MeetingLifecycleStatus.UPCOMING
@@ -77,7 +83,7 @@ class SeasonService:
             status=status,
             is_target=is_target,
             source_url=str(race["url"]) if race.get("url") else None,
-            sessions=self._sessions(race, race_start),
+            sessions=sessions,
         )
 
     def _sessions(self, race: dict[str, object], race_start: datetime) -> list[RaceWeekendSession]:
@@ -92,10 +98,31 @@ class SeasonService:
             )
             key = (name, starts_at)
             if key not in seen:
-                sessions.append(RaceWeekendSession(name=name, starts_at=starts_at))
+                sessions.append(
+                    RaceWeekendSession(
+                        name=name,
+                        starts_at=starts_at,
+                        ends_at=starts_at + self._session_duration(name),
+                    )
+                )
                 seen.add(key)
-        sessions.append(RaceWeekendSession(name="Race", starts_at=race_start))
+        sessions.append(
+            RaceWeekendSession(
+                name="Race",
+                starts_at=race_start,
+                ends_at=race_start + self._session_duration("Race"),
+            )
+        )
         return sorted(sessions, key=lambda session: session.starts_at)
+
+    @staticmethod
+    def _session_duration(name: str) -> timedelta:
+        normalized = name.casefold()
+        if "race" in normalized and "sprint" not in normalized:
+            return timedelta(hours=4)
+        if "sprint" in normalized and "qual" not in normalized and "shootout" not in normalized:
+            return timedelta(hours=2)
+        return timedelta(hours=2)
 
     @staticmethod
     def _slug(value: str) -> str:

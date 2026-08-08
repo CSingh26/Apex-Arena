@@ -4,7 +4,6 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 from app.domain.models import NormalizedRaceEvent, RaceEventType
-from app.services.development_fixture import day3_validation_events
 
 
 def race_room_event(
@@ -31,4 +30,17 @@ def race_room_event(
 
 
 def ten_lap_fixture() -> list[NormalizedRaceEvent]:
-    return day3_validation_events()
+    laps = [
+        race_room_event(
+            RaceEventType.LAP_COMPLETED,
+            sequence=sequence,
+            lap=sequence,
+            payload={"lap_duration": 90.0 - sequence / 10},
+        ).model_copy(update={"driver_numbers": [4, 63, 81]})
+        for sequence in range(1, 11)
+    ]
+    return laps + [
+        race_room_event(RaceEventType.SAFETY_CAR, sequence=11, lap=10),
+        race_room_event(RaceEventType.OVERTAKE, sequence=12, lap=10),
+        race_room_event(RaceEventType.SESSION_FINISH, sequence=13, lap=10),
+    ]

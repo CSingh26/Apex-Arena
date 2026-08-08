@@ -44,7 +44,6 @@ class RoomEligibilityService:
         replay_available: bool = False,
         results_available: bool = False,
         existing_room: RaceRoom | None = None,
-        test_fixture_mode: bool = False,
         now: datetime | None = None,
     ) -> RoomEligibilityResult:
         observed_at = self._aware(now or self._clock())
@@ -54,19 +53,6 @@ class RoomEligibilityService:
             if isinstance(actual_status, RoomStatus)
             else str(actual_status or "")
         ).casefold()
-
-        if test_fixture_mode:
-            return RoomEligibilityResult(
-                status=(
-                    RoomEligibilityStatus.ALREADY_EXISTS
-                    if existing_room is not None
-                    else RoomEligibilityStatus.ELIGIBLE_HISTORICAL
-                ),
-                can_create=existing_room is None,
-                can_open=True,
-                can_replay=True,
-                reason="Internal deterministic fixture mode is enabled.",
-            )
 
         # A stale row from an older catalog must never make a future session active.
         if (
@@ -194,7 +180,6 @@ class RoomEligibilityService:
             replay_available=room.replay_available,
             results_available=room.results_available,
             existing_room=room,
-            test_fixture_mode=room.is_development,
             now=now,
         )
 

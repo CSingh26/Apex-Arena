@@ -123,7 +123,6 @@ class Settings(BaseSettings):
     room_stream_backlog_limit: int = Field(default=250, ge=1, le=1000)
     room_replay_interval_seconds: float = Field(default=0.6, ge=0.05, le=10)
     room_diagnostics_enabled: bool = False
-    development_fixture_enabled: bool = False
     historical_ingestion_enabled: bool = True
     historical_ingestion_max_records_per_endpoint: int = Field(default=5000, ge=1, le=50000)
     historical_provider_retry_attempts: int = Field(default=3, ge=1, le=6)
@@ -314,8 +313,6 @@ class Settings(BaseSettings):
                 raise ValueError("Production REDIS_URL must use rediss://")
             if self.debug_ingestion_enabled:
                 raise ValueError("DEBUG_INGESTION_ENABLED must be false in production")
-            if self.development_fixture_enabled:
-                raise ValueError("DEVELOPMENT_FIXTURE_ENABLED must be false in production")
             if self.room_diagnostics_enabled:
                 raise ValueError("ROOM_DIAGNOSTICS_ENABLED must be false in production")
         return self

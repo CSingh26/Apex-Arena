@@ -13,7 +13,15 @@ import type { EventSessionSummary, EventWeekendStatus, RaceRoomEvent } from "@/l
 
 import styles from "./race-rooms-revamp.module.css";
 
-const SESSION_ORDER = ["SPRINT_QUALIFYING", "SPRINT", "QUALIFYING", "RACE"];
+const SESSION_ORDER = [
+  "PRACTICE_1",
+  "PRACTICE_2",
+  "PRACTICE_3",
+  "SPRINT_QUALIFYING",
+  "SPRINT",
+  "QUALIFYING",
+  "RACE",
+];
 
 function formatDate(value: string, includeTime = false): string {
   const date = new Date(value);
@@ -47,7 +55,12 @@ function availabilityLabel(session: EventSessionSummary): string {
   if (session.data_availability === "limited_telemetry") return "Some timing data missing";
   if (session.data_availability === "timing_only") return "Timing data only";
   if (session.data_availability === "telemetry") return "Telemetry available";
-  if (session.data_availability === "unavailable" && session.status === "scheduled") return "Live feed arms at session start";
+  if (
+    session.data_availability === "unavailable" &&
+    ["scheduled", "upcoming"].includes(session.status)
+  ) {
+    return "Race Room opens when session data becomes available";
+  }
   if (session.data_availability === "unavailable" && session.status === "completed") return "Provider data not published yet";
   if (session.data_availability === "unavailable") return "Waiting for the live provider feed";
   if (session.status === "ingesting" || session.status === "provider_pending") return "Session data is being prepared";
@@ -79,7 +92,7 @@ function countdownParts(milliseconds: number) {
 }
 
 function isPublicEvent(event: RaceRoomEvent): boolean {
-  return !event.is_development && !event.event_slug.toLowerCase().includes("validation");
+  return Boolean(event.event_slug);
 }
 
 type OpenPreview = (event: RaceRoomEvent, session?: EventSessionSummary) => void;

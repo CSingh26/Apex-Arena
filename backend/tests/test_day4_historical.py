@@ -73,7 +73,7 @@ def meeting(
         ("Sprint Shootout", SessionType.SPRINT_QUALIFYING),
         ("Sprint Race", SessionType.SPRINT),
         ("Race", SessionType.RACE),
-        ("Practice 2", None),
+        ("Practice 2", SessionType.PRACTICE_2),
     ],
 )
 def test_competitive_session_names_have_one_canonical_identity(

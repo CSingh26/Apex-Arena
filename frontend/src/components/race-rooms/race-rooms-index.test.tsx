@@ -56,13 +56,11 @@ const upcomingSprint = weekend({ event_id: "belgium-2026", event_slug: "belgian-
   session({ session_type: "QUALIFYING", display_name: "Qualifying", scheduled_start: "2099-07-25T14:00:00Z", actual_start: null, status: "scheduled", room_slug: null, room_eligible: false, eligibility: "future_read_only", replay_available: false, results_available: false }),
   session({ scheduled_start: "2099-07-26T13:00:00Z", actual_start: null, status: "scheduled", room_slug: null, room_eligible: false, eligibility: "future_read_only", replay_available: false, results_available: false }),
 ] });
-const validationWeekend = weekend({ event_id: "validation", event_slug: "private-validation-room", event_name: "Private Validation Room", is_development: true });
-
 describe("RaceRoomsIndex", () => {
   beforeEach(() => {
     getRaceRoomEvents.mockClear();
     window.history.replaceState(null, "", "/rooms");
-    getRaceRoomEvents.mockResolvedValue({ events: [upcomingSprint, completedLater, validationWeekend, liveWeekend, weekend()], total: 4, limit: 100, offset: 0 });
+    getRaceRoomEvents.mockResolvedValue({ events: [upcomingSprint, completedLater, liveWeekend, weekend()], total: 4, limit: 100, offset: 0 });
   });
 
   it("uses the themed race loader while the schedule is pending", () => {
@@ -71,7 +69,7 @@ describe("RaceRoomsIndex", () => {
     expect(screen.getByRole("status", { name: "Mapping the 2026 race grid" })).toBeVisible();
   });
 
-  it("renders three grouped categories, concise session actions, and excludes validation fixtures", async () => {
+  it("renders three grouped categories and concise session actions", async () => {
     render(<RaceRoomsIndex />);
     expect(document.querySelector("main")).toHaveAttribute("id", "main-content");
     expect(screen.getByRole("heading", { name: "Race Rooms" })).toBeVisible();
@@ -79,8 +77,7 @@ describe("RaceRoomsIndex", () => {
     expect(screen.getByRole("heading", { name: "Completed Events" })).toBeVisible();
     expect(screen.getByRole("heading", { name: "Upcoming Events" })).toBeVisible();
     expect(screen.getByRole("navigation", { name: "Race calendar sections" })).toBeVisible();
-    expect(screen.getByText("Live feed arms at session start")).toBeVisible();
-    expect(screen.queryByText(/Validation Room/)).not.toBeInTheDocument();
+    expect(screen.getByText("Race Room opens when session data becomes available")).toBeVisible();
     expect(screen.queryByText(/archived/i)).not.toBeInTheDocument();
 
     const completed = screen.getByRole("heading", { name: "Completed Events" }).closest("section");

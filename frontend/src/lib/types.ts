@@ -146,7 +146,14 @@ export type RaceWeekendSession = {
   starts_at: string;
 };
 
-export type SessionRoomType = "QUALIFYING" | "SPRINT_QUALIFYING" | "SPRINT" | "RACE" | string;
+export type SessionRoomType =
+  | "PRACTICE_1"
+  | "PRACTICE_2"
+  | "PRACTICE_3"
+  | "QUALIFYING"
+  | "SPRINT_QUALIFYING"
+  | "SPRINT"
+  | "RACE";
 export type EventWeekendStatus = "live" | "completed" | "upcoming";
 export type RoomEligibility =
   | "eligible_live"
@@ -159,6 +166,7 @@ export type RoomEligibility =
 
 /** A public, session-level summary returned as part of a grouped event weekend. */
 export type EventSessionSummary = {
+  session_id?: string;
   session_type: SessionRoomType;
   display_name: string;
   scheduled_start: string;
@@ -170,6 +178,29 @@ export type EventSessionSummary = {
   data_availability: SourceAvailability;
   replay_available: boolean;
   results_available: boolean;
+};
+
+export type CapabilityStatus = "available" | "partial" | "unavailable" | "unknown";
+
+export type SessionCapabilities = {
+  timing: CapabilityStatus;
+  telemetry: CapabilityStatus;
+  location: CapabilityStatus;
+  weather: CapabilityStatus;
+  race_control: CapabilityStatus;
+  pit_stops: CapabilityStatus;
+  stints: CapabilityStatus;
+  results: CapabilityStatus;
+  checked_at: string | null;
+  source: string | null;
+};
+
+export type SessionBootstrap = {
+  session: EventSessionSummary;
+  weekend: RaceRoomEvent;
+  room_status: RoomEligibility;
+  capabilities: SessionCapabilities;
+  room_slug: string | null;
 };
 
 /** Public Race Rooms index model. One item represents one race weekend. */
@@ -187,7 +218,6 @@ export type RaceRoomEvent = {
   weekend_status: EventWeekendStatus;
   is_sprint_weekend: boolean;
   sessions: EventSessionSummary[];
-  is_development?: boolean;
 };
 
 export type RaceRoomEventsResponse = {
@@ -316,7 +346,7 @@ export type RaceRoom = {
   current_lap: number | null; total_laps: number | null; source_availability: SourceAvailability;
   telemetry_quality: string;
   message_count: number; agent_count: number; last_event_at: string | null; created_at: string; updated_at: string;
-  is_featured: boolean; is_development: boolean;
+  is_featured: boolean;
   current_phase?: string | null;
   phase_boundaries_available?: boolean;
 };

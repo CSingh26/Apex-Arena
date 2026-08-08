@@ -598,16 +598,6 @@ class DeterministicRoomGenerator:
                 "One fastest lap does not prove sustainable race pace.",
                 ["event_type"],
             )
-        if agent_id == "arjun-reyes" and "season_context" in context.evidence:
-            return self._message(
-                MessageType.REPLY,
-                "The supplied context explicitly marks this as a synthetic validation race, so "
-                "no championship comparison or points implication is valid.",
-                Confidence.HIGH,
-                EvidenceStatus.GROUNDED,
-                "No championship points apply to the fixture.",
-                ["season_context"],
-            )
         return self._message(
             MessageType.QUESTION,
             "The event is real, but the easy conclusion is still on trial. What does the next "

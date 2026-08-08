@@ -65,6 +65,7 @@ class Season(BaseModel):
 class RaceWeekendSession(BaseModel):
     name: str
     starts_at: datetime
+    ends_at: datetime | None = None
 
 
 class RaceMeeting(BaseModel):

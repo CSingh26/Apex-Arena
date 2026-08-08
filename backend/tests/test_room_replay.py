@@ -18,29 +18,28 @@ from app.domain.rooms import (
 from app.services.room_replay import ReplayUnavailableError, RoomReplayCoordinator
 
 
-def replay_room(*, session_key: str | None = "day3-session") -> RaceRoom:
+def replay_room(*, session_key: str | None = "belgian-race-session") -> RaceRoom:
     return RaceRoom(
-        slug="day3-validation-room",
+        slug="belgian-grand-prix-race",
         session_key=session_key,
         season=2026,
-        round_number=99,
-        race_name="Day 3 Validation Race",
-        official_name="Apex Arena Day 3 Validation Race",
-        circuit_name="Apex Validation Circuit",
-        country="Development",
+        round_number=13,
+        race_name="Belgian Grand Prix",
+        official_name="Belgian Grand Prix",
+        circuit_name="Circuit de Spa-Francorchamps",
+        country="Belgium",
         scheduled_start=datetime(2026, 7, 17, 12, tzinfo=UTC),
         status=RoomStatus.READY,
-        mode=RoomMode.DEVELOPMENT,
+        mode=RoomMode.ARCHIVED,
         total_laps=12,
         source_availability=SourceAvailability.TELEMETRY,
-        is_development=True,
     )
 
 
 def replay_event(sequence: int, lap: int) -> NormalizedRaceEvent:
     timestamp = datetime(2026, 7, 17, 12, 0, sequence, tzinfo=UTC)
     return NormalizedRaceEvent(
-        session_key="day3-session",
+        session_key="belgian-race-session",
         source="fixture",
         event_time=timestamp,
         received_at=timestamp,
@@ -49,7 +48,7 @@ def replay_event(sequence: int, lap: int) -> NormalizedRaceEvent:
         driver_numbers=[4],
         lap_number=lap,
         payload={"lap_number": lap},
-        dedup_key=f"day3:{sequence}",
+        dedup_key=f"replay-fixture:{sequence}",
         is_replay=True,
     )
 
@@ -321,9 +320,12 @@ async def test_restart_resets_discussion_state_and_replays_from_sequence_zero() 
     assert restarted.current_lap == 0
     assert restarted.playback_speed == 1
     assert rooms.reset_count == 1
-    assert discussion.resets == [("day3-session", str(room.id))]
-    assert race_state.resets == ["day3-session"]
-    assert events.reads[-2:] == [("day3-session", 0, 1), ("day3-session", 1, 1)]
+    assert discussion.resets == [("belgian-race-session", str(room.id))]
+    assert race_state.resets == ["belgian-race-session"]
+    assert events.reads[-2:] == [
+        ("belgian-race-session", 0, 1),
+        ("belgian-race-session", 1, 1),
+    ]
     assert any(status["status"] == "discussion_reset" for status in bus.statuses)
     await replay.close()
 
@@ -374,16 +376,16 @@ async def test_speed_and_seek_controls_update_durable_playback_and_publish() -> 
     assert by_lap.current_lap == 5
     assert rooms.playback.current_event_sequence == 6
     assert rooms.event_message_queries == [
-        ("day3-session", 6),
-        ("day3-session", 6),
+        ("belgian-race-session", 6),
+        ("belgian-race-session", 6),
     ]
     assert discussion.consumed == [3, 3]
     assert discussion.resets == [
-        ("day3-session", str(room.id)),
-        ("day3-session", str(room.id)),
+        ("belgian-race-session", str(room.id)),
+        ("belgian-race-session", str(room.id)),
     ]
     assert race_state.consumed == [3, 3]
-    assert race_state.resets == ["day3-session", "day3-session"]
+    assert race_state.resets == ["belgian-race-session", "belgian-race-session"]
     assert len(bus.states) == 3
 
 
@@ -421,8 +423,8 @@ async def test_running_replay_and_seek_are_serialized_into_one_coherent_state() 
     assert paused.is_paused is True
     assert discussion.consumed == [1, 1, 2, 3]
     assert race_state.consumed == [1, 1, 2, 3]
-    assert race_state.resets == ["day3-session"]
-    assert rooms.event_message_queries == [("day3-session", 3)]
+    assert race_state.resets == ["belgian-race-session"]
+    assert rooms.event_message_queries == [("belgian-race-session", 3)]
     assert 4 not in discussion.consumed
     await replay.close()
 

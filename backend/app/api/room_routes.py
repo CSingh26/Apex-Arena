@@ -56,13 +56,6 @@ async def require_room(slug: str, services: AppServices):
     room = await services.room_repository.get_room(slug)
     if room is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Race room not found")
-    runtime_settings = getattr(services, "settings", None)
-    app_env = getattr(runtime_settings, "app_env", "test")
-    fixture_access = app_env == "test" or (
-        app_env == "local" and bool(getattr(runtime_settings, "development_fixture_enabled", False))
-    )
-    if room.is_development and not fixture_access:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Race room not found")
     try:
         _eligibility_service(services).require_room_action(room, action="open")
     except RoomActionUnavailableError as exc:
@@ -112,10 +105,8 @@ async def list_race_rooms(
         limit=limit,
         offset=offset,
     )
-    public_rooms = [room for room in rooms if not room.is_development]
-    total = max(0, total - (len(rooms) - len(public_rooms)))
     return RaceRoomListResponse(
-        rooms=public_rooms,
+        rooms=rooms,
         total=total,
         limit=limit,
         offset=offset,

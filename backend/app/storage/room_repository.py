@@ -139,12 +139,9 @@ class SqlRaceRoomRepository:
         sort: str = "race_date_desc",
         limit: int = 20,
         offset: int = 0,
-        include_development: bool = False,
         include_unavailable: bool = False,
     ) -> tuple[list[RaceRoom], int]:
         filters = []
-        if not include_development:
-            filters.append(RaceRoomRecord.is_development.is_(False))
         if not include_unavailable:
             filters.append(
                 RaceRoomRecord.status.not_in(
@@ -202,7 +199,6 @@ class SqlRaceRoomRepository:
         statement = (
             select(RaceRoomRecord)
             .where(
-                RaceRoomRecord.is_development.is_(False),
                 RaceRoomRecord.session_type.in_(
                     [
                         SessionType.QUALIFYING.value,
@@ -285,7 +281,6 @@ class SqlRaceRoomRepository:
     ) -> list[RaceRoom]:
         filters = [
             RaceRoomRecord.season == season,
-            RaceRoomRecord.is_development.is_(False),
             RaceRoomRecord.session_key.is_not(None),
             RaceRoomRecord.session_type.in_(
                 [
@@ -343,7 +338,6 @@ class SqlRaceRoomRepository:
         )
         filters = [
             RaceRoomRecord.season == season,
-            RaceRoomRecord.is_development.is_(False),
             RaceRoomRecord.session_type.in_(
                 [
                     SessionType.QUALIFYING.value,
@@ -412,7 +406,6 @@ class SqlRaceRoomRepository:
         )
         filters = [
             RaceRoomRecord.season == season,
-            RaceRoomRecord.is_development.is_(False),
             RaceRoomRecord.session_type.in_(
                 [
                     SessionType.QUALIFYING.value,
@@ -900,32 +893,3 @@ class SqlRaceRoomRepository:
                 .values(message_count=0, current_lap=None, last_event_at=None)
             )
             await session.commit()
-
-    async def delete_empty_development_room(self, slug: str) -> bool:
-        """Retire a superseded fixture without touching rooms that contain discussion."""
-        async with self.database.session_factory() as session:
-            room_id = (
-                await session.execute(
-                    select(RaceRoomRecord.id)
-                    .where(
-                        RaceRoomRecord.slug == slug,
-                        RaceRoomRecord.is_development.is_(True),
-                        RaceRoomRecord.message_count == 0,
-                        ~select(RoomMessageRecord.id)
-                        .where(RoomMessageRecord.room_id == RaceRoomRecord.id)
-                        .exists(),
-                    )
-                    .with_for_update()
-                )
-            ).scalar_one_or_none()
-            if room_id is None:
-                return False
-            await session.execute(
-                delete(RoomPlaybackStateRecord).where(RoomPlaybackStateRecord.room_id == room_id)
-            )
-            await session.execute(
-                delete(RaceRoomAgentRecord).where(RaceRoomAgentRecord.room_id == room_id)
-            )
-            await session.execute(delete(RaceRoomRecord).where(RaceRoomRecord.id == room_id))
-            await session.commit()
-            return True

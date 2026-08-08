@@ -6,11 +6,18 @@ import hmac
 import logging
 from datetime import UTC, datetime
 from typing import Annotated
+from uuid import UUID
 
 import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from app.api.room_schemas import (
+    EventWeekendListResponse,
+    SessionBootstrapResponse,
+    SessionCapabilitiesResponse,
+    SessionListResponse,
+)
 from app.api.schemas import (
     AppHealth,
     ChampionshipSummaryResponse,
@@ -30,6 +37,7 @@ from app.api.schemas import (
 )
 from app.api.streaming import session_event_stream
 from app.domain.models import MeetingLifecycleStatus
+from app.domain.rooms import SessionBootstrap
 from app.providers.jolpica import JolpicaPayloadError
 from app.services.championship import ChampionshipUnavailableError
 from app.services.container import AppServices
@@ -45,6 +53,57 @@ def get_services(request: Request) -> AppServices:
 
 
 Services = Annotated[AppServices, Depends(get_services)]
+
+
+@router.get("/api/v1/season/{season}/weekends", response_model=EventWeekendListResponse)
+async def season_weekends(season: int, services: Services) -> EventWeekendListResponse:
+    events, total = await services.rooms.grouped_events(season=season, limit=100, offset=0)
+    return EventWeekendListResponse(events=events, total=total, limit=100, offset=0)
+
+
+@router.get("/api/v1/weekends/{event_slug}")
+async def weekend_detail(event_slug: str, services: Services):
+    event = await services.rooms.event_weekend(event_slug)
+    if event is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Weekend not found")
+    return event
+
+
+@router.get("/api/v1/weekends/{event_slug}/sessions", response_model=SessionListResponse)
+async def weekend_sessions(event_slug: str, services: Services) -> SessionListResponse:
+    event = await services.rooms.event_weekend(event_slug)
+    if event is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Weekend not found")
+    return SessionListResponse(sessions=event.sessions)
+
+
+@router.get(
+    "/api/v1/sessions/{session_id}/capabilities", response_model=SessionCapabilitiesResponse
+)
+async def session_capabilities(session_id: UUID, services: Services) -> SessionCapabilitiesResponse:
+    result = await services.rooms.session_bootstrap(session_id)
+    if result is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
+    _, _, room = result
+    return SessionCapabilitiesResponse(**services.rooms.capabilities_for(room).model_dump())
+
+
+@router.get("/api/v1/sessions/{session_id}/room", response_model=SessionBootstrapResponse)
+@router.get("/api/v1/sessions/{session_id}", response_model=SessionBootstrapResponse)
+async def session_detail(session_id: UUID, services: Services) -> SessionBootstrapResponse:
+    result = await services.rooms.session_bootstrap(session_id)
+    if result is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
+    weekend, session, room = result
+    return SessionBootstrapResponse(
+        **SessionBootstrap(
+            session=session,
+            weekend=weekend,
+            room_status=session.eligibility,
+            capabilities=services.rooms.capabilities_for(room),
+            room_slug=session.room_slug,
+        ).model_dump()
+    )
 
 
 @router.get("/", include_in_schema=False)

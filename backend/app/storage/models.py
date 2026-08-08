@@ -313,7 +313,6 @@ class RaceRoomRecord(Base, TimestampMixin):
     )
     last_event_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     is_featured: Mapped[bool] = mapped_column(Boolean, default=False)
-    is_development: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 class RaceRoomAgentRecord(Base):

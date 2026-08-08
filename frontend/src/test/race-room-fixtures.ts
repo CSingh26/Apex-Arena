@@ -12,11 +12,11 @@ export const agents: AgentProfile[] = [
 ];
 
 export const room: RaceRoom = {
-  id: "00000000-0000-0000-0000-000000000001", slug: "day3-validation-room", session_key: "day3-validation", season: 2026, round_number: 12,
-  race_name: "Day 3 Validation Grand Prix", official_name: "ApexArena Day 3 Validation Grand Prix", circuit_name: "Apex Validation Circuit", country: "Test Territory", country_code: "TT", session_type: "Race",
-  scheduled_start: createdAt, actual_start: createdAt, status: "ready", mode: "development", current_lap: 0, total_laps: 12,
+  id: "00000000-0000-0000-0000-000000000001", slug: "belgian-grand-prix-race", session_key: "belgian-race-session", season: 2026, round_number: 13,
+  race_name: "Belgian Grand Prix", official_name: "Belgian Grand Prix", circuit_name: "Circuit de Spa-Francorchamps", country: "Belgium", country_code: "BE", session_type: "Race",
+  scheduled_start: createdAt, actual_start: createdAt, status: "ready", mode: "archived", current_lap: 0, total_laps: 12,
   source_availability: "telemetry", telemetry_quality: "fixture_complete", message_count: 2, agent_count: 5, last_event_at: createdAt,
-  created_at: createdAt, updated_at: createdAt, is_featured: true, is_development: true,
+  created_at: createdAt, updated_at: createdAt, is_featured: true,
 };
 
 export const playback: RoomPlayback = { room_id: room.id, current_event_sequence: 0, current_message_sequence: 0, current_lap: 0, playback_speed: 1, is_paused: true, started_at: null, updated_at: createdAt };

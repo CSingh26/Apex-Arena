@@ -167,7 +167,6 @@ class OpenF1RoomFinalizer:
                 "results_available": bool(room.results_available or has_results),
                 "telemetry_quality": availability.value,
                 "last_event_at": last_event_at or room.last_event_at,
-                "is_development": False,
                 "updated_at": datetime.now(UTC),
             }
             if replay_available:
