@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Any, Protocol
 from uuid import UUID
@@ -187,6 +187,7 @@ class HistoricalOpenF1Adapter:
         all_records: list[RawEventInput] = []
         driver_registry: dict[int, DriverIdentity] = {}
         normalized_session_type: str | None = None
+        high_frequency_from = await self._high_frequency_window_start(session_key, selected)
         try:
             for stage_name, stage_endpoints in selected_stages:
                 stage_records: list[RawEventInput] = []
@@ -194,7 +195,12 @@ class HistoricalOpenF1Adapter:
                 for endpoint in stage_endpoints:
                     fetch = getattr(self.client, endpoint)
                     try:
-                        payloads = await fetch(session_key=session_key)
+                        payloads = await self._fetch_endpoint(
+                            endpoint,
+                            fetch,
+                            session_key,
+                            high_frequency_from,
+                        )
                     except Exception as exc:
                         stage_failures.append(endpoint)
                         failed_endpoints.append(endpoint)
@@ -396,6 +402,64 @@ class HistoricalOpenF1Adapter:
             )
         return result
 
+    async def _high_frequency_window_start(
+        self,
+        session_key: str,
+        selected: list[str],
+    ) -> datetime | None:
+        """Bound GPS/car-data fetches to the end of a completed session.
+
+        OpenF1 requires a date or driver filter for its high-frequency endpoints.
+        A short tail of the final racing laps provides one current sample per
+        driver for the Race Room without downloading a full race's raw feed.
+        """
+
+        if not set(selected) & {"car_data", "location"}:
+            return None
+        try:
+            laps = await self.client.laps(session_key=session_key)
+        except Exception as exc:
+            logger.warning(
+                "High-frequency window unavailable session=%s error=%s",
+                session_key,
+                type(exc).__name__,
+            )
+            return None
+        latest = max((self._payload_time(row) for row in laps), default=None)
+        return latest - timedelta(minutes=5) if latest is not None else None
+
+    async def _fetch_endpoint(
+        self,
+        endpoint: str,
+        fetch: Any,
+        session_key: str,
+        high_frequency_from: datetime | None,
+    ) -> list[dict[str, Any]]:
+        if endpoint not in {"car_data", "location"}:
+            return await fetch(session_key=session_key)
+        if high_frequency_from is None:
+            return await fetch(session_key=session_key)
+        payloads = await fetch(
+            session_key=session_key,
+            # OpenF1's filter parser accepts RFC 3339 seconds, but not the
+            # microsecond form emitted by datetime.isoformat() by default.
+            **{"date>": high_frequency_from.isoformat(timespec="seconds")},
+        )
+        return self._latest_sample_per_driver(payloads)
+
+    @classmethod
+    def _latest_sample_per_driver(cls, payloads: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        latest: dict[int, tuple[datetime, dict[str, Any]]] = {}
+        for payload in payloads:
+            driver_number = cls._optional_int(payload.get("driver_number"))
+            event_time = cls._payload_time(payload)
+            if driver_number is None or event_time is None:
+                continue
+            current = latest.get(driver_number)
+            if current is None or event_time >= current[0]:
+                latest[driver_number] = (event_time, payload)
+        return [payload for _, payload in sorted(latest.values(), key=lambda item: item[0])]
+
     @staticmethod
     def _session_type(payloads: list[dict[str, Any]], session_key: str) -> str | None:
         for payload in payloads:
@@ -501,3 +565,12 @@ class HistoricalOpenF1Adapter:
                 continue
             return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
         return None
+
+    @staticmethod
+    def _optional_int(value: object) -> int | None:
+        if value is None or isinstance(value, bool):
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
