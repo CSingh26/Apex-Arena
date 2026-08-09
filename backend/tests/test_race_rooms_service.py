@@ -94,16 +94,12 @@ class FakeRoomRepository:
         self.rooms[room.slug] = room
         return room
 
-    async def delete_empty_development_room(self, slug: str) -> bool:
-        self.cleanup_calls.append(slug)
-        return True
-
     async def get_room(self, slug: str) -> RaceRoom | None:
         return self.rooms.get(slug)
 
     async def list_rooms(self, **filters: object) -> tuple[list[RaceRoom], int]:
         self.list_calls.append(filters)
-        rooms = [room for room in self.rooms.values() if not room.is_development]
+        rooms = list(self.rooms.values())
         season = filters.get("season")
         if season is not None:
             rooms = [room for room in rooms if room.season == season]
@@ -139,15 +135,6 @@ class FakeOpenF1:
         if self.failure is not None:
             raise self.failure
         return self.session_rows
-
-
-class FakeFixture:
-    def __init__(self) -> None:
-        self.seed_count = 0
-
-    async def seed(self) -> int:
-        self.seed_count += 1
-        return 14
 
 
 @pytest.mark.asyncio
@@ -300,7 +287,7 @@ async def test_resync_preserves_dynamic_room_state_via_repository_upsert_contrac
             "message_count": 14,
             "current_lap": 8,
             "status": RoomStatus.PAUSED,
-            "mode": RoomMode.DEVELOPMENT,
+            "mode": RoomMode.ARCHIVED,
         }
     )
     await service.sync_meetings([race], [openf1_session()])
@@ -313,45 +300,19 @@ async def test_resync_preserves_dynamic_room_state_via_repository_upsert_contrac
 
 
 @pytest.mark.asyncio
-async def test_force_sync_seeds_fixture_and_reports_room_count() -> None:
+async def test_force_sync_creates_only_provider_backed_rooms() -> None:
     repository = FakeRoomRepository()
-    fixture = FakeFixture()
     service = RaceRoomService(
         repository,  # type: ignore[arg-type]
         FakeSeason([meeting()]),  # type: ignore[arg-type]
         2026,
-        fixture=fixture,  # type: ignore[arg-type]
         openf1=FakeOpenF1([openf1_session()]),  # type: ignore[arg-type]
     )
 
     count = await service.force_sync()
 
-    assert count == 2
-    assert fixture.seed_count == 1
-    assert repository.cleanup_calls == ["development-day2-validation"]
-    assert set(repository.rooms) == {
-        "day3-validation-room",
-        "2026-belgian-grand-prix-race",
-    }
-
-
-@pytest.mark.asyncio
-async def test_catalog_read_does_not_seed_or_publish_the_development_fixture() -> None:
-    repository = FakeRoomRepository()
-    fixture = FakeFixture()
-    service = RaceRoomService(
-        repository,  # type: ignore[arg-type]
-        FakeSeason([]),  # type: ignore[arg-type]
-        2026,
-        fixture=fixture,  # type: ignore[arg-type]
-    )
-
-    await service.ensure_catalog()
-    await service.ensure_catalog()
-
-    assert fixture.seed_count == 0
-    assert repository.cleanup_calls == []
-    assert "day3-validation-room" not in repository.rooms
+    assert count == 1
+    assert set(repository.rooms) == {"2026-belgian-grand-prix-race"}
 
 
 def sprint_weekend() -> RaceMeeting:
@@ -377,9 +338,21 @@ def standard_weekend() -> RaceMeeting:
     return meeting(
         sessions=[
             RaceWeekendSession(
+                name="Practice 1",
+                starts_at=datetime(2026, 7, 17, 10, tzinfo=UTC),
+            ),
+            RaceWeekendSession(
+                name="Practice 2",
+                starts_at=datetime(2026, 7, 17, 14, tzinfo=UTC),
+            ),
+            RaceWeekendSession(
+                name="Practice 3",
+                starts_at=datetime(2026, 7, 18, 10, tzinfo=UTC),
+            ),
+            RaceWeekendSession(
                 name="Qualifying",
                 starts_at=datetime(2026, 7, 18, 15, tzinfo=UTC),
-            )
+            ),
         ]
     )
 
@@ -456,10 +429,51 @@ async def test_standard_weekend_creates_distinct_qualifying_and_race_identities(
         "2026-belgian-grand-prix-qualifying",
         "2026-belgian-grand-prix-race",
     }
-    assert [
-        item.session_type
-        for item in sorted(repository.rooms.values(), key=lambda room: room.scheduled_start)
-    ] == [SessionType.QUALIFYING, SessionType.RACE]
+    events, _ = await service.grouped_events(now=datetime(2026, 7, 20, tzinfo=UTC))
+    assert [item.session_type for item in events[0].sessions] == [
+        SessionType.PRACTICE_1,
+        SessionType.PRACTICE_2,
+        SessionType.PRACTICE_3,
+        SessionType.QUALIFYING,
+        SessionType.RACE,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_session_bootstrap_has_stable_apex_identity_and_does_not_claim_unknown_data() -> None:
+    repository = FakeRoomRepository()
+    service = RaceRoomService(
+        repository,  # type: ignore[arg-type]
+        FakeSeason([]),  # type: ignore[arg-type]
+        2026,
+    )
+    await service.sync_meetings(
+        [standard_weekend()],
+        [
+            {
+                **openf1_session(),
+                "meeting_key": 61,
+                "meeting_name": "Belgian Grand Prix",
+                "session_key": 6101,
+                "session_name": "Qualifying",
+                "date_start": "2026-07-18T15:00:00Z",
+            },
+            {**openf1_session(), "meeting_key": 61, "session_key": 6102},
+        ],
+        now=datetime(2026, 7, 20, tzinfo=UTC),
+    )
+
+    events, _ = await service.grouped_events(now=datetime(2026, 7, 20, tzinfo=UTC))
+    qualifying = next(
+        session for session in events[0].sessions if session.session_type is SessionType.QUALIFYING
+    )
+    bootstrap = await service.session_bootstrap(qualifying.session_id)
+
+    assert bootstrap is not None
+    _, resolved, room = bootstrap
+    assert resolved.session_id == qualifying.session_id
+    assert room is None
+    assert service.capabilities_for(room).weather.value == "unknown"
 
 
 @pytest.mark.asyncio
@@ -547,7 +561,7 @@ async def test_missing_sprint_provider_data_remains_read_only_and_unavailable() 
 
 
 @pytest.mark.asyncio
-async def test_completed_and_upcoming_event_groups_are_both_oldest_first() -> None:
+async def test_completed_events_are_newest_first_and_upcoming_events_are_nearest_first() -> None:
     early = meeting(
         race_name="Australian Grand Prix",
         race_date=date(2026, 3, 8),
@@ -582,8 +596,8 @@ async def test_completed_and_upcoming_event_groups_are_both_oldest_first() -> No
     events, _ = await service.grouped_events(now=datetime(2026, 7, 18, tzinfo=UTC))
 
     assert [event.event_name for event in events] == [
-        "Australian Grand Prix",
         "British Grand Prix",
+        "Australian Grand Prix",
         "Hungarian Grand Prix",
         "Abu Dhabi Grand Prix",
     ]

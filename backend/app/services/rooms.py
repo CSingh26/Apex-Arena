@@ -8,9 +8,11 @@ import time
 from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 from app.domain.models import MeetingLifecycleStatus, RaceMeeting, RaceWeekendSession
 from app.domain.rooms import (
+    CapabilityStatus,
     EventWeekend,
     IngestionStatus,
     PublicSessionStatus,
@@ -18,13 +20,13 @@ from app.domain.rooms import (
     RoomEligibilityStatus,
     RoomMode,
     RoomStatus,
+    SessionCapabilities,
     SessionRoomSummary,
     SessionType,
     SourceAvailability,
     WeekendStatus,
 )
 from app.providers.openf1 import OpenF1RestClient
-from app.services.development_fixture import DAY3_FIXTURE_SESSION_KEY, DevelopmentFixtureService
 from app.services.provider_matching import OpenF1SessionMatcher
 from app.services.room_agents import active_agent_profiles
 from app.services.room_eligibility import RoomEligibilityService
@@ -34,6 +36,9 @@ from app.storage.room_repository import SqlRaceRoomRepository
 logger = logging.getLogger(__name__)
 
 SESSION_DURATION = {
+    SessionType.PRACTICE_1: timedelta(hours=2),
+    SessionType.PRACTICE_2: timedelta(hours=2),
+    SessionType.PRACTICE_3: timedelta(hours=2),
     SessionType.SPRINT_QUALIFYING: timedelta(hours=1, minutes=30),
     SessionType.SPRINT: timedelta(hours=2),
     SessionType.QUALIFYING: timedelta(hours=2),
@@ -49,19 +54,16 @@ class RaceRoomService:
         repository: SqlRaceRoomRepository,
         season: SeasonService,
         season_year: int,
-        fixture: DevelopmentFixtureService | None = None,
         openf1: OpenF1RestClient | None = None,
         eligibility: RoomEligibilityService | None = None,
     ) -> None:
         self.repository = repository
         self.season = season
         self.season_year = season_year
-        self.fixture = fixture
         self.openf1 = openf1
         self.eligibility = eligibility or RoomEligibilityService()
         self.session_matcher = OpenF1SessionMatcher()
         self._catalog_ready = False
-        self._foundation_ready = False
         self._retry_after = 0.0
         self._sync_lock = asyncio.Lock()
         self._meetings: list[RaceMeeting] = []
@@ -106,16 +108,6 @@ class RaceRoomService:
         """Internal authenticated lifecycle operation; safe to retry."""
         async with self._sync_lock:
             count = 0
-            if self.fixture is not None:
-                agents = active_agent_profiles()
-                await self.repository.seed_agents(agents)
-                await self.repository.upsert_room(
-                    self._development_room(), [agent.id for agent in agents]
-                )
-                await self.fixture.seed()
-                await self._retire_legacy_fixture()
-                self._foundation_ready = True
-                count += 1
             meetings = await self.season.calendar(self.season_year)
             sessions = await self._historical_sessions()
             self._meetings = meetings
@@ -157,11 +149,7 @@ class RaceRoomService:
             # those rows filtered out.
             include_unavailable=True,
         )
-        public_rooms = {
-            (room.round_number, room.session_type): room
-            for room in rooms
-            if not room.is_development
-        }
+        public_rooms = {(room.round_number, room.session_type): room for room in rooms}
         observed_at = self._aware(now or datetime.now(UTC))
         events = [
             self._event_weekend(
@@ -195,6 +183,30 @@ class RaceRoomService:
         events.sort(key=self._event_sort_key)
         total = len(events)
         return events[offset : offset + limit], total
+
+    async def event_weekend(
+        self, event_slug: str, *, season: int | None = None
+    ) -> EventWeekend | None:
+        events, _ = await self.grouped_events(season=season, limit=100, offset=0)
+        return next((event for event in events if event.event_slug == event_slug), None)
+
+    async def session_bootstrap(
+        self, session_id: UUID
+    ) -> tuple[EventWeekend, SessionRoomSummary, RaceRoom | None] | None:
+        """Resolve an Apex session identity from lightweight catalog metadata."""
+
+        events, _ = await self.grouped_events(limit=100, offset=0)
+        for event in events:
+            for session in event.sessions:
+                if session.session_id != session_id:
+                    continue
+                room = (
+                    await self._existing_room(session.room_slug)
+                    if session.room_slug is not None
+                    else None
+                )
+                return event, session, room
+        return None
 
     async def _synchronize(
         self,
@@ -313,6 +325,7 @@ class RaceRoomService:
             )
             summaries.append(
                 SessionRoomSummary(
+                    session_id=self._session_id(meeting, session_type, scheduled.starts_at),
                     session_type=session_type,
                     display_name=session_type.display_name,
                     scheduled_start=scheduled.starts_at,
@@ -364,7 +377,7 @@ class RaceRoomService:
     def _events_from_rooms(self, rooms: list[RaceRoom], now: datetime) -> list[EventWeekend]:
         grouped: dict[tuple[int, int], list[RaceRoom]] = {}
         for room in rooms:
-            if room.is_development or room.round_number is None:
+            if room.round_number is None:
                 continue
             grouped.setdefault((room.season, room.round_number), []).append(room)
         events: list[EventWeekend] = []
@@ -398,6 +411,7 @@ class RaceRoomService:
                     is_sprint_weekend=any(item.is_sprint_weekend for item in event_rooms),
                     sessions=[
                         SessionRoomSummary(
+                            session_id=self._session_id_from_room(room),
                             session_type=room.session_type,
                             display_name=room.session_type.display_name,
                             scheduled_start=room.scheduled_start,
@@ -422,11 +436,6 @@ class RaceRoomService:
             )
         return events
 
-    async def _retire_legacy_fixture(self) -> None:
-        cleanup = getattr(self.repository, "delete_empty_development_room", None)
-        if cleanup is not None:
-            await cleanup("development-day2-validation")
-
     async def _existing_room(self, slug: str) -> RaceRoom | None:
         getter = getattr(self.repository, "get_room", None)
         if getter is not None:
@@ -445,12 +454,85 @@ class RaceRoomService:
     @staticmethod
     def _room_slug(event_slug: str, session_type: SessionType) -> str:
         suffix = {
+            SessionType.PRACTICE_1: "practice-1",
+            SessionType.PRACTICE_2: "practice-2",
+            SessionType.PRACTICE_3: "practice-3",
             SessionType.SPRINT_QUALIFYING: "sprint-qualifying",
             SessionType.SPRINT: "sprint",
             SessionType.QUALIFYING: "qualifying",
             SessionType.RACE: "race",
         }[session_type]
         return f"{event_slug}-{suffix}"
+
+    @staticmethod
+    def _session_id(
+        meeting: RaceMeeting, session_type: SessionType, scheduled_start: datetime
+    ) -> UUID:
+        """Stable Apex identity; provider IDs remain explicit metadata, not identity."""
+
+        timestamp = scheduled_start.astimezone(UTC).isoformat()
+        return uuid5(
+            NAMESPACE_URL,
+            f"apex-arena:session:{meeting.season_year}:{meeting.round_number}:{session_type}:{timestamp}",
+        )
+
+    @staticmethod
+    def _session_id_from_room(room: RaceRoom) -> UUID:
+        timestamp = room.scheduled_start.astimezone(UTC).isoformat()
+        return uuid5(
+            NAMESPACE_URL,
+            f"apex-arena:session:{room.season}:{room.round_number}:{room.session_type}:{timestamp}",
+        )
+
+    @staticmethod
+    def capabilities_for(room: RaceRoom | None) -> SessionCapabilities:
+        """Map persisted availability without claiming endpoint-level data we do not have."""
+
+        if room is None:
+            return SessionCapabilities(
+                timing=CapabilityStatus.UNAVAILABLE,
+                telemetry=CapabilityStatus.UNAVAILABLE,
+                location=CapabilityStatus.UNKNOWN,
+                weather=CapabilityStatus.UNKNOWN,
+                race_control=CapabilityStatus.UNKNOWN,
+                pit_stops=CapabilityStatus.UNKNOWN,
+                stints=CapabilityStatus.UNKNOWN,
+                results=CapabilityStatus.UNAVAILABLE,
+            )
+        availability = room.source_availability
+        timing = (
+            CapabilityStatus.AVAILABLE
+            if availability in {SourceAvailability.TELEMETRY, SourceAvailability.TIMING_ONLY}
+            else CapabilityStatus.PARTIAL
+            if availability is SourceAvailability.LIMITED
+            else CapabilityStatus.UNAVAILABLE
+        )
+        telemetry = (
+            CapabilityStatus.AVAILABLE
+            if availability is SourceAvailability.TELEMETRY
+            else CapabilityStatus.PARTIAL
+            if availability is SourceAvailability.LIMITED
+            else CapabilityStatus.UNAVAILABLE
+        )
+        historical_detail = (
+            CapabilityStatus.PARTIAL
+            if availability in {SourceAvailability.TELEMETRY, SourceAvailability.LIMITED}
+            else CapabilityStatus.UNKNOWN
+        )
+        return SessionCapabilities(
+            timing=timing,
+            telemetry=telemetry,
+            location=historical_detail,
+            weather=historical_detail,
+            race_control=historical_detail,
+            pit_stops=historical_detail,
+            stints=historical_detail,
+            results=(
+                CapabilityStatus.AVAILABLE if room.results_available else CapabilityStatus.UNKNOWN
+            ),
+            checked_at=room.updated_at,
+            source="openf1" if room.session_key else None,
+        )
 
     def _from_session(
         self,
@@ -650,42 +732,21 @@ class RaceRoomService:
         return WeekendStatus.UPCOMING
 
     @staticmethod
-    def _event_sort_key(event: EventWeekend) -> tuple[int, datetime]:
+    def _event_sort_key(event: EventWeekend) -> tuple[int, float]:
         rank = {
             WeekendStatus.LIVE: 0,
             WeekendStatus.COMPLETED: 1,
             WeekendStatus.UPCOMING: 2,
         }[event.weekend_status]
-        return rank, event.weekend_start
+        timestamp = event.weekend_start.astimezone(UTC).timestamp()
+        # Completed weekends lead with the latest event; future events lead
+        # with the nearest event. This is intentionally backend-owned so every
+        # consumer receives the same chronology.
+        ordered_timestamp = (
+            -timestamp if event.weekend_status is WeekendStatus.COMPLETED else timestamp
+        )
+        return rank, ordered_timestamp
 
     @staticmethod
     def _aware(value: datetime) -> datetime:
         return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
-
-    def _development_room(self) -> RaceRoom:
-        return RaceRoom(
-            slug="day3-validation-room",
-            event_slug="day3-validation",
-            session_key=DAY3_FIXTURE_SESSION_KEY,
-            season=self.season_year,
-            race_name="Day 3 Validation Room",
-            official_name="Apex Arena Day 3 Development Validation",
-            circuit_name="Synthetic validation circuit",
-            country="Development fixture",
-            session_type=SessionType.RACE,
-            scheduled_start=datetime(2026, 7, 16, 12, tzinfo=UTC),
-            weekend_start=datetime(2026, 7, 16, 12, tzinfo=UTC),
-            weekend_end=datetime(2026, 7, 16, 16, tzinfo=UTC),
-            status=RoomStatus.READY,
-            mode=RoomMode.DEVELOPMENT,
-            eligibility_status=RoomEligibilityStatus.ELIGIBLE_HISTORICAL,
-            ingestion_status=IngestionStatus.READY,
-            source_availability=SourceAvailability.LIMITED,
-            replay_available=True,
-            results_available=True,
-            telemetry_quality="deterministic_fixture",
-            total_laps=12,
-            agent_count=5,
-            is_featured=False,
-            is_development=True,
-        )

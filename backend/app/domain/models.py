@@ -33,6 +33,8 @@ class RaceEventType(StrEnum):
     INVESTIGATION = "INVESTIGATION"
     WEATHER_CHANGE = "WEATHER_CHANGE"
     WEATHER_UPDATE = "WEATHER_UPDATE"
+    CAR_DATA_SAMPLE = "CAR_DATA_SAMPLE"
+    LOCATION_SAMPLE = "LOCATION_SAMPLE"
     RETIREMENT = "RETIREMENT"
     FASTEST_LAP = "FASTEST_LAP"
     LAP_DELETED = "LAP_DELETED"
@@ -65,6 +67,7 @@ class Season(BaseModel):
 class RaceWeekendSession(BaseModel):
     name: str
     starts_at: datetime
+    ends_at: datetime | None = None
 
 
 class RaceMeeting(BaseModel):

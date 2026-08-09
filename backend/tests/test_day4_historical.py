@@ -73,7 +73,7 @@ def meeting(
         ("Sprint Shootout", SessionType.SPRINT_QUALIFYING),
         ("Sprint Race", SessionType.SPRINT),
         ("Race", SessionType.RACE),
-        ("Practice 2", None),
+        ("Practice 2", SessionType.PRACTICE_2),
     ],
 )
 def test_competitive_session_names_have_one_canonical_identity(
@@ -440,6 +440,9 @@ def test_driver_identity_resolution_enriches_public_evidence_without_guessing_te
     assert enriched["resolved_driver_name"] == "Oscar Piastri"
     assert enriched["resolved_team_name"] == "McLaren"
     assert resolver.public_label(enriched, 81) == "Oscar Piastri"
+    assert (
+        resolver.public_label({"resolved_driver_name": "Valtteri BOTTAS"}, 77) == "Valtteri Bottas"
+    )
     assert resolver.public_label({"driver_number": 99}, 99) == "The driver in car 99"
     assert (
         resolver.public_label(

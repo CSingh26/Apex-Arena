@@ -305,7 +305,7 @@ base path: it defaults to `<base path>/api`, and can be overridden with
 
 ## Project documentation
 
-- [Day 3: Race Rooms and evidence architecture](docs/day-3-race-rooms.md)
+- [Sprint 1: session architecture](docs/sprint-1-session-architecture.md)
 - [Live race operations and failure states](docs/live-race-operations.md)
 - [Agent conversation experience](docs/arena-chat-experience.md)
 

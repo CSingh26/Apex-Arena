@@ -18,7 +18,7 @@ class FakeOpenF1Client:
         self.queries: list[tuple[str, str]] = []
 
     def __getattr__(self, endpoint: str) -> Any:
-        async def fetch(*, session_key: str) -> list[dict[str, Any]]:
+        async def fetch(*, session_key: str, **filters: Any) -> list[dict[str, Any]]:
             self.queries.append((endpoint, session_key))
             return self.payloads.get(endpoint, [])
 
@@ -135,3 +135,30 @@ def test_historical_payload_time_is_timezone_aware() -> None:
     parsed = HistoricalOpenF1Adapter._payload_time({"date": "2026-07-19T13:00:00"})
 
     assert parsed == datetime(2026, 7, 19, 13, tzinfo=UTC)
+
+
+@pytest.mark.asyncio
+async def test_high_frequency_ingestion_keeps_the_latest_sample_for_each_driver() -> None:
+    client = FakeOpenF1Client(
+        {
+            "laps": [{"date_start": "2026-07-19T13:10:00Z", "session_key": 9839}],
+            "location": [
+                {"driver_number": 4, "date": "2026-07-19T13:09:00Z", "x": 1},
+                {"driver_number": 4, "date": "2026-07-19T13:10:00Z", "x": 2},
+                {"driver_number": 81, "date": "2026-07-19T13:10:01Z", "x": 3},
+            ],
+        }
+    )
+    processor = FakeProcessor()
+    adapter = HistoricalOpenF1Adapter(
+        client=client,  # type: ignore[arg-type]
+        processor=processor,  # type: ignore[arg-type]
+        runs=FakeRuns(),
+        snapshots=FakeSnapshots(),
+        max_records_per_endpoint=500,
+    )
+
+    result = await adapter.ingest_session("9839", ["location"])
+
+    assert result.fetched_records == 2
+    assert [event.raw_payload["x"] for event in processor.events] == [2, 3]

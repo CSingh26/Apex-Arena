@@ -6,11 +6,18 @@ import hmac
 import logging
 from datetime import UTC, datetime
 from typing import Annotated
+from uuid import UUID
 
 import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from app.api.room_schemas import (
+    EventWeekendListResponse,
+    SessionBootstrapResponse,
+    SessionCapabilitiesResponse,
+    SessionListResponse,
+)
 from app.api.schemas import (
     AppHealth,
     ChampionshipSummaryResponse,
@@ -26,15 +33,20 @@ from app.api.schemas import (
     OpenF1StatusResponse,
     SeasonCalendarSummary,
     SessionEventsResponse,
+    SessionLocationsResponse,
     SessionStateResponse,
+    SessionTelemetryResponse,
+    SessionTimingResponse,
 )
 from app.api.streaming import session_event_stream
 from app.domain.models import MeetingLifecycleStatus
+from app.domain.rooms import SessionBootstrap
 from app.providers.jolpica import JolpicaPayloadError
 from app.services.championship import ChampionshipUnavailableError
 from app.services.container import AppServices
 from app.services.historical import HistoricalIngestionError
 from app.services.openf1_backfill import backfill_job_status
+from app.services.session_realtime import location_state, telemetry_state, timing_state
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -45,6 +57,57 @@ def get_services(request: Request) -> AppServices:
 
 
 Services = Annotated[AppServices, Depends(get_services)]
+
+
+@router.get("/api/v1/season/{season}/weekends", response_model=EventWeekendListResponse)
+async def season_weekends(season: int, services: Services) -> EventWeekendListResponse:
+    events, total = await services.rooms.grouped_events(season=season, limit=100, offset=0)
+    return EventWeekendListResponse(events=events, total=total, limit=100, offset=0)
+
+
+@router.get("/api/v1/weekends/{event_slug}")
+async def weekend_detail(event_slug: str, services: Services):
+    event = await services.rooms.event_weekend(event_slug)
+    if event is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Weekend not found")
+    return event
+
+
+@router.get("/api/v1/weekends/{event_slug}/sessions", response_model=SessionListResponse)
+async def weekend_sessions(event_slug: str, services: Services) -> SessionListResponse:
+    event = await services.rooms.event_weekend(event_slug)
+    if event is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Weekend not found")
+    return SessionListResponse(sessions=event.sessions)
+
+
+@router.get(
+    "/api/v1/sessions/{session_id}/capabilities", response_model=SessionCapabilitiesResponse
+)
+async def session_capabilities(session_id: UUID, services: Services) -> SessionCapabilitiesResponse:
+    result = await services.rooms.session_bootstrap(session_id)
+    if result is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
+    _, _, room = result
+    return SessionCapabilitiesResponse(**services.rooms.capabilities_for(room).model_dump())
+
+
+@router.get("/api/v1/sessions/{session_id}/room", response_model=SessionBootstrapResponse)
+@router.get("/api/v1/sessions/{session_id}", response_model=SessionBootstrapResponse)
+async def session_detail(session_id: UUID, services: Services) -> SessionBootstrapResponse:
+    result = await services.rooms.session_bootstrap(session_id)
+    if result is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
+    weekend, session, room = result
+    return SessionBootstrapResponse(
+        **SessionBootstrap(
+            session=session,
+            weekend=weekend,
+            room_status=session.eligibility,
+            capabilities=services.rooms.capabilities_for(room),
+            room_slug=session.room_slug,
+        ).model_dump()
+    )
 
 
 @router.get("/", include_in_schema=False)
@@ -331,6 +394,40 @@ async def session_events(
 )
 async def session_state(session_key: str, services: Services) -> SessionStateResponse:
     return SessionStateResponse(state=await services.race_state.get_state(session_key))
+
+
+@router.get(
+    "/api/v1/sessions/{session_key}/timing",
+    response_model=SessionTimingResponse,
+)
+async def session_timing(session_key: str, services: Services) -> SessionTimingResponse:
+    return SessionTimingResponse(
+        timing=timing_state(await services.race_state.get_state(session_key))
+    )
+
+
+@router.get(
+    "/api/v1/sessions/{session_key}/drivers/{driver_number}/telemetry",
+    response_model=SessionTelemetryResponse,
+)
+async def session_telemetry(
+    session_key: str,
+    driver_number: int,
+    services: Services,
+) -> SessionTelemetryResponse:
+    return SessionTelemetryResponse(
+        telemetry=telemetry_state(await services.race_state.get_state(session_key), driver_number)
+    )
+
+
+@router.get(
+    "/api/v1/sessions/{session_key}/locations",
+    response_model=SessionLocationsResponse,
+)
+async def session_locations(session_key: str, services: Services) -> SessionLocationsResponse:
+    return SessionLocationsResponse(
+        locations=location_state(await services.race_state.get_state(session_key))
+    )
 
 
 @router.get("/api/v1/stream/sessions/{session_key}")

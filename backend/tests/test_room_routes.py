@@ -46,23 +46,22 @@ from app.services.room_replay import ReplayUnavailableError
 def api_room(
     *,
     source_availability: SourceAvailability = SourceAvailability.TELEMETRY,
-    mode: RoomMode = RoomMode.DEVELOPMENT,
+    mode: RoomMode = RoomMode.ARCHIVED,
 ) -> RaceRoom:
     return RaceRoom(
-        slug="day3-validation-room",
-        session_key="day3-session",
+        slug="belgian-grand-prix-race",
+        session_key="belgian-race-session",
         season=2026,
-        round_number=99,
-        race_name="Day 3 Validation Race",
-        official_name="Apex Arena Day 3 Validation Race",
-        circuit_name="Apex Validation Circuit",
-        country="Development",
+        round_number=13,
+        race_name="Belgian Grand Prix",
+        official_name="Belgian Grand Prix",
+        circuit_name="Circuit de Spa-Francorchamps",
+        country="Belgium",
         scheduled_start=datetime(2026, 7, 17, 12, tzinfo=UTC),
         status=RoomStatus.READY,
         mode=mode,
         total_laps=12,
         source_availability=source_availability,
-        is_development=True,
     )
 
 
@@ -124,15 +123,15 @@ def route_services(room: RaceRoom) -> SimpleNamespace:
 
 @pytest.mark.asyncio
 async def test_room_catalog_forwards_mode_search_sort_and_pagination() -> None:
-    room = api_room().model_copy(update={"is_development": False})
+    room = api_room()
     services = route_services(room)
 
     response = await list_race_rooms(
         services,
         season=2026,
         room_status=RoomStatus.READY,
-        mode=RoomMode.DEVELOPMENT,
-        search="validation",
+        mode=RoomMode.ARCHIVED,
+        search="belgian",
         sort="latest_activity",
         limit=12,
         offset=3,
@@ -143,8 +142,8 @@ async def test_room_catalog_forwards_mode_search_sort_and_pagination() -> None:
     services.room_repository.list_rooms.assert_awaited_once_with(
         season=2026,
         status=RoomStatus.READY,
-        mode=RoomMode.DEVELOPMENT,
-        search="validation",
+        mode=RoomMode.ARCHIVED,
+        search="belgian",
         sort="latest_activity",
         limit=12,
         offset=3,
@@ -152,7 +151,7 @@ async def test_room_catalog_forwards_mode_search_sort_and_pagination() -> None:
 
 
 @pytest.mark.asyncio
-async def test_public_room_catalog_defensively_excludes_validation_fixture() -> None:
+async def test_public_room_catalog_returns_real_session_rooms() -> None:
     room = api_room()
     services = route_services(room)
 
@@ -167,8 +166,8 @@ async def test_public_room_catalog_defensively_excludes_validation_fixture() -> 
         offset=0,
     )
 
-    assert response.rooms == []
-    assert response.total == 0
+    assert response.rooms == [room]
+    assert response.total == 1
 
 
 @pytest.mark.asyncio
@@ -202,16 +201,14 @@ async def test_grouped_event_catalog_forwards_authoritative_filters() -> None:
 
 
 @pytest.mark.asyncio
-async def test_public_detail_hides_development_fixture_outside_explicit_test_mode() -> None:
+async def test_public_detail_is_available_for_real_session_in_staging() -> None:
     room = api_room()
     services = route_services(room)
     services.settings.app_env = "staging"
 
-    with pytest.raises(HTTPException) as error:
-        await race_room_detail(room.slug, services)
-
-    assert error.value.status_code == 404
-    services.room_repository.get_agents.assert_not_awaited()
+    response = await race_room_detail(room.slug, services)
+    assert response.room.slug == room.slug
+    services.room_repository.get_agents.assert_awaited_once_with(room.id)
 
 
 @pytest.mark.asyncio
@@ -219,7 +216,6 @@ async def test_future_placeholder_room_is_rejected_before_replay_starts() -> Non
     room = api_room(source_availability=SourceAvailability.UNAVAILABLE).model_copy(
         update={
             "slug": "2027-future-grand-prix-race",
-            "is_development": False,
             "scheduled_start": datetime(2027, 7, 18, 12, tzinfo=UTC),
             "status": RoomStatus.PENDING,
             "mode": RoomMode.REPLAY,
@@ -247,9 +243,9 @@ async def test_room_detail_has_timing_only_notice_and_safe_diagnostics_flag() ->
     assert "Timing data" in response.data_notice
     assert "limited" in response.data_notice
     assert response.diagnostics_available is True
-    assert response.circuit.circuit_name == "Apex Validation Circuit"
+    assert response.circuit.circuit_name == "Circuit de Spa-Francorchamps"
     assert response.weather.available is False
-    services.circuit_weather.for_session.assert_awaited_once_with("day3-session")
+    services.circuit_weather.for_session.assert_awaited_once_with("belgian-race-session")
 
 
 @pytest.mark.asyncio
@@ -435,7 +431,7 @@ async def test_diagnostics_are_hidden_in_production_when_debug_flag_is_off() -> 
     services.settings.room_diagnostics_enabled = False
 
     with pytest.raises(HTTPException) as error:
-        await room_diagnostics("day3-validation-room", services)
+        await room_diagnostics("belgian-grand-prix-race", services)
 
     assert error.value.status_code == 404
     services.rooms.ensure_catalog.assert_not_awaited()
@@ -447,7 +443,7 @@ async def test_diagnostics_aggregate_counts_recent_events_state_and_metrics() ->
     services = route_services(room)
     timestamp = datetime(2026, 7, 17, 12, tzinfo=UTC)
     event = NormalizedRaceEvent(
-        session_key="day3-session",
+        session_key="belgian-race-session",
         source="fixture",
         event_time=timestamp,
         received_at=timestamp,
@@ -467,7 +463,7 @@ async def test_diagnostics_aggregate_counts_recent_events_state_and_metrics() ->
     services.race_state = SimpleNamespace(
         get_state=AsyncMock(
             return_value=RaceState(
-                session_key="day3-session",
+                session_key="belgian-race-session",
                 status="finished",
                 sequence_number=14,
                 is_replay=True,
@@ -489,5 +485,5 @@ async def test_diagnostics_aggregate_counts_recent_events_state_and_metrics() ->
     assert response.race_state["status"] == "finished"
     assert response.discussion["generated_message_count"] == 14
     services.normalized_event_repository.list_for_session.assert_awaited_once_with(
-        "day3-session", after_sequence=0, limit=20
+        "belgian-race-session", after_sequence=0, limit=20
     )

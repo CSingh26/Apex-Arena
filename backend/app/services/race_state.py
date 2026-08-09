@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 from collections import defaultdict
 from datetime import UTC, datetime
 from typing import Any, Protocol
@@ -17,6 +18,7 @@ from app.domain.models import (
 
 
 class DriverRaceState(BaseModel):
+    driver_number: int | None = None
     full_name: str | None = None
     broadcast_name: str | None = None
     team_name: str | None = None
@@ -30,6 +32,13 @@ class DriverRaceState(BaseModel):
     phase_results: list[dict[str, Any]] = Field(default_factory=list)
     grid_position: int | None = None
     final_position: int | None = None
+    position_change: int | None = None
+    latest_lap_duration: float | None = None
+    best_lap_duration: float | None = None
+    telemetry: dict[str, float | int | bool] = Field(default_factory=dict)
+    telemetry_updated_at: datetime | None = None
+    location: dict[str, float] = Field(default_factory=dict)
+    location_updated_at: datetime | None = None
 
 
 class RaceState(BaseModel):
@@ -49,6 +58,14 @@ class RaceState(BaseModel):
     last_updated_at: datetime | None = None
     sequence_number: int = 0
     is_replay: bool = False
+
+    @property
+    def has_telemetry(self) -> bool:
+        return any(driver.telemetry for driver in self.drivers.values())
+
+    @property
+    def has_locations(self) -> bool:
+        return any(driver.location for driver in self.drivers.values())
 
 
 class SnapshotPersistResult(BaseModel):
@@ -96,7 +113,10 @@ class RaceStateEngine:
     async def apply(self, event: NormalizedRaceEvent) -> RaceState:
         async with self._locks[event.session_key]:
             state = await self._load_state(event.session_key)
-            if event.dedup_key in self._applied_dedup_keys[event.session_key]:
+            if (
+                event.dedup_key in self._applied_dedup_keys[event.session_key]
+                or event.sequence_number <= state.sequence_number
+            ):
                 return state.model_copy(deep=True)
             self._applied_dedup_keys[event.session_key].add(event.dedup_key)
 
@@ -170,7 +190,10 @@ class RaceStateEngine:
             state.status = "finished"
         elif event_type == RaceEventType.POSITION_SAMPLE:
             driver = self._driver(state, event)
-            driver.position = self._optional_int(payload.get("position"))
+            position = self._optional_int(payload.get("position"))
+            if position is not None and driver.position is not None:
+                driver.position_change = driver.position - position
+            driver.position = position
         elif event_type == RaceEventType.INTERVAL_SAMPLE:
             driver = self._driver(state, event)
             driver.gap_to_leader = payload.get("gap_to_leader")
@@ -182,6 +205,10 @@ class RaceStateEngine:
             driver = self._driver(state, event)
             driver.last_lap = dict(payload)
             duration = self._optional_float(payload.get("lap_duration"))
+            if duration is not None and self._valid_duration(duration, maximum=300):
+                driver.latest_lap_duration = duration
+                if driver.best_lap_duration is None or duration < driver.best_lap_duration:
+                    driver.best_lap_duration = duration
             if state.current_phase and duration is not None:
                 previous = driver.best_laps_by_phase.get(state.current_phase)
                 if previous is None or duration < previous:
@@ -192,6 +219,18 @@ class RaceStateEngine:
             self._driver(state, event).pit_stops.append(pit_stop)
         elif event_type == RaceEventType.STINT_UPDATE:
             self._driver(state, event).stint = dict(payload)
+        elif event_type == RaceEventType.CAR_DATA_SAMPLE:
+            telemetry = self._telemetry(payload)
+            if telemetry:
+                driver = self._driver(state, event)
+                driver.telemetry = telemetry
+                driver.telemetry_updated_at = event.event_time
+        elif event_type == RaceEventType.LOCATION_SAMPLE:
+            location = self._location(payload)
+            if location:
+                driver = self._driver(state, event)
+                driver.location = location
+                driver.location_updated_at = event.event_time
         elif event_type == RaceEventType.LAP_DELETED:
             self._driver(state, event).last_lap = {
                 **self._driver(state, event).last_lap,
@@ -250,7 +289,9 @@ class RaceStateEngine:
     @staticmethod
     def _driver(state: RaceState, event: NormalizedRaceEvent) -> DriverRaceState:
         driver_number = event.driver_numbers[0] if event.driver_numbers else 0
-        return state.drivers.setdefault(str(driver_number), DriverRaceState())
+        return state.drivers.setdefault(
+            str(driver_number), DriverRaceState(driver_number=driver_number)
+        )
 
     @staticmethod
     def _optional_int(value: object) -> int | None:
@@ -274,6 +315,39 @@ class RaceStateEngine:
     def _optional_text(value: object) -> str | None:
         text = " ".join(str(value or "").split())
         return text or None
+
+    @staticmethod
+    def _valid_duration(value: float, *, maximum: float) -> bool:
+        return math.isfinite(value) and 0 < value <= maximum
+
+    @classmethod
+    def _telemetry(cls, payload: dict[str, Any]) -> dict[str, float | int | bool]:
+        fields: dict[str, tuple[str, float, float]] = {
+            "speed": ("speed", 0, 450),
+            "throttle": ("throttle", 0, 100),
+            "brake": ("brake", 0, 100),
+            "rpm": ("rpm", 0, 20_000),
+            "gear": ("n_gear", -1, 8),
+        }
+        normalized: dict[str, float | int | bool] = {}
+        for target, (source, minimum, maximum) in fields.items():
+            value = cls._optional_float(payload.get(source))
+            if value is not None and math.isfinite(value) and minimum <= value <= maximum:
+                normalized[target] = int(value) if target in {"gear", "rpm"} else value
+        drs = cls._optional_int(payload.get("drs"))
+        if drs is not None and 0 <= drs <= 14:
+            normalized["drs"] = drs > 0
+        return normalized
+
+    @classmethod
+    def _location(cls, payload: dict[str, Any]) -> dict[str, float]:
+        location: dict[str, float] = {}
+        for field in ("x", "y", "z"):
+            value = cls._optional_float(payload.get(field))
+            if value is None or not math.isfinite(value) or abs(value) > 100_000:
+                return {}
+            location[field] = value
+        return location
 
     async def _persist_snapshot(
         self, state: RaceState, event: NormalizedRaceEvent

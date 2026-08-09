@@ -25,7 +25,6 @@ class RoomMode(StrEnum):
     LIVE = "live"
     REPLAY = "replay"
     ARCHIVED = "archived"
-    DEVELOPMENT = "development"
 
 
 class SessionType(StrEnum):
@@ -35,6 +34,9 @@ class SessionType(StrEnum):
     but every persisted row now represents one competitive weekend session.
     """
 
+    PRACTICE_1 = "PRACTICE_1"
+    PRACTICE_2 = "PRACTICE_2"
+    PRACTICE_3 = "PRACTICE_3"
     QUALIFYING = "QUALIFYING"
     SPRINT_QUALIFYING = "SPRINT_QUALIFYING"
     SPRINT = "SPRINT"
@@ -43,6 +45,12 @@ class SessionType(StrEnum):
     @classmethod
     def from_provider_name(cls, value: str) -> SessionType | None:
         normalized = " ".join(value.strip().replace("_", " ").replace("-", " ").casefold().split())
+        if normalized in {"practice 1", "free practice 1", "fp1"}:
+            return cls.PRACTICE_1
+        if normalized in {"practice 2", "free practice 2", "fp2"}:
+            return cls.PRACTICE_2
+        if normalized in {"practice 3", "free practice 3", "fp3"}:
+            return cls.PRACTICE_3
         if normalized in {"sprint qualifying", "sprint shootout", "sprint qualification"}:
             return cls.SPRINT_QUALIFYING
         if normalized in {"sprint", "sprint race"}:
@@ -56,11 +64,50 @@ class SessionType(StrEnum):
     @property
     def display_name(self) -> str:
         return {
+            SessionType.PRACTICE_1: "Practice 1",
+            SessionType.PRACTICE_2: "Practice 2",
+            SessionType.PRACTICE_3: "Practice 3",
             SessionType.QUALIFYING: "Qualifying",
             SessionType.SPRINT_QUALIFYING: "Sprint Qualifying",
             SessionType.SPRINT: "Sprint",
             SessionType.RACE: "Race",
         }[self]
+
+
+class SessionStatus(StrEnum):
+    """Authoritative lifecycle status for a session, independent of room state."""
+
+    UPCOMING = "upcoming"
+    SCHEDULED = "scheduled"
+    LIVE = "live"
+    COMPLETED = "completed"
+    CANCELLED = "cancelled"
+    DELAYED = "delayed"
+    DATA_PENDING = "data_pending"
+    DATA_AVAILABLE = "data_available"
+    UNAVAILABLE = "unavailable"
+
+
+class CapabilityStatus(StrEnum):
+    AVAILABLE = "available"
+    PARTIAL = "partial"
+    UNAVAILABLE = "unavailable"
+    UNKNOWN = "unknown"
+
+
+class SessionCapabilities(BaseModel):
+    """Provider-derived data availability. Unknown is deliberate, never inferred."""
+
+    timing: CapabilityStatus = CapabilityStatus.UNKNOWN
+    telemetry: CapabilityStatus = CapabilityStatus.UNKNOWN
+    location: CapabilityStatus = CapabilityStatus.UNKNOWN
+    weather: CapabilityStatus = CapabilityStatus.UNKNOWN
+    race_control: CapabilityStatus = CapabilityStatus.UNKNOWN
+    pit_stops: CapabilityStatus = CapabilityStatus.UNKNOWN
+    stints: CapabilityStatus = CapabilityStatus.UNKNOWN
+    results: CapabilityStatus = CapabilityStatus.UNKNOWN
+    checked_at: datetime | None = None
+    source: str | None = None
 
 
 class RoomEligibilityStatus(StrEnum):
@@ -211,10 +258,10 @@ class RaceRoom(BaseModel):
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     is_featured: bool = False
-    is_development: bool = False
 
 
 class SessionRoomSummary(BaseModel):
+    session_id: UUID = Field(default_factory=uuid4)
     session_type: SessionType
     display_name: str
     scheduled_start: datetime
@@ -226,6 +273,16 @@ class SessionRoomSummary(BaseModel):
     data_availability: SourceAvailability = SourceAvailability.UNAVAILABLE
     replay_available: bool = False
     results_available: bool = False
+
+
+class SessionBootstrap(BaseModel):
+    """Lightweight session-first API payload; large telemetry stays on demand."""
+
+    session: SessionRoomSummary
+    weekend: EventWeekend
+    room_status: RoomEligibilityStatus
+    capabilities: SessionCapabilities
+    room_slug: str | None = None
 
 
 class EventWeekend(BaseModel):

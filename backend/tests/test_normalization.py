@@ -23,6 +23,8 @@ from app.services.raw_events import RawEventInput
         ("stints", {"driver_number": 4, "compound": "MEDIUM"}, RaceEventType.STINT_UPDATE),
         ("race_control", {"message": "SAFETY CAR DEPLOYED"}, RaceEventType.SAFETY_CAR),
         ("weather", {"rainfall": 0}, RaceEventType.WEATHER_UPDATE),
+        ("car_data", {"driver_number": 4, "speed": 300}, RaceEventType.CAR_DATA_SAMPLE),
+        ("location", {"driver_number": 4, "x": 1, "y": 2, "z": 3}, RaceEventType.LOCATION_SAMPLE),
     ],
 )
 def test_supported_openf1_categories_are_normalized(

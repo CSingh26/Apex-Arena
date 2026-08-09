@@ -146,7 +146,14 @@ export type RaceWeekendSession = {
   starts_at: string;
 };
 
-export type SessionRoomType = "QUALIFYING" | "SPRINT_QUALIFYING" | "SPRINT" | "RACE" | string;
+export type SessionRoomType =
+  | "PRACTICE_1"
+  | "PRACTICE_2"
+  | "PRACTICE_3"
+  | "QUALIFYING"
+  | "SPRINT_QUALIFYING"
+  | "SPRINT"
+  | "RACE";
 export type EventWeekendStatus = "live" | "completed" | "upcoming";
 export type RoomEligibility =
   | "eligible_live"
@@ -159,6 +166,7 @@ export type RoomEligibility =
 
 /** A public, session-level summary returned as part of a grouped event weekend. */
 export type EventSessionSummary = {
+  session_id?: string;
   session_type: SessionRoomType;
   display_name: string;
   scheduled_start: string;
@@ -170,6 +178,29 @@ export type EventSessionSummary = {
   data_availability: SourceAvailability;
   replay_available: boolean;
   results_available: boolean;
+};
+
+export type CapabilityStatus = "available" | "partial" | "unavailable" | "unknown";
+
+export type SessionCapabilities = {
+  timing: CapabilityStatus;
+  telemetry: CapabilityStatus;
+  location: CapabilityStatus;
+  weather: CapabilityStatus;
+  race_control: CapabilityStatus;
+  pit_stops: CapabilityStatus;
+  stints: CapabilityStatus;
+  results: CapabilityStatus;
+  checked_at: string | null;
+  source: string | null;
+};
+
+export type SessionBootstrap = {
+  session: EventSessionSummary;
+  weekend: RaceRoomEvent;
+  room_status: RoomEligibility;
+  capabilities: SessionCapabilities;
+  room_slug: string | null;
 };
 
 /** Public Race Rooms index model. One item represents one race weekend. */
@@ -187,7 +218,6 @@ export type RaceRoomEvent = {
   weekend_status: EventWeekendStatus;
   is_sprint_weekend: boolean;
   sessions: EventSessionSummary[];
-  is_development?: boolean;
 };
 
 export type RaceRoomEventsResponse = {
@@ -271,16 +301,29 @@ export type NormalizedRaceEvent = {
 };
 
 export type DriverRaceState = {
+  driver_number: number | null;
+  full_name: string | null;
+  broadcast_name: string | null;
+  team_name: string | null;
   position: number | null;
+  position_change: number | null;
   gap_to_leader: number | string | null;
   interval: number | string | null;
   last_lap: Record<string, unknown>;
+  latest_lap_duration: number | null;
+  best_lap_duration: number | null;
   pit_stops: Record<string, unknown>[];
   stint: Record<string, unknown>;
+  telemetry: Record<string, number | boolean>;
+  telemetry_updated_at: string | null;
+  location: Record<string, number>;
+  location_updated_at: string | null;
 };
 
 export type RaceState = {
   session_key: string;
+  session_type: string | null;
+  current_phase: string | null;
   status: string;
   current_lap: number | null;
   drivers: Record<string, DriverRaceState>;
@@ -289,6 +332,65 @@ export type RaceState = {
   last_updated_at: string | null;
   sequence_number: number;
   is_replay: boolean;
+};
+
+export type TimingMode = "race" | "qualifying" | "practice";
+export type TyreCompound = "SOFT" | "MEDIUM" | "HARD" | "INTERMEDIATE" | "WET" | "UNKNOWN";
+export type DriverTimingState = {
+  driver_number: number;
+  name: string;
+  abbreviation: string;
+  team_name: string | null;
+  position: number | null;
+  position_change: number | null;
+  gap_to_leader: number | string | null;
+  interval: number | string | null;
+  latest_lap: number | null;
+  best_lap: number | null;
+  tyre_compound: TyreCompound;
+  tyre_age_laps: number | null;
+  pit_stop_count: number;
+  is_fastest: boolean;
+  is_personal_best: boolean;
+  status: string;
+};
+export type SessionTimingState = {
+  session_key: string;
+  sequence_number: number;
+  updated_at: string | null;
+  mode: TimingMode;
+  session_phase: string | null;
+  current_lap: number | null;
+  track_status: string;
+  drivers: DriverTimingState[];
+};
+export type DriverTelemetryState = {
+  session_key: string;
+  driver_number: number;
+  sampled_at: string | null;
+  speed_kph: number | null;
+  throttle_percent: number | null;
+  brake_percent: number | null;
+  gear: number | null;
+  rpm: number | null;
+  drs_active: boolean | null;
+  available: boolean;
+};
+export type DriverLocationState = {
+  driver_number: number;
+  x: number;
+  y: number;
+  z: number | null;
+  sampled_at: string | null;
+  position: number | null;
+  abbreviation: string;
+};
+export type SessionLocationState = {
+  session_key: string;
+  sequence_number: number;
+  updated_at: string | null;
+  available: boolean;
+  drivers: DriverLocationState[];
 };
 
 export type SessionEventsResponse = {
@@ -301,6 +403,9 @@ export type SessionEventsResponse = {
 export type SessionStateResponse = {
   state: RaceState;
 };
+export type SessionTimingResponse = { timing: SessionTimingState };
+export type SessionTelemetryResponse = { telemetry: DriverTelemetryState };
+export type SessionLocationsResponse = { locations: SessionLocationState };
 
 export type RoomStatus = "pending" | "ingesting" | "ready" | "live" | "replaying" | "paused" | "completed" | "failed" | "unavailable";
 export type RoomMode = "live" | "replay" | "archived" | "development";
@@ -316,7 +421,7 @@ export type RaceRoom = {
   current_lap: number | null; total_laps: number | null; source_availability: SourceAvailability;
   telemetry_quality: string;
   message_count: number; agent_count: number; last_event_at: string | null; created_at: string; updated_at: string;
-  is_featured: boolean; is_development: boolean;
+  is_featured: boolean;
   current_phase?: string | null;
   phase_boundaries_available?: boolean;
 };

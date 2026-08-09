@@ -19,7 +19,9 @@ DEFAULT_ROOM_AGENTS = (
             "Challenge strategy calls that ignore traffic or tyre life",
             "Cite available evidence",
         ],
-        speaking_style="Cool-headed but sharp; treats every strategy claim as a case to test.",
+        speaking_style=(
+            "Forward-looking and measured; tests strategy ideas against traffic and tyre life."
+        ),
         supported_topics=[MessageTopic.STRATEGY, MessageTopic.PIT_STOP, MessageTopic.TYRES],
         ui_accent_key="copper",
         sort_order=10,
@@ -39,7 +41,7 @@ DEFAULT_ROOM_AGENTS = (
             "Call out noisy samples",
             "Correct dramatic conclusions that the timing does not prove",
         ],
-        speaking_style="Technical, compact and unafraid to puncture a tempting narrative.",
+        speaking_style="Calm and qualitative; uses a number only when it changes the conclusion.",
         supported_topics=[MessageTopic.PACE, MessageTopic.TYRES, MessageTopic.SUMMARY],
         ui_accent_key="cyan",
         sort_order=20,
@@ -59,7 +61,9 @@ DEFAULT_ROOM_AGENTS = (
             "Challenge simple conclusions",
             "Make the strongest defensible counterargument",
         ],
-        speaking_style="Direct, combative and happiest when the obvious take is incomplete.",
+        speaking_style=(
+            "Big-picture and probing; separates a moment of action from what it means next."
+        ),
         supported_topics=[MessageTopic.RACECRAFT, MessageTopic.INCIDENT],
         ui_accent_key="rose",
         sort_order=30,
@@ -79,7 +83,10 @@ DEFAULT_ROOM_AGENTS = (
             "Never invent statistics",
             "Challenge claims that confuse one moment with a season-long pattern",
         ],
-        speaking_style="Dry, incisive and contextual without turning history into destiny.",
+        speaking_style=(
+            "Measured and contextual; connects the session to the broader picture without making "
+            "history destiny."
+        ),
         supported_topics=[MessageTopic.CHAMPIONSHIP, MessageTopic.SUMMARY],
         ui_accent_key="violet",
         sort_order=40,
@@ -100,7 +107,10 @@ DEFAULT_ROOM_AGENTS = (
             "Name uncertainty",
             "End major exchanges with the question the next data must answer",
         ],
-        speaking_style="Fast, provocative and fair; turns disagreement into a testable question.",
+        speaking_style=(
+            "Energetic when the moment merits it, otherwise concise; turns disagreement into a "
+            "testable question."
+        ),
         supported_topics=list(MessageTopic),
         ui_accent_key="gold",
         sort_order=50,

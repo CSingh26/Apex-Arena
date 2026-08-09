@@ -16,6 +16,9 @@ from app.domain.rooms import (
     RaceRoom,
     RoomMessage,
     RoomPlaybackState,
+    SessionBootstrap,
+    SessionCapabilities,
+    SessionRoomSummary,
 )
 
 
@@ -31,6 +34,18 @@ class EventWeekendListResponse(BaseModel):
     total: int
     limit: int
     offset: int
+
+
+class SessionListResponse(BaseModel):
+    sessions: list[SessionRoomSummary]
+
+
+class SessionBootstrapResponse(SessionBootstrap):
+    pass
+
+
+class SessionCapabilitiesResponse(SessionCapabilities):
+    pass
 
 
 class RaceRoomDetailResponse(BaseModel):

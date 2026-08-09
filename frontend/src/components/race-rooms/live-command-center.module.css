@@ -1,0 +1,76 @@
+.commandCenter { margin: 18px 0 24px; overflow: hidden; border: 1px solid var(--line); border-radius: 20px; background: color-mix(in srgb, var(--panel-raised) 94%, var(--apex-violet) 6%); }
+.banner { display: flex; align-items: center; gap: 12px; padding: 11px 16px; border-bottom: 1px solid var(--line); color: var(--muted); font: 700 .62rem var(--font-mono, ui-monospace), monospace; letter-spacing: .08em; text-transform: uppercase; }
+.banner b { color: var(--foreground); }
+.trackStatus { margin-left: auto; color: var(--apex-gold); }
+.connection { display: inline-flex; align-items: center; gap: 6px; }
+.connection i { width: 7px; height: 7px; border-radius: 50%; background: var(--warning); }
+.connection_live i, .connection_historical i { background: var(--apex-mint); }
+.connection_delayed i, .connection_unavailable i { background: var(--apex-coral); }
+.grid { display: grid; grid-template-columns: minmax(260px, .9fr) minmax(320px, 1.35fr) minmax(250px, .85fr); min-height: 460px; }
+.tower, .map, .telemetry { min-width: 0; padding: 16px; }
+.tower, .map { border-right: 1px solid var(--line); }
+.panelHeading { display: flex; align-items: start; justify-content: space-between; gap: 10px; margin-bottom: 14px; }
+.panelHeading span { display: block; color: var(--faint); font: 700 .57rem var(--font-mono, ui-monospace), monospace; letter-spacing: .1em; text-transform: uppercase; }
+.panelHeading h2 { margin: 4px 0 0; font-size: 1rem; }
+.panelHeading small { color: var(--faint); font: 650 .58rem/1.3 var(--font-mono, ui-monospace), monospace; text-align: right; text-transform: uppercase; }
+.rows { display: grid; gap: 3px; max-height: 420px; overflow: auto; }
+.timingRow { display: grid; grid-template-columns: 24px minmax(70px, 1fr) 30px minmax(58px, auto) 26px; gap: 6px; align-items: center; width: 100%; padding: 8px 6px; border: 1px solid transparent; border-radius: 8px; background: transparent; color: var(--foreground); cursor: pointer; text-align: left; }
+.timingRow:hover, .timingRow:focus-visible, .selected { border-color: color-mix(in srgb, var(--apex-cyan) 55%, transparent); background: color-mix(in srgb, var(--apex-cyan) 10%, transparent); outline: none; }
+.position { color: var(--faint); font: 700 .68rem var(--font-mono, ui-monospace), monospace; }
+.driver { min-width: 0; }
+.driver strong { display: block; font: 800 .72rem var(--font-mono, ui-monospace), monospace; letter-spacing: .04em; }
+.driver small { display: block; overflow: hidden; color: var(--muted); font-size: .63rem; text-overflow: ellipsis; white-space: nowrap; }
+.tyre { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; border-radius: 50%; color: #111; font: 800 .64rem var(--font-mono, ui-monospace), monospace; }
+.tyre i { display: none; }
+.tyre_soft { background: #ee5d64; }
+.tyre_medium { background: #f3d34a; }
+.tyre_hard { background: #f2f4f8; }
+.tyre_intermediate { background: #61ba72; }
+.tyre_wet { background: #4e78de; }
+.tyre_unknown { background: #697487; }
+.gap { color: var(--muted); font: 700 .62rem var(--font-mono, ui-monospace), monospace; text-align: right; white-space: nowrap; }
+.delta { color: var(--apex-mint); font: 700 .6rem var(--font-mono, ui-monospace), monospace; }
+.track { width: 100%; aspect-ratio: 1; max-height: 380px; cursor: crosshair; }
+.trackField { fill: color-mix(in srgb, var(--panel) 80%, var(--apex-cyan) 20%); stroke: color-mix(in srgb, var(--apex-cyan) 32%, transparent); stroke-width: .7; }
+.track g { cursor: pointer; outline: none; }
+.track circle { fill: var(--apex-violet); stroke: var(--panel-raised); stroke-width: 1.5; transition: r .18s ease, fill .18s ease; }
+.track text { fill: white; font: 700 3px var(--font-mono, ui-monospace), monospace; pointer-events: none; text-anchor: middle; dominant-baseline: middle; }
+.markerSelected circle { fill: var(--apex-gold); stroke: white; }
+.mapFallback, .telemetryFallback, .empty { display: grid; place-items: center; min-height: 260px; margin: 0; color: var(--muted); text-align: center; }
+.mapFallback { align-content: center; gap: 16px; }
+.mapFallback :global(.circuit-outline) { width: min(220px, 72%); }
+.mapFallback b, .telemetryFallback b { margin-top: 8px; color: var(--foreground); font-size: .82rem; }
+.mapFallback p, .telemetryFallback p { max-width: 265px; margin: 7px 0 0; font-size: .72rem; line-height: 1.5; }
+.telemetryFallback { align-content: center; gap: 4px; min-height: 170px; padding: 14px; border: 1px dashed color-mix(in srgb, var(--line) 92%, transparent); border-radius: 12px; background: color-mix(in srgb, var(--panel) 74%, transparent); }
+.telemetryEyebrow { color: var(--apex-cyan); font: 700 .54rem var(--font-mono, ui-monospace), monospace; letter-spacing: .1em; text-transform: uppercase; }
+.speed { padding: 18px; border: 1px solid var(--line); border-radius: 12px; background: color-mix(in srgb, var(--apex-cyan) 9%, transparent); }
+.speed span, .telemetryGrid span { display: block; color: var(--faint); font: 700 .57rem var(--font-mono, ui-monospace), monospace; letter-spacing: .08em; }
+.speed b { display: block; margin-top: 4px; font-size: 1.5rem; }
+.telemetryGrid { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; margin-top: 12px; overflow: hidden; border: 1px solid var(--line); border-radius: 12px; }
+.telemetryGrid > div { padding: 12px; background: color-mix(in srgb, var(--panel) 88%, var(--apex-violet) 12%); }
+.telemetryGrid b { display: block; margin-top: 4px; font-size: .85rem; }
+.driverFacts { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; margin: 12px 0 0; overflow: hidden; border: 1px solid var(--line); border-radius: 12px; }
+.driverFacts div { padding: 9px 11px; background: var(--panel); }
+.driverFacts dt { color: var(--faint); font: 700 .54rem var(--font-mono, ui-monospace), monospace; letter-spacing: .08em; }
+.driverFacts dd { margin: 4px 0 0; font: 700 .7rem var(--font-mono, ui-monospace), monospace; }
+
+@media (max-width: 1050px) {
+  .grid { grid-template-columns: minmax(250px, 1fr) minmax(300px, 1.2fr); }
+  .telemetry { grid-column: 1 / -1; border-top: 1px solid var(--line); }
+  .tower { border-right: 1px solid var(--line); }
+}
+
+@media (max-width: 700px) {
+  .commandCenter { margin-inline: -4px; border-radius: 14px; }
+  .banner { gap: 8px; padding: 9px 12px; font-size: .54rem; }
+  .grid { grid-template-columns: 1fr; }
+  .tower, .map { border-right: 0; border-bottom: 1px solid var(--line); }
+  .tower, .map, .telemetry { padding: 13px; }
+  .rows { max-height: 330px; }
+  .track { max-height: 310px; }
+  .mapFallback { min-height: 220px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .track circle { transition: none; }
+}
