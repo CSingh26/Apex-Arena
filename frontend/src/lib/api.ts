@@ -5,6 +5,9 @@ import type {
   SeasonCalendarSummary,
   SessionEventsResponse,
   SessionStateResponse,
+  SessionTimingResponse,
+  SessionTelemetryResponse,
+  SessionLocationsResponse,
   MessageEvidenceResponse,
   RaceRoomDetailResponse,
   RaceRoomEventsResponse,
@@ -90,6 +93,28 @@ export function getSessionState(
     `/sessions/${encodeURIComponent(sessionKey)}/state`,
     signal,
   );
+}
+
+export function getSessionTiming(sessionKey: string, signal?: AbortSignal): Promise<SessionTimingResponse> {
+  return request<SessionTimingResponse>(`/sessions/${encodeURIComponent(sessionKey)}/timing`, signal);
+}
+
+export function getSessionTelemetry(
+  sessionKey: string,
+  driverNumber: number,
+  signal?: AbortSignal,
+): Promise<SessionTelemetryResponse> {
+  return request<SessionTelemetryResponse>(
+    `/sessions/${encodeURIComponent(sessionKey)}/drivers/${driverNumber}/telemetry`,
+    signal,
+  );
+}
+
+export function getSessionLocations(
+  sessionKey: string,
+  signal?: AbortSignal,
+): Promise<SessionLocationsResponse> {
+  return request<SessionLocationsResponse>(`/sessions/${encodeURIComponent(sessionKey)}/locations`, signal);
 }
 
 export function getSession(sessionId: string, signal?: AbortSignal): Promise<SessionBootstrap> {

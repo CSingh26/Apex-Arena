@@ -15,7 +15,7 @@ from app.domain.models import (
 )
 from app.main import create_app
 from app.services.historical import HistoricalIngestionResult
-from app.services.race_state import RaceState
+from app.services.race_state import DriverRaceState, RaceState
 
 
 def test_health_reports_dependency_and_live_degradation(settings: Settings) -> None:
@@ -133,14 +133,35 @@ def test_session_events_and_state_are_exposed(settings: Settings) -> None:
         services = app.state.services
         services.normalized_event_repository.list_for_session = AsyncMock(return_value=[event])
         services.race_state.get_state = AsyncMock(
-            return_value=RaceState(session_key="spa-race", sequence_number=4, is_replay=True)
+            return_value=RaceState(
+                session_key="spa-race",
+                session_type="RACE",
+                status="running",
+                sequence_number=4,
+                is_replay=True,
+                drivers={
+                    "4": DriverRaceState(
+                        driver_number=4,
+                        full_name="Lando Norris",
+                        position=1,
+                        telemetry={"speed": 301.2},
+                        location={"x": 10.0, "y": 20.0, "z": 1.0},
+                    )
+                },
+            )
         )
 
         events_response = client.get("/api/v1/sessions/spa-race/events?after_sequence_number=3")
         state_response = client.get("/api/v1/sessions/spa-race/state")
+        timing_response = client.get("/api/v1/sessions/spa-race/timing")
+        telemetry_response = client.get("/api/v1/sessions/spa-race/drivers/4/telemetry")
+        locations_response = client.get("/api/v1/sessions/spa-race/locations")
 
     assert events_response.json()["events"][0]["sequence_number"] == 4
     assert state_response.json()["state"]["is_replay"] is True
+    assert timing_response.json()["timing"]["drivers"][0]["abbreviation"] == "NOR"
+    assert telemetry_response.json()["telemetry"]["speed_kph"] == 301.2
+    assert locations_response.json()["locations"]["drivers"][0]["x"] == 10.0
 
 
 def test_championship_endpoints_expose_normalized_responses(settings: Settings) -> None:

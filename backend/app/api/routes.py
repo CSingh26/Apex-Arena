@@ -33,7 +33,10 @@ from app.api.schemas import (
     OpenF1StatusResponse,
     SeasonCalendarSummary,
     SessionEventsResponse,
+    SessionLocationsResponse,
     SessionStateResponse,
+    SessionTelemetryResponse,
+    SessionTimingResponse,
 )
 from app.api.streaming import session_event_stream
 from app.domain.models import MeetingLifecycleStatus
@@ -43,6 +46,7 @@ from app.services.championship import ChampionshipUnavailableError
 from app.services.container import AppServices
 from app.services.historical import HistoricalIngestionError
 from app.services.openf1_backfill import backfill_job_status
+from app.services.session_realtime import location_state, telemetry_state, timing_state
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -390,6 +394,40 @@ async def session_events(
 )
 async def session_state(session_key: str, services: Services) -> SessionStateResponse:
     return SessionStateResponse(state=await services.race_state.get_state(session_key))
+
+
+@router.get(
+    "/api/v1/sessions/{session_key}/timing",
+    response_model=SessionTimingResponse,
+)
+async def session_timing(session_key: str, services: Services) -> SessionTimingResponse:
+    return SessionTimingResponse(
+        timing=timing_state(await services.race_state.get_state(session_key))
+    )
+
+
+@router.get(
+    "/api/v1/sessions/{session_key}/drivers/{driver_number}/telemetry",
+    response_model=SessionTelemetryResponse,
+)
+async def session_telemetry(
+    session_key: str,
+    driver_number: int,
+    services: Services,
+) -> SessionTelemetryResponse:
+    return SessionTelemetryResponse(
+        telemetry=telemetry_state(await services.race_state.get_state(session_key), driver_number)
+    )
+
+
+@router.get(
+    "/api/v1/sessions/{session_key}/locations",
+    response_model=SessionLocationsResponse,
+)
+async def session_locations(session_key: str, services: Services) -> SessionLocationsResponse:
+    return SessionLocationsResponse(
+        locations=location_state(await services.race_state.get_state(session_key))
+    )
 
 
 @router.get("/api/v1/stream/sessions/{session_key}")

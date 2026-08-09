@@ -25,6 +25,8 @@ ENDPOINT_EVENT_TYPES = {
     "pit": RaceEventType.PIT_STOP,
     "stints": RaceEventType.STINT_UPDATE,
     "weather": RaceEventType.WEATHER_UPDATE,
+    "car_data": RaceEventType.CAR_DATA_SAMPLE,
+    "location": RaceEventType.LOCATION_SAMPLE,
     "session_result": RaceEventType.SESSION_RESULT,
     "starting_grid": RaceEventType.STARTING_GRID,
 }

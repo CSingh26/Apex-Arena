@@ -9,6 +9,11 @@ from pydantic import BaseModel, Field
 from app.domain.models import NormalizedRaceEvent, RaceMeeting
 from app.services.historical import HistoricalIngestionResult, IngestionRunSummary
 from app.services.race_state import RaceState
+from app.services.session_realtime import (
+    DriverTelemetryState,
+    SessionLocationState,
+    SessionTimingState,
+)
 
 
 class ComponentHealth(BaseModel):
@@ -82,6 +87,18 @@ class SessionEventsResponse(BaseModel):
 
 class SessionStateResponse(BaseModel):
     state: RaceState
+
+
+class SessionTimingResponse(BaseModel):
+    timing: SessionTimingState
+
+
+class SessionTelemetryResponse(BaseModel):
+    telemetry: DriverTelemetryState
+
+
+class SessionLocationsResponse(BaseModel):
+    locations: SessionLocationState
 
 
 class HistoricalIngestionRequest(BaseModel):

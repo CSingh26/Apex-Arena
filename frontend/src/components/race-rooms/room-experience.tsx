@@ -8,6 +8,7 @@ import { AppNavigation } from "@/components/navigation/app-navigation";
 import { AgentRoster } from "@/components/race-rooms/agent-roster";
 import { CircuitOutline } from "@/components/race-rooms/circuit-outline";
 import { EvidenceDrawer } from "@/components/race-rooms/evidence-drawer";
+import { LiveCommandCenter } from "@/components/race-rooms/live-command-center";
 import { MessageTimeline } from "@/components/race-rooms/message-timeline";
 import { PlaybackControls } from "@/components/race-rooms/playback-controls";
 import { RoomContext } from "@/components/race-rooms/room-context";
@@ -39,6 +40,7 @@ export function RoomExperience({ slug }: { slug: string }) {
   const [messages, setMessages] = useState<RoomMessage[]>([]);
   const [playback, setPlayback] = useState<RoomPlayback | null>(null);
   const [selectedAgent, setSelectedAgent] = useState("all");
+  const [selectedDriver, setSelectedDriver] = useState<number | null>(null);
   const [selectedMessage, setSelectedMessage] = useState<RoomMessage | null>(null);
   const [nextCursor, setNextCursor] = useState<number | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -174,6 +176,7 @@ export function RoomExperience({ slug }: { slug: string }) {
     <header className="room-header"><div><div className="room-header__meta"><span>Round {room.round_number ?? "—"}</span><span>{room.session_type.replaceAll("_", " ")}</span><span className={`status status--${room.status}`}>{room.status}</span></div><h1>{room.race_name}</h1><p>{room.circuit_name} · {room.country}</p></div><CircuitOutline circuitName={room.circuit_name} eventName={room.race_name} /><div className="session-progress"><span>{progressLabel}</span><b>{progressValue}</b>{!qualifying && room.total_laps != null && <small>/ {room.total_laps}</small>}</div></header>
     {connection !== "live" && <div className={styles.connectionNotice} role="status"><span aria-hidden /> <b>{connection === "degraded" ? "Live updates are delayed" : "Reconnecting to live updates"}</b><p>The conversation already loaded remains available while the connection recovers.</p></div>}
     <div className="sticky-playback"><PlaybackControls room={room} playback={playback} busy={controlBusy} error={controlError} onReplay={runReplay} onControl={runControl} /></div>
+    <LiveCommandCenter sessionKey={room.session_key} selectedDriver={selectedDriver} onSelectDriver={setSelectedDriver} />
     {latestSignal && <aside className={styles.raceSignal} aria-label="Latest important room update"><span>{latestSignal.session_phase ?? (latestSignal.lap_number == null ? "Session update" : `Lap ${latestSignal.lap_number}`)}</span><div><b>{latestSignal.topic.replaceAll("_", " ")}</b><p>{latestSignal.content}</p></div><a href="#timeline-title">Open conversation <span aria-hidden>↓</span></a></aside>}
     <AgentRoster agents={agents} selectedAgent={selectedAgent} onSelectAgent={setSelectedAgent} />
     <div className="room-layout">

@@ -120,6 +120,51 @@ async def test_repeated_event_is_not_applied_twice() -> None:
 
 
 @pytest.mark.asyncio
+async def test_high_frequency_samples_keep_only_valid_latest_values() -> None:
+    engine = RaceStateEngine(SnapshotRepository())
+
+    await engine.apply(
+        event(
+            RaceEventType.CAR_DATA_SAMPLE,
+            1,
+            {"speed": 312.4, "throttle": 87, "brake": 0, "n_gear": 7, "rpm": 11_420, "drs": 12},
+        )
+    )
+    state = await engine.apply(
+        event(
+            RaceEventType.LOCATION_SAMPLE,
+            2,
+            {"x": 134.2, "y": -22.7, "z": 1.8},
+        )
+    )
+
+    driver = state.drivers["4"]
+    assert driver.telemetry == {
+        "speed": 312.4,
+        "throttle": 87.0,
+        "brake": 0.0,
+        "gear": 7,
+        "rpm": 11_420,
+        "drs": True,
+    }
+    assert driver.location == {"x": 134.2, "y": -22.7, "z": 1.8}
+    assert state.has_telemetry is True
+    assert state.has_locations is True
+
+
+@pytest.mark.asyncio
+async def test_invalid_or_stale_high_frequency_samples_do_not_replace_state() -> None:
+    engine = RaceStateEngine(SnapshotRepository())
+    await engine.apply(event(RaceEventType.CAR_DATA_SAMPLE, 2, {"speed": 300}))
+    state = await engine.apply(
+        event(RaceEventType.CAR_DATA_SAMPLE, 1, {"speed": 999}, dedup_key="stale")
+    )
+
+    assert state.sequence_number == 2
+    assert state.drivers["4"].telemetry == {"speed": 300.0}
+
+
+@pytest.mark.asyncio
 async def test_snapshot_is_persisted_on_configured_interval() -> None:
     snapshots = SnapshotRepository()
     engine = RaceStateEngine(snapshots, snapshot_every_n_events=2)
