@@ -2186,7 +2186,7 @@ body {
   min-height: 50px;
   align-items: center;
   justify-content: center;
-  gap: 18px;
+  gap: 12px;
   padding: 13px 19px;
   border: 1px solid var(--landing-line);
   border-radius: 10px;
@@ -4147,7 +4147,7 @@ body {
   gap: 18px;
   overflow-y: auto;
   overscroll-behavior: contain;
-  padding: 22px;
+  padding: 16px;
   background: linear-gradient(180deg, rgb(109 140 255 / 3%), transparent 30%);
   scroll-behavior: smooth;
   scrollbar-color: var(--apex-coral) color-mix(in srgb, var(--panel) 80%, transparent);
@@ -4167,9 +4167,9 @@ body {
   position: relative;
   width: min(84%, 880px);
   margin: 0;
-  padding: 20px 22px;
-  border: 1px solid color-mix(in srgb, var(--line) 78%, transparent);
-  border-radius: 22px;
+  padding: 15px 17px;
+  border: 1px solid color-mix(in srgb, var(--line) 70%, transparent);
+  border-radius: 17px;
   background: color-mix(in srgb, var(--panel-raised) 92%, var(--apex-cyan) 8%);
   box-shadow: 0 16px 40px rgb(1 5 20 / 10%);
 }
@@ -4223,8 +4223,8 @@ body {
 
 .message__body > p {
   max-width: none;
-  font-size: clamp(.96rem, 1.2vw, 1.08rem);
-  line-height: 1.62;
+  font-size: clamp(.92rem, 1.1vw, 1rem);
+  line-height: 1.55;
 }
 
 .message--side-right .message__meta,

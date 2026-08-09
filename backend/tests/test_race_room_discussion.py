@@ -260,9 +260,9 @@ def test_deterministic_pit_message_only_claims_available_fields() -> None:
     trigger = DiscussionTriggerEvaluator(topic_cooldown_seconds=0).evaluate(event)
     assert trigger is not None
     generated = DeterministicRoomGenerator().generate(event, trigger, "mira-vale")
-    assert "2.41 seconds" in generated.content
-    assert "My call" in generated.content
-    assert "do not celebrate" in generated.content
+    assert "2.410" in generated.content
+    assert "My call" not in generated.content
+    assert "next position update" in generated.content
     assert generated.evidence_status is EvidenceStatus.GROUNDED
     assert generated.confidence is Confidence.HIGH
 
@@ -454,7 +454,7 @@ async def test_mira_pace_reply_is_classified_as_strategy_analysis() -> None:
         "mira-vale",
     ]
     assert repository.messages[1].topic is MessageTopic.STRATEGY
-    assert "0.42-second pace gain" in repository.messages[1].content
+    assert "0.42s pace gain" in repository.messages[1].content
     assert "speed can still become a trap" in repository.messages[1].content
 
 
