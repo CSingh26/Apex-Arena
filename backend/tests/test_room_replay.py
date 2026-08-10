@@ -162,6 +162,13 @@ class FakeEventRepository:
             if event.session_key == session_key and event.sequence_number > after_sequence
         ][:limit]
 
+    async def list_driver_profiles(self, session_key: str) -> list[NormalizedRaceEvent]:
+        return [
+            event
+            for event in self.events
+            if event.session_key == session_key and event.event_type is RaceEventType.DRIVER_UPDATE
+        ]
+
     async def sequence_for_lap(self, session_key: str, lap_number: int) -> int | None:
         return next(
             (
@@ -215,12 +222,21 @@ class FakeRaceState:
     def __init__(self) -> None:
         self.consumed: list[int] = []
         self.resets: list[str] = []
+        self.primed_profiles: list[list[int]] = []
 
     async def consume(self, event: NormalizedRaceEvent) -> None:
         self.consumed.append(event.sequence_number)
 
     async def reset_session(self, session_key: str) -> None:
         self.resets.append(session_key)
+
+    async def prime_driver_profiles(
+        self,
+        session_key: str,
+        profiles: list[NormalizedRaceEvent],
+    ) -> RaceState:
+        self.primed_profiles.append([profile.sequence_number for profile in profiles])
+        return await self.get_state(session_key)
 
     async def get_state(self, session_key: str) -> RaceState:
         return RaceState(
@@ -320,6 +336,25 @@ async def test_start_consumes_events_in_order_and_completes_durably() -> None:
     assert bus.statuses[-1]["status"] == "replay_complete"
     assert [event.sequence_number for event in bus.session_events] == [1, 2]
     assert [state.sequence_number for state in bus.session_states] == [1, 2]
+    await replay.close()
+
+
+@pytest.mark.asyncio
+async def test_replay_primes_driver_profiles_before_timing_events() -> None:
+    room = replay_room()
+    profile = replay_event(2, 1).model_copy(
+        update={
+            "event_type": RaceEventType.DRIVER_UPDATE,
+            "driver_numbers": [63],
+            "payload": {"resolved_driver_name": "George RUSSELL"},
+        }
+    )
+    replay, rooms, _, _, race_state, _ = coordinator(room, [replay_event(1, 1), profile])
+
+    await replay.start(room, restart=True)
+    await asyncio.wait_for(rooms.terminal_status.wait(), timeout=1)
+
+    assert race_state.primed_profiles == [[2]]
     await replay.close()
 
 

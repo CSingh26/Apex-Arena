@@ -71,6 +71,7 @@ class RoomReplayCoordinator:
                     is_paused=False,
                     started_at=datetime.now(UTC),
                 )
+            await self._prime_driver_profiles(room.session_key)
             await self.rooms.update_room_status(room.id, RoomStatus.REPLAYING)
             await self._publish(room.id, playback, RoomStatus.REPLAYING)
             self._tasks[room.id] = asyncio.create_task(
@@ -86,7 +87,10 @@ class RoomReplayCoordinator:
             return playback
 
     async def resume(self, room: RaceRoom) -> RoomPlaybackState:
+        if room.session_key is None:
+            raise ReplayUnavailableError("No normalized session is linked to this room")
         async with self._locks.setdefault(room.id, asyncio.Lock()):
+            await self._prime_driver_profiles(room.session_key)
             playback = await self.rooms.update_playback(room.id, is_paused=False)
             await self.rooms.update_room_status(room.id, RoomStatus.REPLAYING)
             if room.id not in self._tasks or self._tasks[room.id].done():
@@ -246,6 +250,7 @@ class RoomReplayCoordinator:
     ) -> RoomPlaybackState:
         assert room.session_key is not None
         await self.race_state.reset_session(room.session_key)
+        await self._prime_driver_profiles(room.session_key)
         self.discussion.reset_session(room.session_key, str(room.id))
         cursor = 0
         last_lap: int | None = None
@@ -276,6 +281,12 @@ class RoomReplayCoordinator:
             current_event_sequence=target_sequence,
             current_message_sequence=message_sequence,
             current_lap=displayed_lap if displayed_lap is not None else last_lap or 0,
+        )
+
+    async def _prime_driver_profiles(self, session_key: str) -> None:
+        await self.race_state.prime_driver_profiles(
+            session_key,
+            await self.events.list_driver_profiles(session_key),
         )
 
     async def _status_after_seek(

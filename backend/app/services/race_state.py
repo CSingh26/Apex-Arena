@@ -144,6 +144,30 @@ class RaceStateEngine:
             if delete_for_session is not None:
                 await delete_for_session(session_key)
 
+    async def prime_driver_profiles(
+        self,
+        session_key: str,
+        profiles: list[NormalizedRaceEvent],
+    ) -> RaceState:
+        """Populate stable driver identity before replaying timing samples.
+
+        Historical providers can return the drivers endpoint after high-volume
+        timing endpoints. These profiles are static session metadata, so they can
+        be applied without advancing the replay sequence or revealing future
+        race state.
+        """
+
+        async with self._locks[session_key]:
+            state = await self._load_state(session_key)
+            for profile in profiles:
+                if (
+                    profile.session_key != session_key
+                    or profile.event_type != RaceEventType.DRIVER_UPDATE
+                ):
+                    continue
+                self._apply_driver_profile(self._driver(state, profile), profile.payload)
+            return state.model_copy(deep=True)
+
     async def _load_state(self, session_key: str) -> RaceState:
         if session_key in self._states:
             return self._states[session_key]
@@ -176,16 +200,7 @@ class RaceStateEngine:
         elif event_type == RaceEventType.QUALIFYING_PHASE:
             state.status = str(payload.get("status") or "running")
         elif event_type == RaceEventType.DRIVER_UPDATE:
-            driver = self._driver(state, event)
-            driver.full_name = self._optional_text(
-                payload.get("resolved_driver_name") or payload.get("full_name")
-            )
-            driver.broadcast_name = self._optional_text(
-                payload.get("resolved_broadcast_name") or payload.get("broadcast_name")
-            )
-            driver.team_name = self._optional_text(
-                payload.get("resolved_team_name") or payload.get("team_name")
-            )
+            self._apply_driver_profile(self._driver(state, event), payload)
         elif event_type == RaceEventType.SESSION_FINISH:
             state.status = "finished"
         elif event_type == RaceEventType.POSITION_SAMPLE:
@@ -291,6 +306,18 @@ class RaceStateEngine:
         driver_number = event.driver_numbers[0] if event.driver_numbers else 0
         return state.drivers.setdefault(
             str(driver_number), DriverRaceState(driver_number=driver_number)
+        )
+
+    @classmethod
+    def _apply_driver_profile(cls, driver: DriverRaceState, payload: dict[str, Any]) -> None:
+        driver.full_name = cls._optional_text(
+            payload.get("resolved_driver_name") or payload.get("full_name")
+        )
+        driver.broadcast_name = cls._optional_text(
+            payload.get("resolved_broadcast_name") or payload.get("broadcast_name")
+        )
+        driver.team_name = cls._optional_text(
+            payload.get("resolved_team_name") or payload.get("team_name")
         )
 
     @staticmethod

@@ -82,6 +82,31 @@ async def test_position_lap_and_interval_update_driver_state() -> None:
 
 
 @pytest.mark.asyncio
+async def test_driver_profiles_can_be_primed_without_advancing_replay_state() -> None:
+    engine = RaceStateEngine(SnapshotRepository())
+    profile = event(
+        RaceEventType.DRIVER_UPDATE,
+        59,
+        {
+            "resolved_driver_name": "George RUSSELL",
+            "resolved_broadcast_name": "G RUSSELL",
+            "resolved_team_name": "Mercedes",
+        },
+        driver_number=63,
+    )
+
+    primed = await engine.prime_driver_profiles("spa-race", [profile])
+    state = await engine.apply(
+        event(RaceEventType.POSITION_SAMPLE, 1, {"position": 1}, driver_number=63)
+    )
+
+    assert primed.sequence_number == 0
+    assert state.sequence_number == 1
+    assert state.drivers["63"].full_name == "George RUSSELL"
+    assert state.drivers["63"].team_name == "Mercedes"
+
+
+@pytest.mark.asyncio
 async def test_pit_control_and_weather_updates_are_applied() -> None:
     engine = RaceStateEngine(SnapshotRepository())
 

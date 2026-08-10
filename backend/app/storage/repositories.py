@@ -8,7 +8,7 @@ from uuid import UUID, uuid4
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert
 
-from app.domain.models import NormalizedRaceEvent, RaceStateSnapshot
+from app.domain.models import NormalizedRaceEvent, RaceEventType, RaceStateSnapshot
 from app.services.event_pipeline import NormalizedPersistResult, PipelineResult
 from app.services.historical import IngestionRunSummary
 from app.services.race_state import SnapshotPersistResult
@@ -197,6 +197,22 @@ class SqlNormalizedEventRepository:
             )
             .order_by(NormalizedRaceEventRecord.sequence_number)
             .limit(limit)
+        )
+        async with self.database.session_factory() as session:
+            records = (await session.execute(statement)).scalars().all()
+            return [
+                NormalizedRaceEvent.model_validate(record, from_attributes=True)
+                for record in records
+            ]
+
+    async def list_driver_profiles(self, session_key: str) -> list[NormalizedRaceEvent]:
+        statement = (
+            select(NormalizedRaceEventRecord)
+            .where(
+                NormalizedRaceEventRecord.session_key == session_key,
+                NormalizedRaceEventRecord.event_type == RaceEventType.DRIVER_UPDATE.value,
+            )
+            .order_by(NormalizedRaceEventRecord.sequence_number)
         )
         async with self.database.session_factory() as session:
             records = (await session.execute(statement)).scalars().all()
