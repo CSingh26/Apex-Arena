@@ -15,6 +15,7 @@ from app.domain.rooms import (
     RoomStatus,
     SourceAvailability,
 )
+from app.services.race_state import RaceState
 from app.services.room_replay import ReplayUnavailableError, RoomReplayCoordinator
 
 
@@ -221,12 +222,33 @@ class FakeRaceState:
     async def reset_session(self, session_key: str) -> None:
         self.resets.append(session_key)
 
+    async def get_state(self, session_key: str) -> RaceState:
+        return RaceState(
+            session_key=session_key,
+            sequence_number=self.consumed[-1] if self.consumed else 0,
+            is_replay=True,
+        )
+
 
 class FakeEventBus:
     def __init__(self) -> None:
         self.states: list[dict[str, object]] = []
         self.statuses: list[dict[str, object]] = []
+        self.session_events: list[NormalizedRaceEvent] = []
+        self.session_states: list[RaceState] = []
         self.fail = False
+
+    async def publish_event(self, event: NormalizedRaceEvent) -> str:
+        if self.fail:
+            raise ConnectionError("redis://user:secret@private-host")
+        self.session_events.append(event)
+        return "1-0"
+
+    async def publish_state(self, state: RaceState) -> str:
+        if self.fail:
+            raise ConnectionError("redis://user:secret@private-host")
+        self.session_states.append(state)
+        return "1-0"
 
     async def publish_room_state(self, room_id: str, state: dict[str, object]) -> str:
         if self.fail:
@@ -296,6 +318,8 @@ async def test_start_consumes_events_in_order_and_completes_durably() -> None:
         RoomStatus.COMPLETED,
     ]
     assert bus.statuses[-1]["status"] == "replay_complete"
+    assert [event.sequence_number for event in bus.session_events] == [1, 2]
+    assert [state.sequence_number for state in bus.session_states] == [1, 2]
     await replay.close()
 
 

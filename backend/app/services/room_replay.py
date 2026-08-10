@@ -6,6 +6,7 @@ import logging
 from datetime import UTC, datetime
 from uuid import UUID
 
+from app.domain.models import NormalizedRaceEvent
 from app.domain.rooms import RaceRoom, RoomPlaybackState, RoomStatus
 from app.services.discussion import RaceRoomDiscussionEngine
 from app.services.race_state import RaceStateEngine
@@ -221,6 +222,7 @@ class RoomReplayCoordinator:
                             current_lap=event.lap_number,
                             last_event_at=event.event_time,
                         )
+                        await self._publish_session_update(event)
                         await self._publish(room.id, advanced, RoomStatus.REPLAYING)
                 if should_wait:
                     await asyncio.sleep(0.1)
@@ -347,6 +349,27 @@ class RoomReplayCoordinator:
         except Exception as exc:
             logger.error("Playback publication failed error=%s", type(exc).__name__)
         await self._publish_status(str(room_id), {"status": status.value})
+
+    async def _publish_session_update(self, event: NormalizedRaceEvent) -> None:
+        """Send each replayed state transition to the session SSE stream.
+
+        Room playback applies persisted events directly, rather than through the
+        live ingestion pipeline. Publishing the normalized event and its reduced
+        state here keeps the timing tower, selected-driver gaps, and race-control
+        banner in lockstep with replay controls.
+        """
+
+        try:
+            await self.event_bus.publish_event(event)
+            await self.event_bus.publish_state(await self.race_state.get_state(event.session_key))
+        except Exception as exc:
+            # Redis is a delivery optimization; playback and its durable state
+            # must continue even if a connected browser cannot be updated.
+            logger.error(
+                "Replay session publication failed session=%s error=%s",
+                event.session_key,
+                type(exc).__name__,
+            )
 
     async def _publish_status(self, room_id: str, status: dict[str, str]) -> None:
         try:

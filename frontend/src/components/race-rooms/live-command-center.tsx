@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { CircuitOutline } from "@/components/race-rooms/circuit-outline";
 import { getSessionState, sessionStreamUrl } from "@/lib/api";
@@ -30,6 +30,7 @@ type LiveCommandCenterProps = {
   sessionKey: string | null;
   circuitName: string;
   eventName: string;
+  playbackSequence: number | null;
   selectedDriver: number | null;
   onSelectDriver: (driver: number) => void;
 };
@@ -102,22 +103,37 @@ export function LiveCommandCenter({
   sessionKey,
   circuitName,
   eventName,
+  playbackSequence,
   selectedDriver,
   onSelectDriver,
 }: LiveCommandCenterProps) {
   const [state, setState] = useState<RaceState | null>(null);
   const [connection, setConnection] = useState<Connection>("reconnecting");
+  const [streamEpoch, setStreamEpoch] = useState(0);
+  const lastSequenceRef = useRef(0);
+
+  useEffect(() => {
+    if (!sessionKey || playbackSequence == null) return;
+    if (playbackSequence >= lastSequenceRef.current) return;
+
+    // Restarting or seeking backward deliberately moves the replay state to a
+    // lower sequence. Reconnect from the beginning instead of discarding the
+    // valid, lower-numbered state as if it were stale network data.
+    lastSequenceRef.current = 0;
+    setState(null);
+    setConnection("reconnecting");
+    setStreamEpoch((value) => value + 1);
+  }, [playbackSequence, sessionKey]);
 
   useEffect(() => {
     if (!sessionKey) return;
     const controller = new AbortController();
-    let lastSequence = 0;
     let source: EventSource | null = null;
     let retry = 0;
     let timer: number | null = null;
     const setNewest = (next: RaceState) => {
-      if (next.sequence_number < lastSequence) return;
-      lastSequence = next.sequence_number;
+      if (next.sequence_number < lastSequenceRef.current) return;
+      lastSequenceRef.current = next.sequence_number;
       setState(next);
       setConnection(next.is_replay ? "historical" : "live");
     };
@@ -125,7 +141,7 @@ export function LiveCommandCenter({
       .then(({ state: initial }) => setNewest(initial))
       .catch(() => setConnection("unavailable"));
     const connect = () => {
-      source = new EventSource(sessionStreamUrl(sessionKey, lastSequence));
+      source = new EventSource(sessionStreamUrl(sessionKey, lastSequenceRef.current));
       source.addEventListener("open", () => { retry = 0; setConnection("live"); });
       source.addEventListener("state", (event) => setNewest(JSON.parse((event as MessageEvent).data) as RaceState));
       source.addEventListener("stream_status", () => setConnection("delayed"));
@@ -142,7 +158,7 @@ export function LiveCommandCenter({
       source?.close();
       if (timer != null) window.clearTimeout(timer);
     };
-  }, [sessionKey]);
+  }, [sessionKey, streamEpoch]);
 
   const rows = useMemo(() => state ? rowsFromState(state) : [], [state]);
   const activeDriver = selectedDriver ?? rows[0]?.number ?? null;
