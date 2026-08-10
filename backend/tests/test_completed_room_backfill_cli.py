@@ -81,8 +81,11 @@ class FakeServices:
 
 
 class FakeBackfill:
+    current: FakeBackfill | None = None
+
     def __init__(self, **kwargs: object) -> None:
         self.calls: list[dict[str, object]] = []
+        FakeBackfill.current = self
 
     async def run(self, **kwargs: object) -> BackfillSummary:
         self.calls.append(kwargs)
@@ -136,6 +139,37 @@ async def test_completed_room_batch_backfill_aggregates_room_results(monkeypatch
     assert code == 0
     assert services.processor.consumers == []
     assert repository.candidate_kwargs == {"season": 2026, "room_slug": None, "limit": 2}
+    assert FakeBackfill.current is not None
+    assert FakeBackfill.current.calls[0]["endpoints"] is None
+
+
+@pytest.mark.asyncio
+async def test_completed_room_batch_can_limit_work_to_high_frequency_endpoints(monkeypatch) -> None:
+    repository = FakeRoomRepository([room("first-race")])
+    services = SimpleNamespace(
+        room_repository=repository,
+        normalized_event_repository=FakeNormalizedEvents(),
+        processor=SimpleNamespace(consumers=[]),
+        openf1=None,
+        historical=None,
+        backfill_jobs=None,
+        database=None,
+        room_finalizer=None,
+        closed=False,
+    )
+    FakeServices.current = services  # type: ignore[assignment]
+    monkeypatch.setattr(backfill_completed_rooms, "Settings", lambda **_: SimpleNamespace())
+    monkeypatch.setattr(backfill_completed_rooms, "configure_logging", lambda _settings: None)
+    monkeypatch.setattr(backfill_completed_rooms, "AppServices", FakeServices)
+    monkeypatch.setattr(backfill_completed_rooms, "OpenF1HistoricalBackfillService", FakeBackfill)
+
+    args = backfill_completed_rooms.parser().parse_args(
+        ["--endpoints", "car_data,location", "--include-high-frequency"]
+    )
+
+    assert await backfill_completed_rooms.run(args) == 0
+    assert FakeBackfill.current is not None
+    assert FakeBackfill.current.calls[0]["endpoints"] == ["car_data", "location"]
 
 
 @pytest.mark.asyncio
