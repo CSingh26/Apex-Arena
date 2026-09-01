@@ -141,8 +141,22 @@ class SqlNormalizedEventRepository:
         self.database = database
 
     async def insert(self, event: NormalizedRaceEvent) -> NormalizedPersistResult:
-        values = event.model_dump()
+        values = event.model_dump(
+            exclude={
+                "event_type",
+                "event_origin",
+                "importance_level",
+                "confidence_level",
+                "derivation",
+            }
+        )
         values["event_type"] = event.event_type.value
+        values["event_origin"] = event.event_origin.value
+        values["importance_level"] = event.importance_level.value
+        values["confidence_level"] = event.confidence_level.value
+        values["derivation"] = (
+            event.derivation.model_dump(mode="json") if event.derivation is not None else None
+        )
         statement = (
             insert(NormalizedRaceEventRecord)
             .values(**values)

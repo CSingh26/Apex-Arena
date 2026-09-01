@@ -6,11 +6,46 @@ from enum import StrEnum
 from typing import Any
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+
+
+class EventOrigin(StrEnum):
+    SOURCE_FACT = "SOURCE_FACT"
+    DERIVED = "DERIVED"
+
+
+class EventImportance(StrEnum):
+    LOW = "LOW"
+    NORMAL = "NORMAL"
+    IMPORTANT = "IMPORTANT"
+    MAJOR = "MAJOR"
+    CRITICAL = "CRITICAL"
+
+
+class EventConfidence(StrEnum):
+    LOW = "LOW"
+    MEDIUM = "MEDIUM"
+    HIGH = "HIGH"
+
+
+class DerivationEvidence(BaseModel):
+    kind: str
+    observed_at: datetime
+    event_id: UUID | None = None
+    value: str | int | float | bool | None = None
+
+
+class EventDerivation(BaseModel):
+    algorithm: str
+    version: int = Field(default=1, ge=1)
+    evidence: list[DerivationEvidence] = Field(default_factory=list)
+    exclusions_checked: list[str] = Field(default_factory=list)
 
 
 class RaceEventType(StrEnum):
     SESSION_START = "SESSION_START"
+    SESSION_PHASE_CHANGE = "SESSION_PHASE_CHANGE"
+    SESSION_END = "SESSION_END"
     SESSION_STATUS = "SESSION_STATUS"
     QUALIFYING_PHASE = "QUALIFYING_PHASE"
     RACE_START = "RACE_START"
@@ -19,9 +54,13 @@ class RaceEventType(StrEnum):
     INTERVAL_SAMPLE = "INTERVAL_SAMPLE"
     LAP_COMPLETED = "LAP_COMPLETED"
     POSITION_CHANGE = "POSITION_CHANGE"
+    POSITION_GAIN = "POSITION_GAIN"
+    POSITION_LOSS = "POSITION_LOSS"
     OVERTAKE = "OVERTAKE"
     LEAD_CHANGE = "LEAD_CHANGE"
     PIT_STOP = "PIT_STOP"
+    PIT_ENTRY = "PIT_ENTRY"
+    PIT_EXIT = "PIT_EXIT"
     STINT_UPDATE = "STINT_UPDATE"
     TYRE_CHANGE = "TYRE_CHANGE"
     RACE_CONTROL = "RACE_CONTROL"
@@ -36,7 +75,17 @@ class RaceEventType(StrEnum):
     CAR_DATA_SAMPLE = "CAR_DATA_SAMPLE"
     LOCATION_SAMPLE = "LOCATION_SAMPLE"
     RETIREMENT = "RETIREMENT"
+    DRIVER_STOPPED = "DRIVER_STOPPED"
+    DRIVER_RETIRED = "DRIVER_RETIRED"
     FASTEST_LAP = "FASTEST_LAP"
+    PERSONAL_BEST = "PERSONAL_BEST"
+    BATTLE_STARTED = "BATTLE_STARTED"
+    BATTLE_INTENSIFIED = "BATTLE_INTENSIFIED"
+    BATTLE_ENDED = "BATTLE_ENDED"
+    DRS_RANGE_ENTERED = "DRS_RANGE_ENTERED"
+    DRS_RANGE_EXITED = "DRS_RANGE_EXITED"
+    QUALIFYING_CUTOFF_CHANGE = "QUALIFYING_CUTOFF_CHANGE"
+    ELIMINATION_RISK = "ELIMINATION_RISK"
     LAP_DELETED = "LAP_DELETED"
     SESSION_RESULT = "SESSION_RESULT"
     STARTING_GRID = "STARTING_GRID"
@@ -141,12 +190,32 @@ class NormalizedRaceEvent(BaseModel):
     sequence_number: int = 0
     event_type: RaceEventType
     driver_numbers: list[int] = Field(default_factory=list)
+    event_origin: EventOrigin = EventOrigin.SOURCE_FACT
+    primary_driver_number: int | None = None
+    secondary_driver_number: int | None = None
+    position_before: int | None = None
+    position_after: int | None = None
+    gap_seconds: float | None = None
+    interval_seconds: float | None = None
     lap_number: int | None = None
     importance: float | None = Field(default=None, ge=0, le=1)
+    importance_level: EventImportance = EventImportance.LOW
     confidence: float | None = Field(default=None, ge=0, le=1)
+    confidence_level: EventConfidence = EventConfidence.HIGH
+    derivation: EventDerivation | None = None
     payload: dict[str, Any] = Field(default_factory=dict)
     dedup_key: str
     is_replay: bool = False
+
+    @model_validator(mode="after")
+    def populate_driver_numbers(self) -> NormalizedRaceEvent:
+        if not self.driver_numbers:
+            self.driver_numbers = [
+                number
+                for number in (self.primary_driver_number, self.secondary_driver_number)
+                if number is not None
+            ]
+        return self
 
 
 class RaceStateSnapshot(BaseModel):
