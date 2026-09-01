@@ -36,6 +36,9 @@ class QualifyingEngine:
         state = self._states.get(session_key)
         return state.model_copy(deep=True) if state is not None else None
 
+    def reset_session(self, session_key: str) -> None:
+        self._states.pop(session_key, None)
+
     def apply(
         self,
         event: NormalizedRaceEvent,

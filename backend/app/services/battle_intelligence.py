@@ -44,6 +44,16 @@ class BattleEngine:
             if battle.status in {BattleStatus.ACTIVE, BattleStatus.INTENSE}
         ]
 
+    def current_for_session(self, session_key: str) -> list[BattleState]:
+        return [
+            battle.model_copy(deep=True)
+            for battle in self._battles.get(session_key, {}).values()
+            if battle.status in {BattleStatus.ACTIVE, BattleStatus.INTENSE}
+        ]
+
+    def reset_session(self, session_key: str) -> None:
+        self._battles.pop(session_key, None)
+
     def apply(
         self,
         event: NormalizedRaceEvent,

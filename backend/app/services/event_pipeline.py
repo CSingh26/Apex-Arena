@@ -13,7 +13,7 @@ from uuid import UUID
 
 from pydantic import BaseModel
 
-from app.domain.models import NormalizedRaceEvent
+from app.domain.models import EventImportance, EventOrigin, NormalizedRaceEvent, RaceEventType
 from app.services.normalization import OpenF1EventNormalizer
 from app.services.raw_events import RawEventInput, RawProviderEventService
 
@@ -35,7 +35,17 @@ class NormalizedEventRepository(Protocol):
     async def count(self, session_key: str | None = None) -> int: ...
 
     async def list_for_session(
-        self, session_key: str, after_sequence: int = 0, limit: int = 100
+        self,
+        session_key: str,
+        after_sequence: int = 0,
+        limit: int = 100,
+        *,
+        event_types: list[RaceEventType] | None = None,
+        driver_number: int | None = None,
+        lap_number: int | None = None,
+        minimum_importance: EventImportance | None = None,
+        event_origin: EventOrigin | None = None,
+        before_time: datetime | None = None,
     ) -> list[NormalizedRaceEvent]: ...
 
 

@@ -6,6 +6,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, model_validator
 
+from app.api.schemas import SessionIntelligenceResponse
 from app.domain.circuits import CircuitIntelligence, SessionWeather
 from app.domain.rooms import (
     AgentProfile,
@@ -41,7 +42,7 @@ class SessionListResponse(BaseModel):
 
 
 class SessionBootstrapResponse(SessionBootstrap):
-    pass
+    intelligence: SessionIntelligenceResponse
 
 
 class SessionCapabilitiesResponse(SessionCapabilities):
@@ -54,6 +55,7 @@ class RaceRoomDetailResponse(BaseModel):
     playback: RoomPlaybackState
     circuit: CircuitIntelligence
     weather: SessionWeather
+    intelligence: SessionIntelligenceResponse
     data_notice: str
     diagnostics_available: bool = False
 

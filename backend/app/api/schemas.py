@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 from datetime import datetime
+from enum import StrEnum
 from typing import Any
 
 from pydantic import BaseModel, Field
 
+from app.domain.intelligence import BattleState, QualifyingState
 from app.domain.models import NormalizedRaceEvent, RaceMeeting
 from app.services.historical import HistoricalIngestionResult, IngestionRunSummary
 from app.services.race_state import RaceState
@@ -78,6 +80,31 @@ class EngineStatusResponse(BaseModel):
     debug_ingestion_enabled: bool
     live: LiveStatusResponse
     latest_ingestion: IngestionRunSummary | None
+
+
+class RaceEventCategory(StrEnum):
+    BATTLES = "BATTLES"
+    PITS = "PITS"
+    RACE_CONTROL = "RACE_CONTROL"
+    FAST_LAPS = "FAST_LAPS"
+
+
+class SessionIntelligenceResponse(BaseModel):
+    session_key: str
+    sequence_number: int = 0
+    current_battles: list[BattleState] = Field(default_factory=list)
+    recent_events: list[NormalizedRaceEvent] = Field(default_factory=list, max_length=5)
+    qualifying: QualifyingState | None = None
+
+    @classmethod
+    def from_state(cls, state: RaceState) -> SessionIntelligenceResponse:
+        return cls(
+            session_key=state.session_key,
+            sequence_number=state.sequence_number,
+            current_battles=state.current_battles,
+            recent_events=state.recent_events[-5:],
+            qualifying=state.qualifying_intelligence,
+        )
 
 
 class SessionEventsResponse(BaseModel):

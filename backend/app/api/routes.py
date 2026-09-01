@@ -31,8 +31,10 @@ from app.api.schemas import (
     HistoricalIngestionResponse,
     LiveStatusResponse,
     OpenF1StatusResponse,
+    RaceEventCategory,
     SeasonCalendarSummary,
     SessionEventsResponse,
+    SessionIntelligenceResponse,
     SessionLocationSamplesResponse,
     SessionLocationsResponse,
     SessionStateResponse,
@@ -41,7 +43,12 @@ from app.api.schemas import (
     SessionTrackResponse,
 )
 from app.api.streaming import session_event_stream
-from app.domain.models import MeetingLifecycleStatus
+from app.domain.models import (
+    EventImportance,
+    EventOrigin,
+    MeetingLifecycleStatus,
+    RaceEventType,
+)
 from app.domain.rooms import SessionBootstrap
 from app.providers.jolpica import JolpicaPayloadError
 from app.services.championship import ChampionshipUnavailableError
@@ -59,6 +66,36 @@ from app.services.session_realtime import (
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+EVENT_CATEGORY_TYPES: dict[RaceEventCategory, set[RaceEventType]] = {
+    RaceEventCategory.BATTLES: {
+        RaceEventType.BATTLE_STARTED,
+        RaceEventType.BATTLE_INTENSIFIED,
+        RaceEventType.BATTLE_ENDED,
+        RaceEventType.DRS_RANGE_ENTERED,
+        RaceEventType.DRS_RANGE_EXITED,
+        RaceEventType.OVERTAKE,
+    },
+    RaceEventCategory.PITS: {
+        RaceEventType.PIT_STOP,
+        RaceEventType.PIT_ENTRY,
+        RaceEventType.PIT_EXIT,
+        RaceEventType.TYRE_CHANGE,
+    },
+    RaceEventCategory.RACE_CONTROL: {
+        RaceEventType.RACE_CONTROL,
+        RaceEventType.SAFETY_CAR,
+        RaceEventType.VIRTUAL_SAFETY_CAR,
+        RaceEventType.RED_FLAG,
+        RaceEventType.YELLOW_FLAG,
+        RaceEventType.PENALTY,
+        RaceEventType.INVESTIGATION,
+    },
+    RaceEventCategory.FAST_LAPS: {
+        RaceEventType.FASTEST_LAP,
+        RaceEventType.PERSONAL_BEST,
+    },
+}
 
 
 def get_services(request: Request) -> AppServices:
@@ -109,6 +146,16 @@ def _utc(value: datetime | None) -> datetime | None:
     return value if value.tzinfo else value.replace(tzinfo=UTC)
 
 
+async def _session_intelligence(
+    services: AppServices,
+    session_key: str | None,
+) -> SessionIntelligenceResponse:
+    race_state = getattr(services, "race_state", None)
+    if not session_key or race_state is None:
+        return SessionIntelligenceResponse(session_key=session_key or "")
+    return SessionIntelligenceResponse.from_state(await race_state.get_state(session_key))
+
+
 @router.get("/api/v1/season/{season}/weekends", response_model=EventWeekendListResponse)
 async def season_weekends(season: int, services: Services) -> EventWeekendListResponse:
     events, total = await services.rooms.grouped_events(season=season, limit=100, offset=0)
@@ -153,16 +200,21 @@ async def session_detail(session_id: UUID, services: Services) -> SessionBootstr
     if result is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
     weekend, session, room = result
+    bootstrap = SessionBootstrap(
+        session=session,
+        weekend=weekend,
+        room_status=session.eligibility,
+        capabilities=services.rooms.capabilities_for(
+            room, location_samples=await _location_sample_count(services, room)
+        ),
+        room_slug=session.room_slug,
+    )
     return SessionBootstrapResponse(
-        **SessionBootstrap(
-            session=session,
-            weekend=weekend,
-            room_status=session.eligibility,
-            capabilities=services.rooms.capabilities_for(
-                room, location_samples=await _location_sample_count(services, room)
-            ),
-            room_slug=session.room_slug,
-        ).model_dump()
+        **bootstrap.model_dump(),
+        intelligence=await _session_intelligence(
+            services,
+            str(getattr(room, "session_key", "") or "") or None,
+        ),
     )
 
 
@@ -429,12 +481,33 @@ async def session_events(
     session_key: str,
     services: Services,
     after_sequence_number: int = Query(default=0, ge=0),
-    limit: int = Query(default=100, ge=1, le=1000),
+    limit: int = Query(default=100, ge=1, le=250),
+    event_type: Annotated[list[RaceEventType] | None, Query()] = None,
+    category: RaceEventCategory | None = None,
+    driver_number: int | None = Query(default=None, ge=1, le=999),
+    lap_number: int | None = Query(default=None, ge=0),
+    minimum_importance: EventImportance | None = None,
+    event_origin: EventOrigin | None = None,
+    before_time: datetime | None = None,
 ) -> SessionEventsResponse:
+    event_types = event_type
+    if category is not None:
+        category_types = EVENT_CATEGORY_TYPES[category]
+        event_types = (
+            [value for value in event_type if value in category_types]
+            if event_type
+            else sorted(category_types, key=lambda value: value.value)
+        )
     events = await services.normalized_event_repository.list_for_session(
         session_key,
         after_sequence=after_sequence_number,
         limit=limit,
+        event_types=event_types,
+        driver_number=driver_number,
+        lap_number=lap_number,
+        minimum_importance=minimum_importance,
+        event_origin=event_origin,
+        before_time=_utc(before_time),
     )
     return SessionEventsResponse(
         session_key=session_key,

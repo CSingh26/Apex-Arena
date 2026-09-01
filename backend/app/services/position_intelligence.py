@@ -26,6 +26,9 @@ class PositionTracker:
     def __init__(self) -> None:
         self._states: dict[str, dict[int, PositionState]] = defaultdict(dict)
 
+    def reset_session(self, session_key: str) -> None:
+        self._states.pop(session_key, None)
+
     def apply(self, event: NormalizedRaceEvent, race_state: RaceState) -> list[PositionChange]:
         if event.event_type is not RaceEventType.POSITION_SAMPLE or not event.driver_numbers:
             return []

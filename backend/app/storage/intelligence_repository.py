@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 from __future__ import annotations
 
+from sqlalchemy import delete
 from sqlalchemy.dialects.postgresql import insert
 
 from app.domain.intelligence import BattleState
@@ -13,7 +14,19 @@ class SqlBattleSummaryRepository:
         self.database = database
 
     async def upsert_resolved(self, battle: BattleState) -> None:
-        values = {
+        values = self._values(battle)
+        statement = insert(BattleSummaryRecord).values(**values)
+        statement = statement.on_conflict_do_update(
+            index_elements=[BattleSummaryRecord.battle_key],
+            set_={key: value for key, value in values.items() if key != "battle_key"},
+        )
+        async with self.database.session_factory() as session:
+            await session.execute(statement)
+            await session.commit()
+
+    @staticmethod
+    def _values(battle: BattleState) -> dict[str, object]:
+        return {
             "battle_key": battle.id,
             "session_key": battle.session_key,
             "lead_driver_number": battle.lead_driver_number,
@@ -31,11 +44,17 @@ class SqlBattleSummaryRepository:
                 "tyre_context": battle.tyre_context,
             },
         }
-        statement = insert(BattleSummaryRecord).values(**values)
-        statement = statement.on_conflict_do_update(
-            index_elements=[BattleSummaryRecord.battle_key],
-            set_={key: value for key, value in values.items() if key != "battle_key"},
-        )
+
+    async def replace_for_session(
+        self,
+        session_key: str,
+        battles: list[BattleState],
+    ) -> None:
         async with self.database.session_factory() as session:
-            await session.execute(statement)
+            await session.execute(
+                delete(BattleSummaryRecord).where(BattleSummaryRecord.session_key == session_key)
+            )
+            session.add_all(
+                [BattleSummaryRecord(**self._values(battle)) for battle in battles]
+            )
             await session.commit()

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from typing import Protocol
+from uuid import NAMESPACE_URL, uuid5
 
 from app.domain.intelligence import (
     BattleState,
@@ -94,7 +95,7 @@ class RaceIntelligenceCoordinator:
         )
         await self.race_state.set_intelligence(
             event.session_key,
-            current_battles=self.battles.current_battles,
+            current_battles=self.battles.current_for_session(event.session_key),
             qualifying=self.qualifying.state_for(event.session_key),
         )
 
@@ -204,7 +205,24 @@ class RaceIntelligenceCoordinator:
 
     def _score(self, event: NormalizedRaceEvent) -> NormalizedRaceEvent:
         level, score, _ = self.importance.classify(event)
-        return event.model_copy(update={"importance_level": level, "importance": score})
+        return event.model_copy(
+            update={
+                "id": uuid5(NAMESPACE_URL, f"apexarena:{event.dedup_key}"),
+                "processed_at": event.event_time,
+                "importance_level": level,
+                "importance": score,
+            }
+        )
+
+    def reset_session(self, session_key: str) -> None:
+        self.positions.reset_session(session_key)
+        self.overtakes.reset_session(session_key)
+        self.battles.reset_session(session_key)
+        self.qualifying.reset_session(session_key)
+        self.importance.reset_session(session_key)
+        self._pending_overtakes.pop(session_key, None)
+        self._derived.pop(session_key, None)
+        self._last_source_sequence.pop(session_key, None)
 
     @staticmethod
     def _float(value: object) -> float | None:

@@ -1,0 +1,187 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
+from uuid import uuid4
+
+import pytest
+
+from app.domain.intelligence import BattleState, RaceIntelligenceConfig
+from app.domain.models import EventOrigin, NormalizedRaceEvent, RaceEventType
+from app.services.intelligence_rebuild import IntelligenceRebuildService
+
+START = datetime(2026, 7, 19, 13, tzinfo=UTC)
+
+
+def source(
+    event_type: RaceEventType,
+    driver: int,
+    sequence: int,
+    *,
+    position: int | None = None,
+    interval: float | None = None,
+) -> NormalizedRaceEvent:
+    observed = START + timedelta(seconds=sequence)
+    payload: dict[str, object] = {
+        "driver_number": driver,
+        "normalized_session_type": "RACE",
+    }
+    if position is not None:
+        payload["position"] = position
+    if interval is not None:
+        payload["interval"] = interval
+    return NormalizedRaceEvent(
+        session_key="11334",
+        source="openf1",
+        event_time=observed,
+        received_at=observed,
+        sequence_number=sequence,
+        event_type=event_type,
+        driver_numbers=[driver],
+        interval_seconds=interval,
+        payload=payload,
+        dedup_key=f"source:{sequence}",
+    )
+
+
+def stream() -> list[NormalizedRaceEvent]:
+    return [
+        source(RaceEventType.POSITION_SAMPLE, 16, 1, position=4),
+        source(RaceEventType.POSITION_SAMPLE, 4, 2, position=5),
+        source(RaceEventType.INTERVAL_SAMPLE, 4, 3, interval=1.8),
+        source(RaceEventType.INTERVAL_SAMPLE, 4, 4, interval=1.7),
+        source(RaceEventType.INTERVAL_SAMPLE, 4, 5, interval=1.6),
+        source(RaceEventType.PIT_ENTRY, 4, 6),
+    ]
+
+
+class Events:
+    def __init__(self) -> None:
+        stale = source(RaceEventType.OVERTAKE, 4, 90).model_copy(
+            update={
+                "id": uuid4(),
+                "event_origin": EventOrigin.DERIVED,
+                "dedup_key": "stale-derived",
+            }
+        )
+        self.rows = [*stream(), stale]
+        self.replaced: list[NormalizedRaceEvent] | None = None
+
+    async def list_for_session(
+        self,
+        session_key: str,
+        after_sequence: int = 0,
+        limit: int = 100,
+        **_: object,
+    ) -> list[NormalizedRaceEvent]:
+        return [
+            event
+            for event in self.rows
+            if event.session_key == session_key and event.sequence_number > after_sequence
+        ][:limit]
+
+    async def replace_derived_for_session(
+        self,
+        session_key: str,
+        events: list[NormalizedRaceEvent],
+    ) -> list[NormalizedRaceEvent]:
+        source_max = max(
+            event.sequence_number
+            for event in self.rows
+            if event.event_origin is EventOrigin.SOURCE_FACT
+        )
+        self.replaced = [
+            event.model_copy(update={"sequence_number": source_max + index})
+            for index, event in enumerate(events, start=1)
+        ]
+        return self.replaced
+
+    async def insert(self, event: NormalizedRaceEvent):
+        raise AssertionError("rebuild must use atomic replacement")
+
+    async def max_sequence(self, session_key: str) -> int:
+        return max(event.sequence_number for event in self.rows)
+
+    async def latest_session_key(self) -> str | None:
+        return "11334"
+
+    async def count(self, session_key: str | None = None) -> int:
+        return len(self.rows)
+
+
+class Battles:
+    def __init__(self) -> None:
+        self.replaced: list[BattleState] | None = None
+
+    async def replace_for_session(
+        self,
+        session_key: str,
+        battles: list[BattleState],
+    ) -> None:
+        self.replaced = battles
+
+
+class Snapshots:
+    def __init__(self) -> None:
+        self.deleted: list[str] = []
+
+    async def delete_for_session(self, session_key: str) -> None:
+        self.deleted.append(session_key)
+
+
+def service(events: Events, battles: Battles, snapshots: Snapshots) -> IntelligenceRebuildService:
+    return IntelligenceRebuildService(
+        events,  # type: ignore[arg-type]
+        battles,
+        snapshots=snapshots,
+        config=RaceIntelligenceConfig(battle_start_samples=3),
+    )
+
+
+@pytest.mark.asyncio
+async def test_rebuild_dry_run_is_source_only_deterministic_and_side_effect_free() -> None:
+    first_events, first_battles, first_snapshots = Events(), Battles(), Snapshots()
+    second_events, second_battles, second_snapshots = Events(), Battles(), Snapshots()
+
+    first = await service(first_events, first_battles, first_snapshots).run(
+        "11334", dry_run=True, replace_derived=False
+    )
+    second = await service(second_events, second_battles, second_snapshots).run(
+        "11334", dry_run=True, replace_derived=False
+    )
+
+    assert first.source_event_count == 6
+    assert first.derived_event_count >= 2
+    assert first.derived_by_type == second.derived_by_type
+    assert first.derived_dedup_keys == second.derived_dedup_keys
+    assert "stale-derived" not in first.derived_dedup_keys
+    assert first_events.replaced is None
+    assert first_battles.replaced is None
+    assert first_snapshots.deleted == []
+
+
+@pytest.mark.asyncio
+async def test_rebuild_replaces_derived_summaries_and_snapshots_safely() -> None:
+    events, battles, snapshots = Events(), Battles(), Snapshots()
+
+    summary = await service(events, battles, snapshots).run(
+        "11334", dry_run=False, replace_derived=True
+    )
+
+    assert summary.replaced_derived is True
+    assert events.replaced is not None
+    assert events.replaced[0].sequence_number == 7
+    assert all(event.event_origin is EventOrigin.DERIVED for event in events.replaced)
+    assert battles.replaced is not None
+    assert len(battles.replaced) == 1
+    assert snapshots.deleted == ["11334"]
+
+
+@pytest.mark.asyncio
+async def test_rebuild_refuses_an_implicit_destructive_write() -> None:
+    events, battles, snapshots = Events(), Battles(), Snapshots()
+
+    with pytest.raises(ValueError, match="--replace-derived"):
+        await service(events, battles, snapshots).run(
+            "11334", dry_run=False, replace_derived=False
+        )

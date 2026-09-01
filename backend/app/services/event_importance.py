@@ -33,6 +33,10 @@ class EventImportancePolicy:
         self.cooldown_seconds = max(0.0, cooldown_seconds)
         self._last_emitted: dict[tuple[str, RaceEventType, tuple[int, ...]], datetime] = {}
 
+    def reset_session(self, session_key: str) -> None:
+        for key in [key for key in self._last_emitted if key[0] == session_key]:
+            self._last_emitted.pop(key, None)
+
     def classify(
         self, event: NormalizedRaceEvent
     ) -> tuple[EventImportance, float, bool]:

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
@@ -12,8 +13,11 @@ from app.api.routes import (
     season_weekends,
     session_capabilities,
     session_detail,
+    session_events,
     weekend_sessions,
 )
+from app.api.schemas import RaceEventCategory
+from app.domain.models import EventImportance, EventOrigin, RaceEventType
 from app.domain.rooms import (
     CapabilityStatus,
     EventWeekend,
@@ -130,3 +134,37 @@ async def test_session_first_routes_return_a_safe_not_found_for_unknown_identity
 
     assert error.value.status_code == 404
     assert error.value.detail == "Session not found"
+
+
+@pytest.mark.asyncio
+async def test_session_events_forward_typed_bounded_filters() -> None:
+    repository = SimpleNamespace(list_for_session=AsyncMock(return_value=[]))
+    services = SimpleNamespace(normalized_event_repository=repository)
+    before = datetime(2026, 7, 19, 14, tzinfo=UTC)
+
+    response = await session_events(
+        "11334",
+        services,
+        after_sequence_number=40,
+        limit=80,
+        event_type=[RaceEventType.OVERTAKE, RaceEventType.BATTLE_STARTED],
+        category=RaceEventCategory.BATTLES,
+        driver_number=4,
+        lap_number=38,
+        minimum_importance=EventImportance.IMPORTANT,
+        event_origin=EventOrigin.DERIVED,
+        before_time=before,
+    )
+
+    assert response.count == 0
+    repository.list_for_session.assert_awaited_once_with(
+        "11334",
+        after_sequence=40,
+        limit=80,
+        event_types=[RaceEventType.OVERTAKE, RaceEventType.BATTLE_STARTED],
+        driver_number=4,
+        lap_number=38,
+        minimum_importance=EventImportance.IMPORTANT,
+        event_origin=EventOrigin.DERIVED,
+        before_time=before,
+    )

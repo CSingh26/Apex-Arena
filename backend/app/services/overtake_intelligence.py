@@ -35,6 +35,17 @@ class OvertakeDetector:
     def pending_count(self) -> int:
         return len(self._candidates)
 
+    def pending_for_session(self, session_key: str) -> list[OvertakeCandidate]:
+        return [
+            candidate.model_copy(deep=True)
+            for candidate in self._candidates.values()
+            if candidate.session_key == session_key
+        ]
+
+    def reset_session(self, session_key: str) -> None:
+        for key in [key for key in self._candidates if key[0] == session_key]:
+            self._candidates.pop(key, None)
+
     def apply(
         self,
         change: PositionChange,

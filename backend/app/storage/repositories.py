@@ -5,10 +5,16 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 
-from app.domain.models import NormalizedRaceEvent, RaceEventType, RaceStateSnapshot
+from app.domain.models import (
+    EventImportance,
+    EventOrigin,
+    NormalizedRaceEvent,
+    RaceEventType,
+    RaceStateSnapshot,
+)
 from app.services.event_pipeline import NormalizedPersistResult, PipelineResult
 from app.services.historical import IngestionRunSummary
 from app.services.race_state import SnapshotPersistResult
@@ -141,22 +147,7 @@ class SqlNormalizedEventRepository:
         self.database = database
 
     async def insert(self, event: NormalizedRaceEvent) -> NormalizedPersistResult:
-        values = event.model_dump(
-            exclude={
-                "event_type",
-                "event_origin",
-                "importance_level",
-                "confidence_level",
-                "derivation",
-            }
-        )
-        values["event_type"] = event.event_type.value
-        values["event_origin"] = event.event_origin.value
-        values["importance_level"] = event.importance_level.value
-        values["confidence_level"] = event.confidence_level.value
-        values["derivation"] = (
-            event.derivation.model_dump(mode="json") if event.derivation is not None else None
-        )
+        values = self._event_values(event)
         statement = (
             insert(NormalizedRaceEventRecord)
             .values(**values)
@@ -176,6 +167,62 @@ class SqlNormalizedEventRepository:
                 )
             ).scalar_one()
             return NormalizedPersistResult(record_id=existing_id, is_new=False)
+
+    @staticmethod
+    def _event_values(event: NormalizedRaceEvent) -> dict[str, Any]:
+        values = event.model_dump(
+            exclude={
+                "event_type",
+                "event_origin",
+                "importance_level",
+                "confidence_level",
+                "derivation",
+            }
+        )
+        values["event_type"] = event.event_type.value
+        values["event_origin"] = event.event_origin.value
+        values["importance_level"] = event.importance_level.value
+        values["confidence_level"] = event.confidence_level.value
+        values["derivation"] = (
+            event.derivation.model_dump(mode="json") if event.derivation is not None else None
+        )
+        return values
+
+    async def replace_derived_for_session(
+        self,
+        session_key: str,
+        events: list[NormalizedRaceEvent],
+    ) -> list[NormalizedRaceEvent]:
+        """Atomically replace derived rows while preserving source sequence identities."""
+
+        async with self.database.session_factory() as session:
+            await session.execute(
+                delete(NormalizedRaceEventRecord).where(
+                    NormalizedRaceEventRecord.session_key == session_key,
+                    NormalizedRaceEventRecord.event_origin == EventOrigin.DERIVED.value,
+                )
+            )
+            source_max = int(
+                (
+                    await session.execute(
+                        select(func.max(NormalizedRaceEventRecord.sequence_number)).where(
+                            NormalizedRaceEventRecord.session_key == session_key,
+                            NormalizedRaceEventRecord.event_origin
+                            == EventOrigin.SOURCE_FACT.value,
+                        )
+                    )
+                ).scalar_one_or_none()
+                or 0
+            )
+            persisted = [
+                event.model_copy(update={"sequence_number": source_max + index})
+                for index, event in enumerate(events, start=1)
+            ]
+            session.add_all(
+                [NormalizedRaceEventRecord(**self._event_values(event)) for event in persisted]
+            )
+            await session.commit()
+            return persisted
 
     async def max_sequence(self, session_key: str) -> int:
         statement = select(func.max(NormalizedRaceEventRecord.sequence_number)).where(
@@ -201,14 +248,50 @@ class SqlNormalizedEventRepository:
             return int((await session.execute(statement)).scalar_one())
 
     async def list_for_session(
-        self, session_key: str, after_sequence: int = 0, limit: int = 100
+        self,
+        session_key: str,
+        after_sequence: int = 0,
+        limit: int = 100,
+        *,
+        event_types: list[RaceEventType] | None = None,
+        driver_number: int | None = None,
+        lap_number: int | None = None,
+        minimum_importance: EventImportance | None = None,
+        event_origin: EventOrigin | None = None,
+        before_time: datetime | None = None,
     ) -> list[NormalizedRaceEvent]:
+        predicates = [
+            NormalizedRaceEventRecord.session_key == session_key,
+            NormalizedRaceEventRecord.sequence_number > after_sequence,
+        ]
+        if event_types:
+            predicates.append(
+                NormalizedRaceEventRecord.event_type.in_([value.value for value in event_types])
+            )
+        if driver_number is not None:
+            predicates.append(
+                or_(
+                    NormalizedRaceEventRecord.primary_driver_number == driver_number,
+                    NormalizedRaceEventRecord.secondary_driver_number == driver_number,
+                    NormalizedRaceEventRecord.driver_numbers.contains([driver_number]),
+                )
+            )
+        if lap_number is not None:
+            predicates.append(NormalizedRaceEventRecord.lap_number == lap_number)
+        if minimum_importance is not None:
+            levels = list(EventImportance)
+            predicates.append(
+                NormalizedRaceEventRecord.importance_level.in_(
+                    [level.value for level in levels[levels.index(minimum_importance) :]]
+                )
+            )
+        if event_origin is not None:
+            predicates.append(NormalizedRaceEventRecord.event_origin == event_origin.value)
+        if before_time is not None:
+            predicates.append(NormalizedRaceEventRecord.event_time < before_time)
         statement = (
             select(NormalizedRaceEventRecord)
-            .where(
-                NormalizedRaceEventRecord.session_key == session_key,
-                NormalizedRaceEventRecord.sequence_number > after_sequence,
-            )
+            .where(*predicates)
             .order_by(NormalizedRaceEventRecord.sequence_number)
             .limit(limit)
         )
