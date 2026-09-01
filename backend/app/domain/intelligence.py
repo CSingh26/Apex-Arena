@@ -132,3 +132,16 @@ class BattleState(BaseModel):
 class BattleUpdate(BaseModel):
     battle: BattleState
     event_type: object | None = None
+
+
+class QualifyingState(BaseModel):
+    session_key: str
+    phase: str | None = None
+    field_size: int = 0
+    cutoff_position: int | None = None
+    positions: dict[int, int] = Field(default_factory=dict)
+    best_laps: dict[int, float] = Field(default_factory=dict)
+    session_best: float | None = None
+    provisional_pole_driver: int | None = None
+    eliminated_drivers: set[int] = Field(default_factory=set)
+    risk_cooldowns: dict[int, datetime] = Field(default_factory=dict)
