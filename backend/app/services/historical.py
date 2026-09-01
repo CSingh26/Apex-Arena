@@ -44,7 +44,13 @@ HISTORICAL_INGESTION_STAGES: dict[str, tuple[str, ...]] = {
     "classification": ("session_result", "starting_grid"),
     # High-frequency endpoints are opt-in and still use a session_key plus the
     # configured per-endpoint cap.  They are never part of the default backfill.
-    "deep_telemetry": ("car_data", "location"),
+    #
+    # ``location`` is deliberately absent: collapsing it to one end-of-session
+    # fix per driver put every LOCATION_SAMPLE at the tail of the replay
+    # sequence, so the map stayed empty until playback finished and the cars
+    # never moved. The full series now has its own time-indexed pipeline in
+    # app.services.locations.
+    "deep_telemetry": ("car_data",),
 }
 
 

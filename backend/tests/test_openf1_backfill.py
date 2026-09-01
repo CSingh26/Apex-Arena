@@ -380,3 +380,48 @@ def test_room_finalization_never_downgrades_better_data() -> None:
         )
         is SourceAvailability.TELEMETRY
     )
+
+
+@pytest.mark.parametrize(
+    ("session_type", "provider_name"),
+    [
+        (SessionType.RACE, "Race"),
+        (SessionType.QUALIFYING, "Qualifying"),
+        (SessionType.SPRINT, "Sprint"),
+        (SessionType.SPRINT_QUALIFYING, "Sprint Qualifying"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_each_session_type_maps_to_its_own_provider_session_key(
+    settings,  # type: ignore[no-untyped-def]
+    session_type: SessionType,
+    provider_name: str,
+) -> None:
+    """A sprint weekend publishes four sessions under one meeting_key.
+
+    Location has to be fetched with the session_key of the exact session, so
+    resolution must never settle for the meeting.
+    """
+
+    weekend = [
+        provider_session(key="9001", meeting="55") | {"session_name": "Sprint Qualifying"},
+        provider_session(key="9002", meeting="55") | {"session_name": "Sprint"},
+        provider_session(key="9003", meeting="55") | {"session_name": "Qualifying"},
+        provider_session(key="9004", meeting="55") | {"session_name": "Race"},
+    ]
+    expected = {
+        "Sprint Qualifying": "9001",
+        "Sprint": "9002",
+        "Qualifying": "9003",
+        "Race": "9004",
+    }[provider_name]
+    target = room()
+    backfill, *_ = service(
+        settings,
+        provider_rows=weekend,
+        existing_room=target.model_copy(update={"session_type": session_type}),
+    )
+    result = await backfill.resolve(season=2026, room_slug=target.slug)
+    assert result.session_key == expected
+    assert result.meeting_key == "55"
+    assert result.session_key != result.meeting_key

@@ -1,11 +1,13 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 
+import { CircuitMap, type CircuitMapDriver } from "@/components/race-rooms/circuit-map";
 import { CircuitOutline } from "@/components/race-rooms/circuit-outline";
 import { getSessionState, sessionStreamUrl } from "@/lib/api";
 import { formatGap, formatLapTime } from "@/lib/timing";
-import type { DriverRaceState, RaceState } from "@/lib/types";
+import { useDriverLocations } from "@/lib/use-driver-locations";
+import type { DriverLocationSample, DriverRaceState, RaceState } from "@/lib/types";
 
 import styles from "./live-command-center.module.css";
 
@@ -31,6 +33,13 @@ type LiveCommandCenterProps = {
   circuitName: string;
   eventName: string;
   playbackSequence: number | null;
+  /**
+   * Replay position in real session time, from the backend. Persisted events
+   * are sequenced per provider endpoint rather than by timestamp, so the
+   * reduced state's own `last_updated_at` walks backwards; only a live session
+   * can use it directly.
+   */
+  sessionClock: string | null;
   selectedDriver: number | null;
   onSelectDriver: (driver: number) => void;
 };
@@ -71,25 +80,39 @@ function rowsFromState(state: RaceState): TimingRow[] {
     .sort((left, right) => (left.position ?? 10_000) - (right.position ?? 10_000) || left.number - right.number);
 }
 
-function locationPoints(state: RaceState, rows: TimingRow[]) {
-  const raw = rows.flatMap((row) => {
-    const location = state.drivers[String(row.number)]?.location;
-    return typeof location?.x === "number" && typeof location.y === "number"
-      ? [{ row, x: location.x, y: location.y }]
-      : [];
+/**
+ * Live fixes carried on the reduced race state.
+ *
+ * These feed the same series the replay windows populate, so a live session
+ * and a replay reach the map through one code path. A car that is not
+ * transmitting reports an exact (0, 0, 0) and is not a place on the circuit.
+ */
+function liveLocationSamples(state: RaceState | null): DriverLocationSample[] {
+  if (!state) return [];
+  return Object.entries(state.drivers).flatMap(([key, driver]) => {
+    const number = driverNumber(key, driver);
+    const { x, y, z } = driver.location ?? {};
+    const sampledAt = driver.location_updated_at;
+    if (typeof x !== "number" || typeof y !== "number" || !sampledAt) return [];
+    if (x === 0 && y === 0 && (z ?? 0) === 0) return [];
+    return [{ driver_number: number, x, y, z: typeof z === "number" ? z : null, sample_time: sampledAt }];
   });
-  if (raw.length < 2) return [];
-  const minX = Math.min(...raw.map((point) => point.x));
-  const maxX = Math.max(...raw.map((point) => point.x));
-  const minY = Math.min(...raw.map((point) => point.y));
-  const maxY = Math.max(...raw.map((point) => point.y));
-  const width = Math.max(maxX - minX, 1);
-  const height = Math.max(maxY - minY, 1);
-  return raw.map((point) => ({
-    ...point,
-    x: 12 + ((point.x - minX) / width) * 76,
-    y: 12 + ((point.y - minY) / height) * 76,
-  }));
+}
+
+/**
+ * Location diagnostics are opt-in via `?debug=location` (or `location-raw` to
+ * also plot un-interpolated fixes). Nobody reaches this without asking for it,
+ * so it stays out of the way of normal viewers.
+ */
+function useLocationDebugFlags(): { panel: boolean; raw: boolean } {
+  // The query string is external state that never changes within a session,
+  // and the server snapshot is empty so hydration stays deterministic.
+  const debug = useSyncExternalStore(
+    () => () => {},
+    () => new URLSearchParams(window.location.search).get("debug") ?? "",
+    () => "",
+  );
+  return { panel: debug.startsWith("location"), raw: debug === "location-raw" };
 }
 
 function telemetryMetric(label: string, value: number | boolean | undefined, suffix = "") {
@@ -104,6 +127,7 @@ export function LiveCommandCenter({
   circuitName,
   eventName,
   playbackSequence,
+  sessionClock,
   selectedDriver,
   onSelectDriver,
 }: LiveCommandCenterProps) {
@@ -111,6 +135,7 @@ export function LiveCommandCenter({
   const [connection, setConnection] = useState<Connection>("reconnecting");
   const [streamEpoch, setStreamEpoch] = useState(0);
   const lastSequenceRef = useRef(0);
+  const { panel: debugLocation, raw: debugRawPoints } = useLocationDebugFlags();
 
   useEffect(() => {
     if (!sessionKey || playbackSequence == null) return;
@@ -164,14 +189,28 @@ export function LiveCommandCenter({
   const activeDriver = selectedDriver ?? rows[0]?.number ?? null;
   const selected = activeDriver == null ? undefined : state?.drivers[String(activeDriver)];
   const activeRow = rows.find((row) => row.number === activeDriver);
-  const locations = useMemo(() => state ? locationPoints(state, rows) : [], [rows, state]);
   const sessionLabel = state?.current_phase ?? state?.session_type?.replaceAll("_", " ") ?? "SESSION";
   const trackStatus = String(
     state?.race_control_state.event_type ?? (state?.status === "finished" ? "COMPLETED" : "GREEN"),
   ).replaceAll("_", " ");
-  const locationUnavailableCopy = connection === "historical"
-    ? "This replay was ingested without the optional GPS feed. The circuit reference remains available."
-    : "Live location samples have not arrived yet. The circuit reference remains available while timing continues.";
+
+  const liveSamples = useMemo(() => liveLocationSamples(state), [state]);
+  const locations = useDriverLocations({
+    sessionKey,
+    // A replay is positioned by the backend clock; a live session has no
+    // replay position, so the newest applied event time is the session time.
+    clockIso: sessionClock ?? (connection === "historical" ? null : state?.last_updated_at ?? null),
+    liveSamples,
+  });
+  const mapDrivers = useMemo(
+    () => new Map<number, CircuitMapDriver>(
+      rows.map((row) => [row.number, { number: row.number, code: row.code, name: row.name }]),
+    ),
+    [rows],
+  );
+  const locatedLabel = locations.status === "ready"
+    ? `${locations.driverNumbers.length} cars`
+    : locations.status === "loading" ? "Loading" : "No positions";
 
   return <section className={styles.commandCenter} aria-label="Live session command center">
     <header className={styles.banner}>
@@ -190,8 +229,21 @@ export function LiveCommandCenter({
         </div> : <p className={styles.empty}>Timing will appear when this session has classified driver data.</p>}
       </section>
       <section className={styles.map} aria-labelledby="map-title">
-        <div className={styles.panelHeading}><div><span>Track position</span><h2 id="map-title">Circuit map</h2></div><small>{locations.length ? `${locations.length} cars` : "Circuit reference"}</small></div>
-        {locations.length ? <svg className={styles.track} viewBox="0 0 100 100" role="img" aria-label="Live driver position map"><rect x="2" y="2" width="96" height="96" rx="9" className={styles.trackField} />{locations.map((point) => <g key={point.row.number} className={activeDriver === point.row.number ? styles.markerSelected : ""} onClick={() => onSelectDriver(point.row.number)} tabIndex={0} role="button" aria-label={`Select ${point.row.name}`} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") onSelectDriver(point.row.number); }}><circle cx={point.x} cy={point.y} r={activeDriver === point.row.number ? 5.5 : 3.5} /><text x={point.x} y={point.y + 1}>{point.row.code.slice(0, 2)}</text></g>)}</svg> : <div className={styles.mapFallback}><CircuitOutline circuitName={circuitName} eventName={eventName} /><div><b>Live car positions unavailable</b><p>{locationUnavailableCopy}</p></div></div>}
+        <div className={styles.panelHeading}><div><span>Track position</span><h2 id="map-title">Circuit map</h2></div><small>{locatedLabel}</small></div>
+        <CircuitMap
+          track={locations.track}
+          status={locations.status}
+          driverNumbers={locations.driverNumbers}
+          drivers={mapDrivers}
+          selectedDriver={activeDriver}
+          onSelectDriver={onSelectDriver}
+          sampleAt={locations.sampleAt}
+          currentClockMs={locations.currentClockMs}
+          debug={locations.debug}
+          showDebug={debugLocation}
+          showRawPoints={debugRawPoints}
+          emptyVisual={<CircuitOutline circuitName={circuitName} eventName={eventName} />}
+        />
       </section>
       <section className={styles.telemetry} aria-labelledby="telemetry-title">
         <div className={styles.panelHeading}><div><span>Selected driver</span><h2 id="telemetry-title">{activeRow?.name ?? "Telemetry"}</h2></div><small>{selected?.position ? `P${selected.position}` : "—"}</small></div>

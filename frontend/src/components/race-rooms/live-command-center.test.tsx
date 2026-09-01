@@ -8,6 +8,8 @@ import type { RaceState } from "@/lib/types";
 const api = vi.hoisted(() => ({
   getSessionState: vi.fn(),
   sessionStreamUrl: vi.fn((sessionKey: string, sequence: number) => `/stream/${sessionKey}?after=${sequence}`),
+  getSessionTrack: vi.fn(),
+  getSessionLocationSamples: vi.fn(),
 }));
 
 vi.mock("@/lib/api", () => api);
@@ -74,6 +76,23 @@ describe("LiveCommandCenter", () => {
     FakeEventSource.instances = [];
     api.getSessionState.mockReset();
     api.sessionStreamUrl.mockClear();
+    api.getSessionTrack.mockReset();
+    api.getSessionLocationSamples.mockReset();
+    api.getSessionTrack.mockResolvedValue({
+      track: {
+        session_key: "race-1",
+        available: false,
+        bounds: null,
+        path: [],
+        source_driver_number: null,
+        sample_count: 0,
+        first_sample_at: null,
+        last_sample_at: null,
+      },
+    });
+    api.getSessionLocationSamples.mockResolvedValue({
+      locations: { session_key: "race-1", count: 0, drivers: [], since: null, until: null, samples: [] },
+    });
     vi.stubGlobal("EventSource", FakeEventSource);
   });
 
@@ -81,7 +100,7 @@ describe("LiveCommandCenter", () => {
 
   it("updates the tower, selected-driver gap, and race-control status from replay state events", async () => {
     api.getSessionState.mockResolvedValue({ state: state(1, 1, 0) });
-    render(<LiveCommandCenter sessionKey="race-1" circuitName="Circuit" eventName="Grand Prix" playbackSequence={1} selectedDriver={null} onSelectDriver={vi.fn()} />);
+    render(<LiveCommandCenter sessionKey="race-1" circuitName="Circuit" eventName="Grand Prix" playbackSequence={1} sessionClock={null} selectedDriver={null} onSelectDriver={vi.fn()} />);
 
     await screen.findByRole("button", { name: /George Russell, position 1/i });
     act(() => FakeEventSource.instances[0].emit("state", JSON.stringify(state(2, 2, 1.221, 1))));
@@ -96,10 +115,10 @@ describe("LiveCommandCenter", () => {
     api.getSessionState
       .mockResolvedValueOnce({ state: state(10, 1, 0) })
       .mockResolvedValueOnce({ state: state(1, 2, 1.221) });
-    const { rerender } = render(<LiveCommandCenter sessionKey="race-1" circuitName="Circuit" eventName="Grand Prix" playbackSequence={10} selectedDriver={null} onSelectDriver={vi.fn()} />);
+    const { rerender } = render(<LiveCommandCenter sessionKey="race-1" circuitName="Circuit" eventName="Grand Prix" playbackSequence={10} sessionClock={null} selectedDriver={null} onSelectDriver={vi.fn()} />);
 
     await screen.findByRole("button", { name: /George Russell, position 1/i });
-    rerender(<LiveCommandCenter sessionKey="race-1" circuitName="Circuit" eventName="Grand Prix" playbackSequence={0} selectedDriver={null} onSelectDriver={vi.fn()} />);
+    rerender(<LiveCommandCenter sessionKey="race-1" circuitName="Circuit" eventName="Grand Prix" playbackSequence={0} sessionClock={null} selectedDriver={null} onSelectDriver={vi.fn()} />);
 
     await waitFor(() => expect(api.getSessionState).toHaveBeenCalledTimes(2));
     await screen.findByRole("button", { name: /George Russell, position 2/i });

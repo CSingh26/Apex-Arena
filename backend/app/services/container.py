@@ -22,6 +22,11 @@ from app.services.event_pipeline import (
     SequenceNumberService,
 )
 from app.services.historical import HistoricalOpenF1Adapter
+from app.services.locations import (
+    LiveLocationRecorder,
+    LocationIngestionService,
+    SessionLocationService,
+)
 from app.services.normalization import OpenF1EventNormalizer
 from app.services.openf1_backfill import OpenF1HistoricalBackfillService, OpenF1RoomFinalizer
 from app.services.race_state import RaceStateEngine
@@ -33,6 +38,7 @@ from app.services.rooms import RaceRoomService
 from app.services.season import SeasonService
 from app.storage.backfill_repository import SqlOpenF1BackfillJobRepository
 from app.storage.database import Database
+from app.storage.location_repository import SqlSessionLocationRepository
 from app.storage.redis import EventBus, RaceEventRedisPublisher, RedisStore
 from app.storage.repositories import (
     SqlIngestionRunRepository,
@@ -88,6 +94,15 @@ class AppServices:
         self.ingestion_runs = SqlIngestionRunRepository(self.database)
         self.backfill_jobs = SqlOpenF1BackfillJobRepository(self.database)
         self.room_repository = SqlRaceRoomRepository(self.database)
+        self.location_repository = SqlSessionLocationRepository(self.database)
+        self.session_locations = SessionLocationService(self.location_repository)
+        self.location_ingestion = LocationIngestionService(
+            client=self.openf1,
+            repository=self.location_repository,
+            sample_interval_ms=settings.location_sample_interval_ms,
+            fetch_window_seconds=settings.location_fetch_window_seconds,
+            max_samples_per_session=settings.location_max_samples_per_session,
+        )
         self.raw_events = RawProviderEventService(self.raw_event_repository)
         self.ordering_buffer = EventOrderingBuffer(settings.event_ordering_buffer_ms)
         self.race_state = RaceStateEngine(
@@ -116,6 +131,7 @@ class AppServices:
             self.race_state,
             self.event_bus,
             settings.room_replay_interval_seconds,
+            session_times=self.session_locations,
         )
         self.processor = RaceEventProcessor(
             raw_events=self.raw_events,
@@ -129,6 +145,7 @@ class AppServices:
                 self.redis_publisher,
                 self.room_discussion,
                 self.championship,
+                LiveLocationRecorder(self.session_locations),
             ],
         )
         self.openf1_live = OpenF1LiveClient(

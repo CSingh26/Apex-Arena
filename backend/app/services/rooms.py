@@ -485,8 +485,18 @@ class RaceRoomService:
         )
 
     @staticmethod
-    def capabilities_for(room: RaceRoom | None) -> SessionCapabilities:
-        """Map persisted availability without claiming endpoint-level data we do not have."""
+    def capabilities_for(
+        room: RaceRoom | None,
+        *,
+        location_samples: int | None = None,
+    ) -> SessionCapabilities:
+        """Map persisted availability without claiming endpoint-level data we do not have.
+
+        ``location_samples`` is the count actually stored for the session.
+        Location availability is reported from that count rather than inferred
+        from session type or from the coarse timing/telemetry grade, so the map
+        is never gated off for a session that does have provider positions.
+        """
 
         if room is None:
             return SessionCapabilities(
@@ -519,10 +529,17 @@ class RaceRoomService:
             if availability in {SourceAvailability.TELEMETRY, SourceAvailability.LIMITED}
             else CapabilityStatus.UNKNOWN
         )
+        location = (
+            CapabilityStatus.UNKNOWN
+            if location_samples is None
+            else CapabilityStatus.AVAILABLE
+            if location_samples > 0
+            else CapabilityStatus.UNAVAILABLE
+        )
         return SessionCapabilities(
             timing=timing,
             telemetry=telemetry,
-            location=historical_detail,
+            location=location,
             weather=historical_detail,
             race_control=historical_detail,
             pit_stops=historical_detail,

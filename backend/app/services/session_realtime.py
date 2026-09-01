@@ -8,11 +8,13 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from app.domain.locations import DriverLocationSample, TrackBounds, is_transmitting
 from app.services.race_state import DriverRaceState, RaceState
 from app.services.session_semantics import is_qualifying_session
 
 TimingMode = Literal["race", "qualifying", "practice"]
 TyreCompound = Literal["SOFT", "MEDIUM", "HARD", "INTERMEDIATE", "WET", "UNKNOWN"]
+LocationSource = Literal["live", "historical", "unavailable"]
 
 
 class DriverTimingState(BaseModel):
@@ -73,7 +75,33 @@ class SessionLocationState(BaseModel):
     sequence_number: int
     updated_at: datetime | None = None
     available: bool = False
+    source: LocationSource = "unavailable"
+    bounds: TrackBounds | None = None
     drivers: list[DriverLocationState] = Field(default_factory=list)
+
+
+class SessionLocationSamplesState(BaseModel):
+    """Windowed series used by the map to interpolate between provider fixes."""
+
+    session_key: str
+    count: int = 0
+    drivers: list[int] = Field(default_factory=list)
+    since: datetime | None = None
+    until: datetime | None = None
+    samples: list[DriverLocationSample] = Field(default_factory=list)
+
+
+class SessionTrackState(BaseModel):
+    """Circuit outline and viewport extent, in raw provider coordinates."""
+
+    session_key: str
+    available: bool = False
+    bounds: TrackBounds | None = None
+    path: list[tuple[float, float]] = Field(default_factory=list)
+    source_driver_number: int | None = None
+    sample_count: int = 0
+    first_sample_at: datetime | None = None
+    last_sample_at: datetime | None = None
 
 
 def timing_state(state: RaceState) -> SessionTimingState:
@@ -130,13 +158,17 @@ def telemetry_state(state: RaceState, driver_number: int) -> DriverTelemetryStat
 
 
 def location_state(state: RaceState) -> SessionLocationState:
+    """Latest live fix per driver, straight from the reduced race state."""
+
     rows: list[DriverLocationState] = []
     for number, driver in state.drivers.items():
         location = driver.location
         if "x" not in location or "y" not in location:
             continue
-        driver_number = _integer(number)
+        driver_number = _integer(number) or driver.driver_number
         if driver_number is None:
+            continue
+        if not is_transmitting(location["x"], location["y"], location.get("z")):
             continue
         rows.append(
             DriverLocationState(
@@ -149,14 +181,55 @@ def location_state(state: RaceState) -> SessionLocationState:
                 abbreviation=_abbreviation(driver, driver_number),
             )
         )
+    return _sorted_location_state(state, rows, source="live")
+
+
+def location_state_from_samples(
+    state: RaceState,
+    samples: list[DriverLocationSample],
+) -> SessionLocationState:
+    """Persisted fixes joined to whatever driver metadata the state knows.
+
+    A missing timing row must never drop a marker: the driver number alone is
+    enough to place and label a car.
+    """
+
+    rows = [
+        DriverLocationState(
+            driver_number=sample.driver_number,
+            x=sample.x,
+            y=sample.y,
+            z=sample.z,
+            sampled_at=sample.sample_time,
+            position=_driver_for(state, sample.driver_number).position,
+            abbreviation=_abbreviation(
+                _driver_for(state, sample.driver_number), sample.driver_number
+            ),
+        )
+        for sample in samples
+    ]
+    return _sorted_location_state(state, rows, source="historical")
+
+
+def _sorted_location_state(
+    state: RaceState,
+    rows: list[DriverLocationState],
+    *,
+    source: LocationSource,
+) -> SessionLocationState:
     rows.sort(key=lambda row: (row.position is None, row.position or 10_000, row.driver_number))
     return SessionLocationState(
         session_key=state.session_key,
         sequence_number=state.sequence_number,
         updated_at=state.last_updated_at,
         available=bool(rows),
+        source=source if rows else "unavailable",
         drivers=rows,
     )
+
+
+def _driver_for(state: RaceState, driver_number: int) -> DriverRaceState:
+    return state.drivers.get(str(driver_number)) or DriverRaceState(driver_number=driver_number)
 
 
 def _timing_row(number: str, driver: DriverRaceState, state: RaceState) -> DriverTimingState:

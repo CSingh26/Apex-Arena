@@ -1,0 +1,41 @@
+.wrapper { display: grid; gap: 10px; min-width: 0; }
+.map { display: block; width: 100%; aspect-ratio: 1; max-height: 400px; overflow: visible; }
+
+/* The outline is the same polyline the markers are projected onto, so the
+   shadow stroke sits underneath every car without ever hiding one. */
+.trackShadow { fill: none; stroke: color-mix(in srgb, var(--apex-cyan) 22%, transparent); stroke-width: 26; stroke-linecap: round; stroke-linejoin: round; }
+.trackLine { fill: none; stroke: color-mix(in srgb, var(--apex-cyan) 78%, var(--foreground) 22%); stroke-width: 7; stroke-linecap: round; stroke-linejoin: round; }
+
+.marker { cursor: pointer; outline: none; }
+.markerDot { fill: var(--apex-violet); stroke: var(--panel-raised); stroke-width: 3; transition: r .16s ease, fill .16s ease; }
+.marker:hover .markerDot, .marker:focus-visible .markerDot { fill: var(--apex-cyan); }
+.markerSelected .markerDot { fill: var(--apex-gold); stroke: #fff; stroke-width: 4; }
+.markerLabel { fill: #fff; font: 800 12px var(--font-mono, ui-monospace), monospace; letter-spacing: .04em; pointer-events: none; text-anchor: middle; dominant-baseline: middle; }
+.markerSelected .markerLabel { fill: #10131c; font-size: 15px; }
+/* A car whose feed has gone quiet stays visible but reads as held, not live. */
+.marker[data-stale="true"] .markerDot { fill: var(--muted); }
+.marker[data-stale="true"] .markerLabel { fill: color-mix(in srgb, #fff 70%, transparent); }
+
+.rawPoint { fill: var(--apex-coral); opacity: .85; pointer-events: none; }
+
+.placeholder { display: grid; place-items: center; align-content: center; gap: 6px; min-height: 280px; padding: 18px; color: var(--muted); text-align: center; }
+.placeholder b { color: var(--foreground); font-size: .84rem; }
+.placeholder p { max-width: 290px; margin: 0; font-size: .72rem; line-height: 1.5; }
+.spinner { width: 24px; height: 24px; margin-bottom: 6px; border: 2px solid color-mix(in srgb, var(--apex-cyan) 30%, transparent); border-top-color: var(--apex-cyan); border-radius: 50%; animation: spin .9s linear infinite; }
+
+.debug { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 4px 12px; margin: 0; padding: 10px; border: 1px dashed color-mix(in srgb, var(--apex-gold) 45%, transparent); border-radius: 10px; background: color-mix(in srgb, var(--panel) 80%, transparent); font: 600 .6rem/1.4 var(--font-mono, ui-monospace), monospace; }
+.debug div { min-width: 0; }
+.debug dt { color: var(--faint); letter-spacing: .06em; text-transform: uppercase; }
+.debug dd { margin: 0; overflow: hidden; color: var(--foreground); text-overflow: ellipsis; }
+
+@keyframes spin { to { transform: rotate(360deg); } }
+
+@media (max-width: 900px) {
+  .map { max-height: 320px; }
+  .placeholder { min-height: 220px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .markerDot { transition: none; }
+  .spinner { animation-duration: 2.4s; }
+}

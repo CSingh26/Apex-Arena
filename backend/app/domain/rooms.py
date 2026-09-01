@@ -361,3 +361,12 @@ class RoomPlaybackState(BaseModel):
     is_paused: bool = True
     started_at: datetime | None = None
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    # Where this replay sits in real session time.
+    #
+    # Persisted events are sequenced per provider endpoint, not interleaved by
+    # timestamp, so the event time of the most recently applied event walks
+    # backwards and forwards across the session. Anything that needs "when in
+    # the session are we" -- the circuit map above all -- must use this
+    # monotonic clock instead. Null when the session has no time span to map
+    # onto, in which case consumers fall back to the reduced state's own time.
+    session_clock: datetime | None = None

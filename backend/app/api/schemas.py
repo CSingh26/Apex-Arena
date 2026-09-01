@@ -11,8 +11,10 @@ from app.services.historical import HistoricalIngestionResult, IngestionRunSumma
 from app.services.race_state import RaceState
 from app.services.session_realtime import (
     DriverTelemetryState,
+    SessionLocationSamplesState,
     SessionLocationState,
     SessionTimingState,
+    SessionTrackState,
 )
 
 
@@ -99,6 +101,14 @@ class SessionTelemetryResponse(BaseModel):
 
 class SessionLocationsResponse(BaseModel):
     locations: SessionLocationState
+
+
+class SessionLocationSamplesResponse(BaseModel):
+    locations: SessionLocationSamplesState
+
+
+class SessionTrackResponse(BaseModel):
+    track: SessionTrackState
 
 
 class HistoricalIngestionRequest(BaseModel):

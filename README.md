@@ -308,6 +308,7 @@ base path: it defaults to `<base path>/api`, and can be overridden with
 - [Sprint 1: session architecture](docs/sprint-1-session-architecture.md)
 - [Live race operations and failure states](docs/live-race-operations.md)
 - [Agent conversation experience](docs/arena-chat-experience.md)
+- [Driver track positions: root cause and pipeline](docs/driver-location-pipeline.md)
 
 ## Attribution
 

@@ -19,7 +19,7 @@ export const room: RaceRoom = {
   created_at: createdAt, updated_at: createdAt, is_featured: true,
 };
 
-export const playback: RoomPlayback = { room_id: room.id, current_event_sequence: 0, current_message_sequence: 0, current_lap: 0, playback_speed: 1, is_paused: true, started_at: null, updated_at: createdAt };
+export const playback: RoomPlayback = { room_id: room.id, current_event_sequence: 0, current_message_sequence: 0, current_lap: 0, playback_speed: 1, is_paused: true, started_at: null, updated_at: createdAt, session_clock: null };
 
 export const detail: RaceRoomDetailResponse = {
   room,

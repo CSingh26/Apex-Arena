@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import UTC, datetime
+from typing import Protocol
 from uuid import UUID
 
 from app.domain.models import NormalizedRaceEvent
@@ -17,9 +18,16 @@ from app.storage.room_repository import SqlRaceRoomRepository
 
 logger = logging.getLogger(__name__)
 
+# How long to wait before re-checking a session that had no recorded span.
+SPAN_RETRY_BACKOFF_SECONDS = 60.0
+
 
 class ReplayUnavailableError(RuntimeError):
     pass
+
+
+class SessionTimeSpanReader(Protocol):
+    async def time_range(self, session_key: str) -> tuple[datetime | None, datetime | None]: ...
 
 
 class RoomReplayCoordinator:
@@ -33,6 +41,7 @@ class RoomReplayCoordinator:
         race_state: RaceStateEngine,
         event_bus: EventBus,
         base_interval_seconds: float = 0.6,
+        session_times: SessionTimeSpanReader | None = None,
     ) -> None:
         self.rooms = rooms
         self.events = events
@@ -40,8 +49,64 @@ class RoomReplayCoordinator:
         self.race_state = race_state
         self.event_bus = event_bus
         self.base_interval_seconds = base_interval_seconds
+        self.session_times = session_times
         self._tasks: dict[UUID, asyncio.Task[None]] = {}
         self._locks: dict[UUID, asyncio.Lock] = {}
+        self._spans: dict[str, tuple[datetime, datetime, int]] = {}
+        self._span_misses: dict[str, float] = {}
+
+    async def _session_span(self, session_key: str) -> tuple[datetime, datetime, int] | None:
+        """Session start, session end and the highest replayable sequence.
+
+        A found span is cached forever: all three are fixed once a session is
+        recorded, and this runs on every playback tick. A miss is only backed
+        off, never cached — locations are often backfilled while the API stays
+        up, and a permanently cached miss would leave that room without a clock
+        until the process restarted.
+        """
+
+        if session_key in self._spans:
+            return self._spans[session_key]
+        if self.session_times is None:
+            return None
+        retry_at = self._span_misses.get(session_key)
+        if retry_at is not None and asyncio.get_running_loop().time() < retry_at:
+            return None
+        try:
+            start, end = await self.session_times.time_range(session_key)
+            maximum = await self.events.max_sequence(session_key)
+        except Exception as exc:
+            logger.warning(
+                "Replay session span unavailable session=%s error=%s",
+                session_key,
+                type(exc).__name__,
+            )
+            start = end = None
+            maximum = 0
+        if start is not None and end is not None and end > start and maximum > 0:
+            self._spans[session_key] = (start, end, maximum)
+            self._span_misses.pop(session_key, None)
+            return self._spans[session_key]
+        self._span_misses[session_key] = (
+            asyncio.get_running_loop().time() + SPAN_RETRY_BACKOFF_SECONDS
+        )
+        return None
+
+    async def with_session_clock(
+        self,
+        session_key: str | None,
+        playback: RoomPlaybackState,
+    ) -> RoomPlaybackState:
+        """Map replay progress onto the session's own recorded time span."""
+
+        if session_key is None:
+            return playback
+        span = await self._session_span(session_key)
+        if span is None:
+            return playback
+        start, end, maximum = span
+        progress = min(1.0, max(0.0, playback.current_event_sequence / maximum))
+        return playback.model_copy(update={"session_clock": start + (end - start) * progress})
 
     async def start(self, room: RaceRoom, *, restart: bool = False) -> RoomPlaybackState:
         if room.session_key is None:
@@ -73,18 +138,17 @@ class RoomReplayCoordinator:
                 )
             await self._prime_driver_profiles(room.session_key)
             await self.rooms.update_room_status(room.id, RoomStatus.REPLAYING)
-            await self._publish(room.id, playback, RoomStatus.REPLAYING)
+            published = await self._publish(room, playback, RoomStatus.REPLAYING)
             self._tasks[room.id] = asyncio.create_task(
                 self._run(room), name=f"room-replay:{room.slug}"
             )
-            return playback
+            return published
 
     async def pause(self, room: RaceRoom) -> RoomPlaybackState:
         async with self._locks.setdefault(room.id, asyncio.Lock()):
             playback = await self.rooms.update_playback(room.id, is_paused=True)
             await self.rooms.update_room_status(room.id, RoomStatus.PAUSED)
-            await self._publish(room.id, playback, RoomStatus.PAUSED)
-            return playback
+            return await self._publish(room, playback, RoomStatus.PAUSED)
 
     async def resume(self, room: RaceRoom) -> RoomPlaybackState:
         if room.session_key is None:
@@ -97,16 +161,14 @@ class RoomReplayCoordinator:
                 self._tasks[room.id] = asyncio.create_task(
                     self._run(room), name=f"room-replay:{room.slug}"
                 )
-            await self._publish(room.id, playback, RoomStatus.REPLAYING)
-            return playback
+            return await self._publish(room, playback, RoomStatus.REPLAYING)
 
     async def set_speed(self, room: RaceRoom, speed: float) -> RoomPlaybackState:
         if speed not in {0.5, 1.0, 2.0, 4.0, 8.0}:
             raise ValueError("Unsupported playback speed")
         async with self._locks.setdefault(room.id, asyncio.Lock()):
             playback = await self.rooms.update_playback(room.id, playback_speed=speed)
-            await self._publish(room.id, playback, room.status)
-            return playback
+            return await self._publish(room, playback, room.status)
 
     async def seek_to_sequence(self, room: RaceRoom, sequence: int) -> RoomPlaybackState:
         if room.session_key is None:
@@ -117,8 +179,7 @@ class RoomReplayCoordinator:
         async with self._locks.setdefault(room.id, asyncio.Lock()):
             playback = await self._rebuild_to_sequence(room, sequence)
             room_status = await self._status_after_seek(room, sequence, maximum)
-            await self._publish(room.id, playback, room_status)
-            return playback
+            return await self._publish(room, playback, room_status)
 
     async def seek_to_lap(self, room: RaceRoom, lap_number: int) -> RoomPlaybackState:
         if room.session_key is None:
@@ -139,8 +200,7 @@ class RoomReplayCoordinator:
                 target_sequence,
                 maximum,
             )
-            await self._publish(room.id, playback, room_status)
-            return playback
+            return await self._publish(room, playback, room_status)
 
     async def seek_to_phase(self, room: RaceRoom, phase: str) -> RoomPlaybackState:
         """Seek qualifying replays using provider-confirmed Q/SQ boundaries."""
@@ -160,8 +220,7 @@ class RoomReplayCoordinator:
         async with self._locks.setdefault(room.id, asyncio.Lock()):
             playback = await self._rebuild_to_sequence(room, target_sequence)
             room_status = await self._status_after_seek(room, target_sequence, maximum)
-            await self._publish(room.id, playback, room_status)
-            return playback
+            return await self._publish(room, playback, room_status)
 
     async def seek_to_session_time(
         self,
@@ -180,8 +239,7 @@ class RoomReplayCoordinator:
         async with self._locks.setdefault(room.id, asyncio.Lock()):
             playback = await self._rebuild_to_sequence(room, target_sequence)
             room_status = await self._status_after_seek(room, target_sequence, maximum)
-            await self._publish(room.id, playback, room_status)
-            return playback
+            return await self._publish(room, playback, room_status)
 
     async def close(self) -> None:
         await asyncio.gather(
@@ -207,7 +265,7 @@ class RoomReplayCoordinator:
                         if not events:
                             completed = await self.rooms.update_playback(room.id, is_paused=True)
                             await self.rooms.update_room_status(room.id, RoomStatus.COMPLETED)
-                            await self._publish(room.id, completed, RoomStatus.COMPLETED)
+                            await self._publish(room, completed, RoomStatus.COMPLETED)
                             await self._publish_status(str(room.id), {"status": "replay_complete"})
                             return
                         event = events[0]
@@ -227,7 +285,7 @@ class RoomReplayCoordinator:
                             last_event_at=event.event_time,
                         )
                         await self._publish_session_update(event)
-                        await self._publish(room.id, advanced, RoomStatus.REPLAYING)
+                        await self._publish(room, advanced, RoomStatus.REPLAYING)
                 if should_wait:
                     await asyncio.sleep(0.1)
                     continue
@@ -353,13 +411,18 @@ class RoomReplayCoordinator:
                 return None
 
     async def _publish(
-        self, room_id: UUID, playback: RoomPlaybackState, status: RoomStatus
-    ) -> None:
+        self,
+        room: RaceRoom,
+        playback: RoomPlaybackState,
+        status: RoomStatus,
+    ) -> RoomPlaybackState:
+        published = await self.with_session_clock(room.session_key, playback)
         try:
-            await self.event_bus.publish_room_state(str(room_id), playback.model_dump(mode="json"))
+            await self.event_bus.publish_room_state(str(room.id), published.model_dump(mode="json"))
         except Exception as exc:
             logger.error("Playback publication failed error=%s", type(exc).__name__)
-        await self._publish_status(str(room_id), {"status": status.value})
+        await self._publish_status(str(room.id), {"status": status.value})
+        return published
 
     async def _publish_session_update(self, event: NormalizedRaceEvent) -> None:
         """Send each replayed state transition to the session SSE stream.

@@ -404,6 +404,52 @@ class MessageEvidenceRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class SessionLocationSampleRecord(Base):
+    """Downsampled driver track positions in raw OpenF1 circuit coordinates.
+
+    Location arrives at roughly 4 Hz per car, so a race is hundreds of
+    thousands of provider rows. Keeping the series here rather than in
+    normalized_race_events stops it from swamping the replay event sequence
+    while still giving replay a time-indexed position for every driver.
+    """
+
+    __tablename__ = "session_location_samples"
+    __table_args__ = (
+        UniqueConstraint(
+            "session_key",
+            "driver_number",
+            "sample_time",
+            name="uq_location_sample_session_driver_time",
+        ),
+        Index("ix_location_sample_session_time", "session_key", "sample_time"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    session_key: Mapped[str] = mapped_column(String(80), index=True)
+    driver_number: Mapped[int] = mapped_column(Integer)
+    sample_time: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    x: Mapped[float] = mapped_column(Float)
+    y: Mapped[float] = mapped_column(Float)
+    z: Mapped[float | None] = mapped_column(Float, nullable=True)
+    source: Mapped[str] = mapped_column(String(20), default="historical")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class SessionTrackGeometryRecord(Base, TimestampMixin):
+    """Circuit outline traced from this session's own location samples."""
+
+    __tablename__ = "session_track_geometry"
+
+    session_key: Mapped[str] = mapped_column(String(80), primary_key=True)
+    min_x: Mapped[float] = mapped_column(Float)
+    max_x: Mapped[float] = mapped_column(Float)
+    min_y: Mapped[float] = mapped_column(Float)
+    max_y: Mapped[float] = mapped_column(Float)
+    path: Mapped[list[Any]] = mapped_column(JSON_TYPE, default=list)
+    source_driver_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    sample_count: Mapped[int] = mapped_column(Integer, default=0)
+
+
 class RoomPlaybackStateRecord(Base):
     __tablename__ = "room_playback_states"
 

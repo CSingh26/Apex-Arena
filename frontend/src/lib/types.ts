@@ -385,12 +385,41 @@ export type DriverLocationState = {
   position: number | null;
   abbreviation: string;
 };
+export type TrackBounds = { min_x: number; max_x: number; min_y: number; max_y: number };
+export type LocationSource = "live" | "historical" | "unavailable";
 export type SessionLocationState = {
   session_key: string;
   sequence_number: number;
   updated_at: string | null;
   available: boolean;
+  source: LocationSource;
+  bounds: TrackBounds | null;
   drivers: DriverLocationState[];
+};
+export type DriverLocationSample = {
+  driver_number: number;
+  x: number;
+  y: number;
+  z: number | null;
+  sample_time: string;
+};
+export type SessionLocationSamplesState = {
+  session_key: string;
+  count: number;
+  drivers: number[];
+  since: string | null;
+  until: string | null;
+  samples: DriverLocationSample[];
+};
+export type SessionTrackState = {
+  session_key: string;
+  available: boolean;
+  bounds: TrackBounds | null;
+  path: Array<[number, number]>;
+  source_driver_number: number | null;
+  sample_count: number;
+  first_sample_at: string | null;
+  last_sample_at: string | null;
 };
 
 export type SessionEventsResponse = {
@@ -406,6 +435,8 @@ export type SessionStateResponse = {
 export type SessionTimingResponse = { timing: SessionTimingState };
 export type SessionTelemetryResponse = { telemetry: DriverTelemetryState };
 export type SessionLocationsResponse = { locations: SessionLocationState };
+export type SessionLocationSamplesResponse = { locations: SessionLocationSamplesState };
+export type SessionTrackResponse = { track: SessionTrackState };
 
 export type RoomStatus = "pending" | "ingesting" | "ready" | "live" | "replaying" | "paused" | "completed" | "failed" | "unavailable";
 export type RoomMode = "live" | "replay" | "archived" | "development";
@@ -457,6 +488,8 @@ export type RoomPlayback = {
   is_paused: boolean;
   started_at: string | null;
   updated_at: string;
+  /** Where the replay sits in real session time; null when unmappable. */
+  session_clock: string | null;
 };
 export type CircuitRecord = { label: string; value: string; detail: string | null };
 export type CircuitIntelligence = {

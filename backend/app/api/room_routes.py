@@ -182,7 +182,9 @@ async def race_room_detail(room_slug: str, services: Services) -> RaceRoomDetail
     return RaceRoomDetailResponse(
         room=room,
         agents=agents,
-        playback=playback,
+        # The initial page load needs the same replay clock the stream sends,
+        # so the map is positioned before the first playback event arrives.
+        playback=await services.room_replay.with_session_clock(room.session_key, playback),
         circuit=circuit,
         weather=weather,
         data_notice=notices[room.source_availability],
@@ -407,7 +409,7 @@ async def stream_race_room(
     if last_event_id is not None and last_event_id.isdigit():
         recovered_sequence = max(recovered_sequence, int(last_event_id))
     return StreamingResponse(
-        race_room_stream(request, services, room.id, recovered_sequence),
+        race_room_stream(request, services, room.id, recovered_sequence, room.session_key),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache, no-transform",

@@ -200,6 +200,18 @@ class PublicMessageShaper:
 class DeterministicRoomGenerator:
     """Specialist templates that can only state values present in grounded context."""
 
+    @staticmethod
+    def _variant(seed: str, variants: list[str]) -> str:
+        """Pick a phrasing deterministically so identical events replay identically.
+
+        A single fixed sentence repeated on every lap or every flag reads like a
+        log line, not a person. Hashing a stable per-event seed (not randomness)
+        keeps regeneration idempotent while spreading phrasing across replays.
+        """
+
+        index = int(sha256(seed.encode("utf-8")).hexdigest(), 16) % len(variants)
+        return variants[index]
+
     def generate(
         self,
         event: NormalizedRaceEvent,
@@ -282,11 +294,21 @@ class DeterministicRoomGenerator:
                     + (["lap_duration"] if duration is not None else [])
                     + (["position"] if position is not None else []),
                 )
+            closer = self._variant(
+                event.dedup_key,
+                [
+                    "Theo's filing it away — one lap doesn't make a trend, but he's watching "
+                    "for a repeat.",
+                    "That's one data point for Theo's notebook. He won't call it a trend "
+                    "until it repeats.",
+                    "Theo clocks it, but he's not reading much into a single lap yet.",
+                    "On Theo's radar now, though he'll want to see that pace again before "
+                    "calling it real.",
+                ],
+            )
             return self._message(
                 MessageType.OBSERVATION,
-                f"{driver} completes lap {lap}{duration_text}. Theo is keeping this in the "
-                "notebook for now; one lap is a clue, and the next representative laps decide "
-                "whether it is a trend.",
+                f"{driver} completes lap {lap}{duration_text}. {closer}",
                 Confidence.MEDIUM,
                 EvidenceStatus.PARTIAL,
                 "A lap was completed.",
@@ -322,7 +344,7 @@ class DeterministicRoomGenerator:
                 "the argument if the lap times hold through the stint."
                 if compound
                 else f"{driver} changed tyres, but the compound is missing. No compound, no bold "
-                "strategy verdict—I am sitting this prediction out."
+                "strategy verdict—I'm sitting this prediction out."
             )
             keys = ["driver_numbers", "event_type"] + (["compound"] if compound else [])
             return self._message(
@@ -369,18 +391,17 @@ class DeterministicRoomGenerator:
             if qualifying:
                 return self._message(
                     MessageType.ANALYSIS,
-                    f"{driver} jumps{update} in the qualifying order. That is a direct hit on the "
-                    "cutoff fight—fast on the sheet, even though this is not an on-track pass.",
+                    f"{driver} jumps{update} in the qualifying order. That's a direct hit on the "
+                    "cutoff fight—fast on the sheet, even though this isn't an on-track pass.",
                     Confidence.MEDIUM,
                     EvidenceStatus.GROUNDED,
                     "The qualifying order changed.",
                     keys,
                 )
             racecraft = (
-                "That is a clean track-position win, and I am giving the driver credit."
+                "That's a clean track-position win, and I'm giving the driver credit."
                 if event.event_type == RaceEventType.OVERTAKE
-                else "The gain is real; I will not call it an overtake without an explicit "
-                "pass event."
+                else "The gain is real; I won't call it an overtake without an explicit pass event."
             )
             return self._message(
                 MessageType.ANALYSIS,
@@ -399,10 +420,22 @@ class DeterministicRoomGenerator:
             RaceEventType.YELLOW_FLAG,
         }:
             label = event.event_type.value.replace("_", " ").title()
+            reaction = self._variant(
+                event.dedup_key,
+                [
+                    "That reshuffles the pit window — who actually gains is still up in the "
+                    "air until the field cycles through.",
+                    "Strategy calls get harder from here. Nobody knows who benefits until "
+                    "we see the pit cycle play out.",
+                    "This changes the math on pit strategy, though it's too early to say "
+                    "who it favors.",
+                    "The window just moved. We'll know who it favored once everyone's "
+                    "cycled through the pits.",
+                ],
+            )
             return self._message(
                 MessageType.OBSERVATION,
-                f"{label}. The pit window has changed, but the beneficiary is not clear until "
-                "the field cycles through.",
+                f"{label}. {reaction}",
                 Confidence.HIGH,
                 EvidenceStatus.GROUNDED,
                 f"{label} was recorded.",
@@ -411,8 +444,8 @@ class DeterministicRoomGenerator:
         if event.event_type in {RaceEventType.WEATHER_UPDATE, RaceEventType.WEATHER_CHANGE}:
             return self._message(
                 MessageType.UNCERTAINTY,
-                "No complete rainfall number, no wet-track prophecy. I am calling out the hype: "
-                "this weather sample does not prove the grip has changed.",
+                "No complete rainfall number, no wet-track prophecy. I'm calling out the hype: "
+                "this weather sample doesn't prove the grip has changed.",
                 Confidence.LOW,
                 EvidenceStatus.PARTIAL,
                 "The weather sample is incomplete.",
@@ -421,7 +454,7 @@ class DeterministicRoomGenerator:
         if event.event_type == RaceEventType.RETIREMENT:
             return self._message(
                 MessageType.OBSERVATION,
-                f"{driver} is recorded as retired. The supplied event does not establish a cause.",
+                f"{driver} is recorded as retired. The supplied event doesn't establish a cause.",
                 Confidence.HIGH,
                 EvidenceStatus.GROUNDED,
                 "A retirement was recorded.",
@@ -432,7 +465,7 @@ class DeterministicRoomGenerator:
             return self._message(
                 MessageType.SUMMARY,
                 f"{phase_text} is now under way. Drivers need a valid lap before the phase ends; "
-                "the slowest will not progress.",
+                "the slowest won't progress.",
                 Confidence.HIGH if phase else Confidence.MEDIUM,
                 EvidenceStatus.GROUNDED if phase else EvidenceStatus.PARTIAL,
                 "The qualifying phase changed.",
@@ -468,7 +501,7 @@ class DeterministicRoomGenerator:
             return self._message(
                 MessageType.SUMMARY,
                 "The session is recorded as finished. The room will use only the supplied "
-                "classification and will not infer championship consequences.",
+                "classification and won't infer championship consequences.",
                 Confidence.HIGH,
                 EvidenceStatus.GROUNDED,
                 "The session finished.",
@@ -476,7 +509,7 @@ class DeterministicRoomGenerator:
             )
         return self._message(
             MessageType.UNCERTAINTY,
-            "The feed moved, but the stat line did not give us enough to take an honest side. "
+            "The feed moved, but the stat line didn't give us enough to take an honest side. "
             "No empty hot take—bring the next timing sample.",
             Confidence.LOW,
             EvidenceStatus.PARTIAL,
@@ -514,7 +547,7 @@ class DeterministicRoomGenerator:
             if agent_id == "theo-voss":
                 return self._message(
                     MessageType.QUESTION,
-                    f"{lap_stat} is real; the verdict is not. Does the next valid lap confirm "
+                    f"{lap_stat} is real; the verdict isn't. Does the next valid lap confirm "
                     "this pace, or expose it as a single-run peak?",
                     Confidence.MEDIUM,
                     EvidenceStatus.PARTIAL,
@@ -553,7 +586,7 @@ class DeterministicRoomGenerator:
             trend = abs(float(evidence["pace_trend_seconds"]))
             return self._message(
                 MessageType.DISAGREEMENT,
-                f"I see the {trend:.2f}s pace gain, but I would not convert it into a strategy "
+                f"I see the {trend:.2f}s pace gain, but I wouldn't convert it into a strategy "
                 "advantage yet. Without a traffic gap or pit-loss estimate, that speed can still "
                 "become a trap.",
                 Confidence.MEDIUM,
@@ -567,7 +600,7 @@ class DeterministicRoomGenerator:
         }:
             return self._message(
                 MessageType.DISAGREEMENT,
-                "Do not call this a free stop for everyone. The neutralisation is confirmed; "
+                "Don't call this a free stop for everyone. The neutralisation is confirmed; "
                 "who actually benefits still depends on track position and the pit cycle.",
                 Confidence.MEDIUM,
                 EvidenceStatus.PARTIAL,
@@ -580,7 +613,7 @@ class DeterministicRoomGenerator:
             duration_text = f"The recorded {stop_time} stop" if stop_time else "The recorded stop"
             return self._message(
                 MessageType.CORRECTION,
-                f"{duration_text} is not a strategy verdict. The timing record confirms "
+                f"{duration_text} isn't a strategy verdict. The timing record confirms "
                 "the service; the next position sample decides whether the call worked.",
                 Confidence.MEDIUM,
                 EvidenceStatus.PARTIAL,

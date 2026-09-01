@@ -19,6 +19,7 @@ async def race_room_stream(
     services: AppServices,
     room_id: UUID,
     after_sequence: int,
+    session_key: str | None = None,
 ) -> AsyncIterator[str]:
     cursor = after_sequence
     try:
@@ -36,7 +37,12 @@ async def race_room_stream(
         cursor = max(cursor, message.sequence)
         yield _sse("room_message", message.model_dump(mode="json"), str(message.sequence))
 
-    playback = await services.room_repository.get_playback(room_id)
+    # Enrich exactly as the replay coordinator does: this first frame otherwise
+    # overwrites the clock the detail request already supplied, and the map
+    # would lose its replay position on every reconnect.
+    playback = await services.room_replay.with_session_clock(
+        session_key, await services.room_repository.get_playback(room_id)
+    )
     yield _sse("playback_state", playback.model_dump(mode="json"))
     while not await request.is_disconnected():
         try:

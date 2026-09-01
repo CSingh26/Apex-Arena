@@ -8,6 +8,8 @@ import type {
   SessionTimingResponse,
   SessionTelemetryResponse,
   SessionLocationsResponse,
+  SessionLocationSamplesResponse,
+  SessionTrackResponse,
   MessageEvidenceResponse,
   RaceRoomDetailResponse,
   RaceRoomEventsResponse,
@@ -112,9 +114,38 @@ export function getSessionTelemetry(
 
 export function getSessionLocations(
   sessionKey: string,
+  options: { at?: string } = {},
   signal?: AbortSignal,
 ): Promise<SessionLocationsResponse> {
-  return request<SessionLocationsResponse>(`/sessions/${encodeURIComponent(sessionKey)}/locations`, signal);
+  const query = options.at ? `?at=${encodeURIComponent(options.at)}` : "";
+  return request<SessionLocationsResponse>(
+    `/sessions/${encodeURIComponent(sessionKey)}/locations${query}`,
+    signal,
+  );
+}
+
+export function getSessionLocationSamples(
+  sessionKey: string,
+  options: { since?: string; until?: string; driverNumber?: number; limit?: number } = {},
+  signal?: AbortSignal,
+): Promise<SessionLocationSamplesResponse> {
+  const params = new URLSearchParams();
+  if (options.since) params.set("since", options.since);
+  if (options.until) params.set("until", options.until);
+  if (options.driverNumber != null) params.set("driver_number", String(options.driverNumber));
+  if (options.limit != null) params.set("limit", String(options.limit));
+  const query = params.toString();
+  return request<SessionLocationSamplesResponse>(
+    `/sessions/${encodeURIComponent(sessionKey)}/locations/samples${query ? `?${query}` : ""}`,
+    signal,
+  );
+}
+
+export function getSessionTrack(
+  sessionKey: string,
+  signal?: AbortSignal,
+): Promise<SessionTrackResponse> {
+  return request<SessionTrackResponse>(`/sessions/${encodeURIComponent(sessionKey)}/track`, signal);
 }
 
 export function getSession(sessionId: string, signal?: AbortSignal): Promise<SessionBootstrap> {

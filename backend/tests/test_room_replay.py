@@ -566,3 +566,140 @@ async def test_event_bus_outage_does_not_stop_replay_progress() -> None:
     assert bus.states == []
     assert bus.statuses == []
     await replay.close()
+
+
+class FakeSessionTimes:
+    """Stands in for the location store's recorded session span."""
+
+    def __init__(
+        self,
+        start: datetime | None = datetime(2026, 7, 19, 13, 0, tzinfo=UTC),
+        end: datetime | None = datetime(2026, 7, 19, 14, 0, tzinfo=UTC),
+    ) -> None:
+        self.start = start
+        self.end = end
+        self.calls = 0
+
+    async def time_range(self, session_key: str) -> tuple[datetime | None, datetime | None]:
+        self.calls += 1
+        return self.start, self.end
+
+
+def clocked_coordinator(
+    room: RaceRoom,
+    events: list[NormalizedRaceEvent],
+    times: FakeSessionTimes,
+) -> tuple[RoomReplayCoordinator, FakeRoomRepository]:
+    rooms = FakeRoomRepository(room)
+    replay = RoomReplayCoordinator(
+        rooms,  # type: ignore[arg-type]
+        FakeEventRepository(events),  # type: ignore[arg-type]
+        FakeDiscussion(rooms),  # type: ignore[arg-type]
+        FakeRaceState(),  # type: ignore[arg-type]
+        FakeEventBus(),  # type: ignore[arg-type]
+        base_interval_seconds=0,
+        session_times=times,
+    )
+    return replay, rooms
+
+
+@pytest.mark.asyncio
+async def test_session_clock_maps_replay_progress_onto_real_session_time() -> None:
+    """Persisted events are sequenced per endpoint, not by timestamp.
+
+    The circuit map needs a clock that only moves forward with playback, so it
+    is derived from progress through the sequence across the session's own
+    recorded span rather than from the last applied event's timestamp.
+    """
+
+    room = replay_room()
+    events = [replay_event(sequence, sequence) for sequence in range(1, 11)]
+    replay, _ = clocked_coordinator(room, events, FakeSessionTimes())
+
+    at_start = await replay.with_session_clock(room.session_key, RoomPlaybackState(room_id=room.id))
+    halfway = await replay.with_session_clock(
+        room.session_key, RoomPlaybackState(room_id=room.id, current_event_sequence=5)
+    )
+    at_end = await replay.with_session_clock(
+        room.session_key, RoomPlaybackState(room_id=room.id, current_event_sequence=10)
+    )
+
+    assert at_start.session_clock == datetime(2026, 7, 19, 13, 0, tzinfo=UTC)
+    assert halfway.session_clock == datetime(2026, 7, 19, 13, 30, tzinfo=UTC)
+    assert at_end.session_clock == datetime(2026, 7, 19, 14, 0, tzinfo=UTC)
+    assert at_start.session_clock < halfway.session_clock < at_end.session_clock
+
+
+@pytest.mark.asyncio
+async def test_session_clock_is_clamped_and_cached() -> None:
+    room = replay_room()
+    times = FakeSessionTimes()
+    replay, _ = clocked_coordinator(room, [replay_event(1, 1)], times)
+
+    beyond = await replay.with_session_clock(
+        room.session_key, RoomPlaybackState(room_id=room.id, current_event_sequence=10_000)
+    )
+    await replay.with_session_clock(room.session_key, RoomPlaybackState(room_id=room.id))
+
+    assert beyond.session_clock == datetime(2026, 7, 19, 14, 0, tzinfo=UTC)
+    assert times.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_session_clock_is_absent_without_a_recorded_span() -> None:
+    """No location samples means no clock, and the map falls back cleanly."""
+
+    room = replay_room()
+    replay, _ = clocked_coordinator(room, [replay_event(1, 1)], FakeSessionTimes(None, None))
+
+    playback = await replay.with_session_clock(room.session_key, RoomPlaybackState(room_id=room.id))
+    assert playback.session_clock is None
+
+
+@pytest.mark.asyncio
+async def test_a_missing_span_is_retried_once_locations_are_backfilled() -> None:
+    """Locations are often ingested while the API stays up.
+
+    Caching the miss would leave that room without a clock until the process
+    restarted, so only a found span is cached.
+    """
+
+    room = replay_room()
+    times = FakeSessionTimes(None, None)
+    replay, _ = clocked_coordinator(room, [replay_event(1, 1)], times)
+
+    first = await replay.with_session_clock(room.session_key, RoomPlaybackState(room_id=room.id))
+    assert first.session_clock is None
+
+    # The backfill lands, and the backoff window expires.
+    times.start = datetime(2026, 7, 19, 13, 0, tzinfo=UTC)
+    times.end = datetime(2026, 7, 19, 14, 0, tzinfo=UTC)
+    replay._span_misses.clear()
+
+    second = await replay.with_session_clock(room.session_key, RoomPlaybackState(room_id=room.id))
+    assert second.session_clock == datetime(2026, 7, 19, 13, 0, tzinfo=UTC)
+
+
+@pytest.mark.asyncio
+async def test_a_missing_span_is_not_re_queried_on_every_tick() -> None:
+    room = replay_room()
+    times = FakeSessionTimes(None, None)
+    replay, _ = clocked_coordinator(room, [replay_event(1, 1)], times)
+
+    for _ in range(5):
+        await replay.with_session_clock(room.session_key, RoomPlaybackState(room_id=room.id))
+
+    assert times.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_playback_controls_publish_the_session_clock() -> None:
+    room = replay_room()
+    events = [replay_event(sequence, sequence) for sequence in range(1, 11)]
+    replay, rooms = clocked_coordinator(room, events, FakeSessionTimes())
+
+    await replay.start(room)
+    await asyncio.wait_for(rooms.terminal_status.wait(), timeout=1)
+    paused = await replay.pause(room)
+
+    assert paused.session_clock is not None

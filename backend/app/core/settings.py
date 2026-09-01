@@ -130,6 +130,11 @@ class Settings(BaseSettings):
     historical_provider_min_interval_ms: int = Field(default=25, ge=0, le=5000)
     historical_provider_cache_ttl_seconds: int = Field(default=900, ge=0, le=86400)
     debug_ingestion_enabled: bool = True
+    # Location arrives at ~4 Hz per car. One fix per second per driver is plenty
+    # for a map that interpolates, and keeps a full race inside ~150k rows.
+    location_sample_interval_ms: int = Field(default=1000, ge=0, le=60_000)
+    location_fetch_window_seconds: int = Field(default=120, ge=10, le=600)
+    location_max_samples_per_session: int = Field(default=250_000, ge=1000, le=2_000_000)
 
     enable_live_rooms: bool = True
     enable_historical_replay: bool = True

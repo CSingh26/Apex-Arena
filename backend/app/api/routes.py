@@ -33,10 +33,12 @@ from app.api.schemas import (
     OpenF1StatusResponse,
     SeasonCalendarSummary,
     SessionEventsResponse,
+    SessionLocationSamplesResponse,
     SessionLocationsResponse,
     SessionStateResponse,
     SessionTelemetryResponse,
     SessionTimingResponse,
+    SessionTrackResponse,
 )
 from app.api.streaming import session_event_stream
 from app.domain.models import MeetingLifecycleStatus
@@ -46,7 +48,14 @@ from app.services.championship import ChampionshipUnavailableError
 from app.services.container import AppServices
 from app.services.historical import HistoricalIngestionError
 from app.services.openf1_backfill import backfill_job_status
-from app.services.session_realtime import location_state, telemetry_state, timing_state
+from app.services.session_realtime import (
+    SessionLocationSamplesState,
+    SessionTrackState,
+    location_state,
+    location_state_from_samples,
+    telemetry_state,
+    timing_state,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -57,6 +66,47 @@ def get_services(request: Request) -> AppServices:
 
 
 Services = Annotated[AppServices, Depends(get_services)]
+
+
+async def _session_geometry(services: AppServices, session_key: str):
+    try:
+        return await services.session_locations.geometry(session_key)
+    except Exception as exc:
+        logger.warning(
+            "location_geometry_unavailable session_key=%s error=%s",
+            session_key,
+            type(exc).__name__,
+        )
+        return None
+
+
+async def _location_sample_count(services: AppServices, room: object) -> int | None:
+    """Real stored sample count, or None when it cannot be determined.
+
+    None keeps the capability at ``unknown`` rather than falsely reporting the
+    map as unavailable when the store itself is the thing that failed.
+    """
+
+    session_key = getattr(room, "session_key", None)
+    if not session_key:
+        return None
+    try:
+        return await services.session_locations.sample_count(str(session_key))
+    except Exception as exc:
+        logger.warning(
+            "location_capability_lookup_failed session_key=%s error=%s",
+            session_key,
+            type(exc).__name__,
+        )
+        return None
+
+
+def _utc(value: datetime | None) -> datetime | None:
+    """Treat naive query timestamps as UTC; provider samples are always UTC."""
+
+    if value is None:
+        return None
+    return value if value.tzinfo else value.replace(tzinfo=UTC)
 
 
 @router.get("/api/v1/season/{season}/weekends", response_model=EventWeekendListResponse)
@@ -89,7 +139,11 @@ async def session_capabilities(session_id: UUID, services: Services) -> SessionC
     if result is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
     _, _, room = result
-    return SessionCapabilitiesResponse(**services.rooms.capabilities_for(room).model_dump())
+    return SessionCapabilitiesResponse(
+        **services.rooms.capabilities_for(
+            room, location_samples=await _location_sample_count(services, room)
+        ).model_dump()
+    )
 
 
 @router.get("/api/v1/sessions/{session_id}/room", response_model=SessionBootstrapResponse)
@@ -104,7 +158,9 @@ async def session_detail(session_id: UUID, services: Services) -> SessionBootstr
             session=session,
             weekend=weekend,
             room_status=session.eligibility,
-            capabilities=services.rooms.capabilities_for(room),
+            capabilities=services.rooms.capabilities_for(
+                room, location_samples=await _location_sample_count(services, room)
+            ),
             room_slug=session.room_slug,
         ).model_dump()
     )
@@ -424,9 +480,108 @@ async def session_telemetry(
     "/api/v1/sessions/{session_key}/locations",
     response_model=SessionLocationsResponse,
 )
-async def session_locations(session_key: str, services: Services) -> SessionLocationsResponse:
-    return SessionLocationsResponse(
-        locations=location_state(await services.race_state.get_state(session_key))
+async def session_locations(
+    session_key: str,
+    services: Services,
+    at: Annotated[
+        datetime | None,
+        Query(description="Replay clock in UTC; returns the latest fix at or before it"),
+    ] = None,
+) -> SessionLocationsResponse:
+    """Latest known track position per driver.
+
+    Live sessions read the reduced race state; a replay clock (``at``) or an
+    empty live state falls back to the persisted series, so historical and
+    live sessions return the same contract.
+    """
+
+    state = await services.race_state.get_state(session_key)
+    locations = location_state(state)
+    if at is not None or not locations.drivers:
+        try:
+            samples = await services.session_locations.latest(session_key, at=_utc(at))
+        except Exception as exc:
+            logger.error(
+                "location_lookup_failed session_key=%s error=%s",
+                session_key,
+                type(exc).__name__,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Driver track positions are temporarily unavailable",
+            ) from exc
+        if samples:
+            locations = location_state_from_samples(state, samples)
+    # Bounds are an optimisation: without them the map derives its own extent
+    # from the fixes it has, so a geometry gap must not fail the request.
+    geometry = await _session_geometry(services, session_key)
+    if geometry is not None:
+        locations.bounds = geometry.bounds
+    logger.debug(
+        "location_lookup session_key=%s source=%s drivers=%s at=%s",
+        session_key,
+        locations.source,
+        len(locations.drivers),
+        at.isoformat() if at else None,
+    )
+    return SessionLocationsResponse(locations=locations)
+
+
+@router.get(
+    "/api/v1/sessions/{session_key}/locations/samples",
+    response_model=SessionLocationSamplesResponse,
+)
+async def session_location_samples(
+    session_key: str,
+    services: Services,
+    since: datetime | None = None,
+    until: datetime | None = None,
+    driver_number: Annotated[int | None, Query(ge=1, le=199)] = None,
+    limit: Annotated[int, Query(ge=1, le=20_000)] = 6_000,
+) -> SessionLocationSamplesResponse:
+    """Windowed provider fixes so the map can interpolate between samples."""
+
+    samples = await services.session_locations.window(
+        session_key,
+        since=_utc(since),
+        until=_utc(until),
+        driver_number=driver_number,
+        limit=limit,
+    )
+    return SessionLocationSamplesResponse(
+        locations=SessionLocationSamplesState(
+            session_key=session_key,
+            count=len(samples),
+            drivers=sorted({sample.driver_number for sample in samples}),
+            since=since,
+            until=until,
+            samples=samples,
+        )
+    )
+
+
+@router.get(
+    "/api/v1/sessions/{session_key}/track",
+    response_model=SessionTrackResponse,
+)
+async def session_track(session_key: str, services: Services) -> SessionTrackResponse:
+    """Circuit outline traced from this session's own location samples."""
+
+    geometry = await _session_geometry(services, session_key)
+    first_sample_at, last_sample_at = await services.session_locations.time_range(session_key)
+    if geometry is None:
+        return SessionTrackResponse(track=SessionTrackState(session_key=session_key))
+    return SessionTrackResponse(
+        track=SessionTrackState(
+            session_key=session_key,
+            available=bool(geometry.path),
+            bounds=geometry.bounds,
+            path=geometry.path,
+            source_driver_number=geometry.source_driver_number,
+            sample_count=geometry.sample_count,
+            first_sample_at=first_sample_at,
+            last_sample_at=last_sample_at,
+        )
     )
 
 

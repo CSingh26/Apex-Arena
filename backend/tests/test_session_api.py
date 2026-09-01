@@ -74,7 +74,7 @@ class FakeRooms:
         return self.event, self.session, None
 
     @staticmethod
-    def capabilities_for(_: object) -> SessionCapabilities:
+    def capabilities_for(_: object, *, location_samples: int | None = None) -> SessionCapabilities:
         return SessionCapabilities(
             timing=CapabilityStatus.AVAILABLE,
             telemetry=CapabilityStatus.UNAVAILABLE,
@@ -88,10 +88,21 @@ class FakeRooms:
         )
 
 
+class FakeSessionLocations:
+    def __init__(self, samples: int = 0) -> None:
+        self.samples = samples
+
+    async def sample_count(self, session_key: str) -> int:
+        return self.samples
+
+
 @pytest.mark.asyncio
 async def test_session_first_routes_return_lightweight_metadata_and_capabilities() -> None:
     event, session = catalog()
-    services = SimpleNamespace(rooms=FakeRooms(event, session))
+    services = SimpleNamespace(
+        rooms=FakeRooms(event, session),
+        session_locations=FakeSessionLocations(),
+    )
 
     season = await season_weekends(2026, services)
     sessions = await weekend_sessions(event.event_slug, services)
@@ -109,7 +120,10 @@ async def test_session_first_routes_return_lightweight_metadata_and_capabilities
 @pytest.mark.asyncio
 async def test_session_first_routes_return_a_safe_not_found_for_unknown_identity() -> None:
     event, session = catalog()
-    services = SimpleNamespace(rooms=FakeRooms(event, session))
+    services = SimpleNamespace(
+        rooms=FakeRooms(event, session),
+        session_locations=FakeSessionLocations(),
+    )
 
     with pytest.raises(HTTPException) as error:
         await session_detail(uuid4(), services)

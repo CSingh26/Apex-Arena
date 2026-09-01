@@ -105,6 +105,11 @@ def route_services(room: RaceRoom) -> SimpleNamespace:
         ),
         room_repository=room_repository,
         room_replay=SimpleNamespace(
+            with_session_clock=AsyncMock(
+                side_effect=lambda _session_key, state: state.model_copy(
+                    update={"session_clock": datetime(2026, 7, 19, 13, 45, tzinfo=UTC)}
+                )
+            ),
             start=AsyncMock(return_value=playback),
             pause=AsyncMock(return_value=playback),
             resume=AsyncMock(return_value=playback),

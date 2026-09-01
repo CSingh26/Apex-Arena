@@ -601,3 +601,40 @@ async def test_completed_events_are_newest_first_and_upcoming_events_are_nearest
         "Hungarian Grand Prix",
         "Abu Dhabi Grand Prix",
     ]
+
+
+@pytest.mark.parametrize(
+    ("availability", "samples", "expected"),
+    [
+        # Location availability follows the stored sample count, never the
+        # coarse timing/telemetry grade and never the session type.
+        (SourceAvailability.TIMING_ONLY, 18_421, "available"),
+        (SourceAvailability.TELEMETRY, 0, "unavailable"),
+        (SourceAvailability.LIMITED, 12, "available"),
+        (SourceAvailability.RESULTS_ONLY, 500, "available"),
+        # Unknown is honest: the count could not be read.
+        (SourceAvailability.TELEMETRY, None, "unknown"),
+    ],
+)
+def test_location_capability_reflects_real_sample_counts(
+    availability: SourceAvailability, samples: int | None, expected: str
+) -> None:
+    room = RaceRoom(
+        slug="2026-belgian-grand-prix-qualifying",
+        event_slug="2026-belgian-grand-prix",
+        season=2026,
+        round_number=13,
+        race_name="Belgian Grand Prix",
+        official_name="Belgian Grand Prix Qualifying",
+        circuit_name="Circuit de Spa-Francorchamps",
+        country="Belgium",
+        session_type=SessionType.QUALIFYING,
+        scheduled_start=datetime(2026, 7, 18, 14, tzinfo=UTC),
+        status=RoomStatus.COMPLETED,
+        mode=RoomMode.ARCHIVED,
+        eligibility_status=RoomEligibilityStatus.ELIGIBLE_HISTORICAL,
+        ingestion_status=IngestionStatus.READY,
+        source_availability=availability,
+    )
+    capabilities = RaceRoomService.capabilities_for(room, location_samples=samples)
+    assert capabilities.location.value == expected

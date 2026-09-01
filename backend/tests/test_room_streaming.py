@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
@@ -86,6 +87,13 @@ def stream_services(
             get_playback=AsyncMock(return_value=RoomPlaybackState(room_id=room_id)),
         ),
         event_bus=event_bus or FakeRoomEventBus(),
+        room_replay=SimpleNamespace(
+            with_session_clock=AsyncMock(
+                side_effect=lambda _session_key, playback: playback.model_copy(
+                    update={"session_clock": datetime(2026, 7, 19, 13, 45, tzinfo=UTC)}
+                )
+            )
+        ),
     )
 
 
@@ -229,8 +237,10 @@ async def test_stream_route_prefers_numeric_last_event_id_for_reconnect(
         runtime: object,
         room_id: UUID,
         after_sequence: int,
+        session_key: str | None = None,
     ):
         recovered.append(after_sequence)
+        assert session_key == room.session_key
         yield _sse("connection_status", {"status": "connected"})
 
     monkeypatch.setattr(room_routes, "race_room_stream", capture_stream)

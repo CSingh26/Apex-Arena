@@ -277,3 +277,191 @@ def test_debug_config_is_hidden_in_production_without_flag(settings: Settings) -
     # The endpoint must not leak internal database/redis hostnames publicly.
     assert response.status_code == 404
     assert "database_host" not in response.text
+
+
+def _location_service(samples=None, geometry=None, error: Exception | None = None):
+    from app.domain.locations import DriverLocationSample, SessionTrackGeometry, TrackBounds
+
+    class FakeSessionLocations:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, object]] = []
+
+        async def latest(self, session_key: str, *, at=None):
+            self.calls.append((session_key, at))
+            if error is not None:
+                raise error
+            return [DriverLocationSample(**row) for row in (samples or [])]
+
+        async def window(self, session_key: str, **kwargs):
+            self.calls.append((session_key, kwargs))
+            return [DriverLocationSample(**row) for row in (samples or [])]
+
+        async def geometry(self, session_key: str):
+            if geometry is None:
+                return None
+            return SessionTrackGeometry(
+                session_key=session_key,
+                bounds=TrackBounds(**geometry["bounds"]),
+                path=geometry["path"],
+                source_driver_number=geometry.get("driver"),
+                sample_count=geometry.get("sample_count", 0),
+            )
+
+        async def time_range(self, session_key: str):
+            return (None, None)
+
+        async def sample_count(self, session_key: str) -> int:
+            return len(samples or [])
+
+    return FakeSessionLocations()
+
+
+def _sample(driver: int, second: int, x: float, y: float) -> dict[str, object]:
+    return {
+        "driver_number": driver,
+        "x": x,
+        "y": y,
+        "z": 5.0,
+        "sample_time": datetime(2026, 7, 19, 13, 0, second, tzinfo=UTC),
+    }
+
+
+def test_location_snapshot_serves_a_reconnecting_browser_without_waiting(
+    settings: Settings,
+) -> None:
+    """A fresh connection must get every known position immediately."""
+
+    app = create_app(settings)
+    with TestClient(app) as client:
+        services = app.state.services
+        services.race_state.get_state = AsyncMock(
+            return_value=RaceState(session_key="11334", sequence_number=9)
+        )
+        services.session_locations = _location_service(
+            samples=[_sample(1, 0, 100.0, -200.0), _sample(16, 1, 300.5, -450.25)],
+            geometry={
+                "bounds": {"min_x": -4330, "max_x": 8311, "min_y": -15762, "max_y": 4537},
+                "path": [[0.0, 0.0], [10.0, 10.0]],
+                "driver": 1,
+            },
+        )
+        response = client.get("/api/v1/sessions/11334/locations")
+
+    body = response.json()["locations"]
+    assert response.status_code == 200
+    assert body["available"] is True
+    assert body["source"] == "historical"
+    assert [row["driver_number"] for row in body["drivers"]] == [1, 16]
+    assert body["drivers"][1]["x"] == 300.5
+    assert body["bounds"]["min_x"] == -4330
+
+
+def test_location_snapshot_accepts_a_replay_clock(settings: Settings) -> None:
+    app = create_app(settings)
+    with TestClient(app) as client:
+        services = app.state.services
+        services.race_state.get_state = AsyncMock(
+            return_value=RaceState(session_key="11334", sequence_number=9)
+        )
+        fake = _location_service(samples=[_sample(1, 0, 1.0, 2.0)])
+        services.session_locations = fake
+        response = client.get("/api/v1/sessions/11334/locations?at=2026-07-19T13:10:00Z")
+
+    assert response.status_code == 200
+    assert fake.calls[0][0] == "11334"
+    assert fake.calls[0][1] == datetime(2026, 7, 19, 13, 10, tzinfo=UTC)
+
+
+def test_location_snapshot_prefers_live_state_over_history(settings: Settings) -> None:
+    app = create_app(settings)
+    with TestClient(app) as client:
+        services = app.state.services
+        services.race_state.get_state = AsyncMock(
+            return_value=RaceState(
+                session_key="11334",
+                sequence_number=9,
+                drivers={
+                    "4": DriverRaceState(
+                        driver_number=4, position=1, location={"x": 7.0, "y": 8.0, "z": 9.0}
+                    )
+                },
+            )
+        )
+        services.session_locations = _location_service(samples=[_sample(1, 0, 1.0, 2.0)])
+        response = client.get("/api/v1/sessions/11334/locations")
+
+    body = response.json()["locations"]
+    assert body["source"] == "live"
+    assert [row["driver_number"] for row in body["drivers"]] == [4]
+
+
+def test_location_endpoint_degrades_without_taking_the_room_down(settings: Settings) -> None:
+    app = create_app(settings)
+    with TestClient(app) as client:
+        services = app.state.services
+        services.race_state.get_state = AsyncMock(
+            return_value=RaceState(session_key="11334", sequence_number=9)
+        )
+        services.session_locations = _location_service(error=RuntimeError("store offline"))
+        locations = client.get("/api/v1/sessions/11334/locations")
+        timing = client.get("/api/v1/sessions/11334/timing")
+
+    assert locations.status_code == 503
+    assert "offline" not in locations.text
+    # The rest of the Race Room is unaffected by a location outage.
+    assert timing.status_code == 200
+
+
+def test_location_samples_window_is_scoped_to_one_session(settings: Settings) -> None:
+    app = create_app(settings)
+    with TestClient(app) as client:
+        services = app.state.services
+        fake = _location_service(samples=[_sample(1, 0, 1.0, 2.0), _sample(16, 1, 3.0, 4.0)])
+        services.session_locations = fake
+        response = client.get(
+            "/api/v1/sessions/11334/locations/samples"
+            "?since=2026-07-19T13:00:00Z&until=2026-07-19T13:00:30Z&limit=500"
+        )
+        other = client.get("/api/v1/sessions/11330/locations/samples")
+
+    body = response.json()["locations"]
+    assert body["session_key"] == "11334"
+    assert body["count"] == 2
+    assert body["drivers"] == [1, 16]
+    assert fake.calls[0][1]["since"] == datetime(2026, 7, 19, 13, tzinfo=UTC)
+    assert fake.calls[0][1]["limit"] == 500
+    # A different session key never reads the first session's window.
+    assert other.json()["locations"]["session_key"] == "11330"
+    assert fake.calls[1][0] == "11330"
+
+
+def test_track_endpoint_returns_geometry_in_provider_coordinates(settings: Settings) -> None:
+    app = create_app(settings)
+    with TestClient(app) as client:
+        app.state.services.session_locations = _location_service(
+            geometry={
+                "bounds": {"min_x": -4330, "max_x": 8311, "min_y": -15762, "max_y": 4537},
+                "path": [[-4330.0, -15762.0], [8311.0, 4537.0]],
+                "driver": 1,
+                "sample_count": 108178,
+            }
+        )
+        response = client.get("/api/v1/sessions/11334/track")
+
+    track = response.json()["track"]
+    assert track["available"] is True
+    assert track["bounds"]["max_y"] == 4537
+    assert track["path"][0] == [-4330.0, -15762.0]
+    assert track["sample_count"] == 108178
+
+
+def test_track_endpoint_reports_a_session_without_geometry(settings: Settings) -> None:
+    app = create_app(settings)
+    with TestClient(app) as client:
+        app.state.services.session_locations = _location_service()
+        response = client.get("/api/v1/sessions/11334/track")
+
+    track = response.json()["track"]
+    assert track["available"] is False
+    assert track["bounds"] is None
+    assert track["path"] == []
