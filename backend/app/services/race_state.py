@@ -10,7 +10,9 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
+from app.domain.intelligence import BattleState, QualifyingState
 from app.domain.models import (
+    EventOrigin,
     NormalizedRaceEvent,
     RaceEventType,
     RaceStateSnapshot,
@@ -33,6 +35,8 @@ class DriverRaceState(BaseModel):
     grid_position: int | None = None
     final_position: int | None = None
     position_change: int | None = None
+    status: str = "RUNNING"
+    in_pit: bool = False
     latest_lap_duration: float | None = None
     best_lap_duration: float | None = None
     telemetry: dict[str, float | int | bool] = Field(default_factory=dict)
@@ -55,6 +59,9 @@ class RaceState(BaseModel):
     weather: dict[str, Any] = Field(default_factory=dict)
     starting_grid: list[dict[str, Any]] = Field(default_factory=list)
     final_classification: list[dict[str, Any]] = Field(default_factory=list)
+    current_battles: list[BattleState] = Field(default_factory=list)
+    recent_events: list[NormalizedRaceEvent] = Field(default_factory=list)
+    qualifying_intelligence: QualifyingState | None = None
     last_updated_at: datetime | None = None
     sequence_number: int = 0
     is_replay: bool = False
@@ -144,6 +151,21 @@ class RaceStateEngine:
             if delete_for_session is not None:
                 await delete_for_session(session_key)
 
+    async def set_intelligence(
+        self,
+        session_key: str,
+        *,
+        current_battles: list[BattleState],
+        qualifying: QualifyingState | None,
+    ) -> RaceState:
+        async with self._locks[session_key]:
+            state = await self._load_state(session_key)
+            state.current_battles = [battle.model_copy(deep=True) for battle in current_battles]
+            state.qualifying_intelligence = (
+                qualifying.model_copy(deep=True) if qualifying is not None else None
+            )
+            return state.model_copy(deep=True)
+
     async def prime_driver_profiles(
         self,
         session_key: str,
@@ -183,6 +205,9 @@ class RaceStateEngine:
     def _apply_event(self, state: RaceState, event: NormalizedRaceEvent) -> None:
         payload = event.payload
         event_type = event.event_type
+        if event.event_origin is EventOrigin.DERIVED:
+            state.recent_events.append(event.model_copy(deep=True))
+            state.recent_events = state.recent_events[-20:]
         normalized_session_type = payload.get("normalized_session_type")
         if normalized_session_type:
             state.session_type = str(normalized_session_type)
@@ -232,6 +257,18 @@ class RaceStateEngine:
             pit_stop = dict(payload)
             state.pit_stop_history.append(pit_stop)
             self._driver(state, event).pit_stops.append(pit_stop)
+        elif event_type == RaceEventType.PIT_ENTRY:
+            self._driver(state, event).in_pit = True
+        elif event_type == RaceEventType.PIT_EXIT:
+            self._driver(state, event).in_pit = False
+        elif event_type in {
+            RaceEventType.DRIVER_STOPPED,
+            RaceEventType.DRIVER_RETIRED,
+            RaceEventType.RETIREMENT,
+        }:
+            self._driver(state, event).status = (
+                "STOPPED" if event_type is RaceEventType.DRIVER_STOPPED else "RETIRED"
+            )
         elif event_type == RaceEventType.STINT_UPDATE:
             self._driver(state, event).stint = dict(payload)
         elif event_type == RaceEventType.CAR_DATA_SAMPLE:
@@ -300,6 +337,26 @@ class RaceStateEngine:
             }
         elif event_type in {RaceEventType.WEATHER_UPDATE, RaceEventType.WEATHER_CHANGE}:
             state.weather = dict(payload)
+        elif event_type in {
+            RaceEventType.BATTLE_STARTED,
+            RaceEventType.BATTLE_INTENSIFIED,
+            RaceEventType.DRS_RANGE_ENTERED,
+            RaceEventType.DRS_RANGE_EXITED,
+        }:
+            battle_payload = payload.get("battle")
+            if isinstance(battle_payload, dict):
+                battle = BattleState.model_validate(battle_payload)
+                state.current_battles = [
+                    current for current in state.current_battles if current.id != battle.id
+                ]
+                state.current_battles.append(battle)
+        elif event_type == RaceEventType.BATTLE_ENDED:
+            battle_payload = payload.get("battle")
+            if isinstance(battle_payload, dict) and battle_payload.get("id"):
+                battle_id = str(battle_payload["id"])
+                state.current_battles = [
+                    current for current in state.current_battles if current.id != battle_id
+                ]
 
     @staticmethod
     def _driver(state: RaceState, event: NormalizedRaceEvent) -> DriverRaceState:

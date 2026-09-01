@@ -201,9 +201,31 @@ class RaceEventProcessor:
 
         if event.raw_event_id:
             await self.raw_events.mark_status(event.raw_event_id, "normalized")
+        await self._notify_consumers(sequenced)
+        result = PipelineResult(normalized_inserted=1)
+        for consumer in self.consumers:
+            drain = getattr(consumer, "drain_derived", None)
+            if drain is None:
+                continue
+            for derived in drain(sequenced.session_key):
+                result.add(await self._persist_derived(derived))
+        return result
+
+    async def _persist_derived(self, event: NormalizedRaceEvent) -> PipelineResult:
+        if await self.deduplicator.is_duplicate(event.dedup_key):
+            return PipelineResult(normalized_duplicates=1)
+        sequence_number = await self.sequence_numbers.next(event.session_key)
+        sequenced = event.model_copy(update={"sequence_number": sequence_number})
+        persisted = await self.normalized_repository.insert(sequenced)
+        if not persisted.is_new:
+            return PipelineResult(normalized_duplicates=1)
+        await self._notify_consumers(sequenced)
+        return PipelineResult(normalized_inserted=1)
+
+    async def _notify_consumers(self, event: NormalizedRaceEvent) -> None:
         for consumer in self.consumers:
             try:
-                await consumer.consume(sequenced)
+                await consumer.consume(event)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -214,4 +236,3 @@ class RaceEventProcessor:
                     type(consumer).__name__,
                     type(exc).__name__,
                 )
-        return PipelineResult(normalized_inserted=1)

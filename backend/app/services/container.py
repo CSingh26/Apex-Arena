@@ -6,6 +6,7 @@ import logging
 from contextlib import suppress
 
 from app.core.settings import Settings
+from app.domain.intelligence import RaceIntelligenceConfig
 from app.providers.jolpica import JolpicaClient
 from app.providers.openf1 import OpenF1AuthService, OpenF1LiveClient, OpenF1RestClient
 from app.services.championship import ChampionshipService
@@ -29,6 +30,7 @@ from app.services.locations import (
 )
 from app.services.normalization import OpenF1EventNormalizer
 from app.services.openf1_backfill import OpenF1HistoricalBackfillService, OpenF1RoomFinalizer
+from app.services.race_intelligence import RaceIntelligenceCoordinator
 from app.services.race_state import RaceStateEngine
 from app.services.raw_events import RawProviderEventService
 from app.services.recent_sessions import RecentSessionReconciliationService
@@ -38,6 +40,7 @@ from app.services.rooms import RaceRoomService
 from app.services.season import SeasonService
 from app.storage.backfill_repository import SqlOpenF1BackfillJobRepository
 from app.storage.database import Database
+from app.storage.intelligence_repository import SqlBattleSummaryRepository
 from app.storage.location_repository import SqlSessionLocationRepository
 from app.storage.redis import EventBus, RaceEventRedisPublisher, RedisStore
 from app.storage.repositories import (
@@ -91,6 +94,7 @@ class AppServices:
         self.raw_event_repository = SqlRawEventRepository(self.database)
         self.normalized_event_repository = SqlNormalizedEventRepository(self.database)
         self.snapshot_repository = SqlRaceStateSnapshotRepository(self.database)
+        self.battle_summary_repository = SqlBattleSummaryRepository(self.database)
         self.ingestion_runs = SqlIngestionRunRepository(self.database)
         self.backfill_jobs = SqlOpenF1BackfillJobRepository(self.database)
         self.room_repository = SqlRaceRoomRepository(self.database)
@@ -108,6 +112,25 @@ class AppServices:
         self.race_state = RaceStateEngine(
             self.snapshot_repository,
             settings.race_state_snapshot_every_n_events,
+        )
+        intelligence_config = RaceIntelligenceConfig(
+            overtake_confirmation_seconds=settings.overtake_confirmation_seconds,
+            overtake_confirmation_samples=settings.overtake_confirmation_samples,
+            overtake_max_interval_seconds=settings.overtake_max_interval_seconds,
+            battle_start_interval_seconds=settings.battle_start_interval_seconds,
+            battle_start_samples=settings.battle_start_samples,
+            battle_intense_interval_seconds=settings.battle_intense_interval_seconds,
+            battle_end_interval_seconds=settings.battle_end_interval_seconds,
+            battle_end_samples=settings.battle_end_samples,
+            battle_trend_window=settings.battle_trend_window,
+            battle_trend_minimum_change=settings.battle_trend_minimum_change,
+            proximity_exit_seconds=settings.proximity_exit_seconds,
+            event_cooldown_seconds=settings.intelligence_event_cooldown_seconds,
+        )
+        self.race_intelligence = RaceIntelligenceCoordinator(
+            self.race_state,
+            config=intelligence_config,
+            battle_summaries=self.battle_summary_repository,
         )
         self.redis_publisher = RaceEventRedisPublisher(self.event_bus, self.race_state)
         self.room_eligibility = RoomEligibilityService()
@@ -142,6 +165,7 @@ class AppServices:
             sequence_numbers=SequenceNumberService(self.normalized_event_repository),
             consumers=[
                 self.race_state,
+                self.race_intelligence,
                 self.redis_publisher,
                 self.room_discussion,
                 self.championship,

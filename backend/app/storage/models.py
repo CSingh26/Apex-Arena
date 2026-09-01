@@ -194,6 +194,28 @@ class RaceStateSnapshotRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class BattleSummaryRecord(Base):
+    __tablename__ = "battle_summaries"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    battle_key: Mapped[str] = mapped_column(String(180), unique=True, index=True)
+    session_key: Mapped[str] = mapped_column(String(80), index=True)
+    lead_driver_number: Mapped[int] = mapped_column(Integer, index=True)
+    chasing_driver_number: Mapped[int] = mapped_column(Integer, index=True)
+    lead_position: Mapped[int] = mapped_column(Integer)
+    chasing_position: Mapped[int] = mapped_column(Integer)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    ended_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    closest_interval_seconds: Mapped[float] = mapped_column(Float)
+    peak_intensity: Mapped[str] = mapped_column(String(20))
+    outcome: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    context: Mapped[dict[str, Any]] = mapped_column(JSON_TYPE, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
 class IngestionRunRecord(Base):
     __tablename__ = "ingestion_runs"
 
