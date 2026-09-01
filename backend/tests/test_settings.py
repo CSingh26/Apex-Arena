@@ -305,6 +305,21 @@ def test_conservative_pool_defaults_suit_a_small_managed_database(settings: Sett
     assert settings.redis_health_check_interval_seconds == 30
 
 
+def test_race_intelligence_thresholds_are_centralized_and_validated(
+    settings: Settings,
+) -> None:
+    assert settings.battle_start_interval_seconds == 2.0
+    assert settings.battle_end_interval_seconds == 3.0
+    assert settings.battle_start_samples == 3
+    assert settings.overtake_confirmation_seconds == 2.0
+    assert settings.proximity_exit_seconds == 1.2
+
+    values = settings.model_dump()
+    values["battle_start_interval_seconds"] = 0
+    with pytest.raises(ValidationError):
+        Settings(**values)
+
+
 def test_base_path_normalizes_to_a_single_leading_slash() -> None:
     for raw in ("apex-arena", "/apex-arena", "/apex-arena/"):
         configured = Settings(

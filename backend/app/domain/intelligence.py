@@ -83,3 +83,52 @@ class OvertakeCandidate(BaseModel):
     last_sequence: int
     samples: int = 1
     interval_before: float | None = None
+
+
+class BattleStatus(StrEnum):
+    POTENTIAL = "POTENTIAL"
+    ACTIVE = "ACTIVE"
+    INTENSE = "INTENSE"
+    RESOLVED = "RESOLVED"
+
+
+class BattleTrend(StrEnum):
+    CLOSING = "CLOSING"
+    STABLE = "STABLE"
+    FALLING_BACK = "FALLING_BACK"
+
+
+class BattleIntensity(StrEnum):
+    BUILDING = "BUILDING"
+    CLOSE = "CLOSE"
+    INTENSE = "INTENSE"
+
+
+class BattleState(BaseModel):
+    id: str
+    session_key: str
+    lead_driver_number: int
+    chasing_driver_number: int
+    lead_position: int
+    chasing_position: int
+    interval_seconds: float
+    closest_interval_seconds: float
+    interval_history: list[float] = Field(default_factory=list, max_length=20)
+    started_at: datetime
+    last_updated_at: datetime
+    trend: BattleTrend = BattleTrend.STABLE
+    intensity: BattleIntensity = BattleIntensity.BUILDING
+    status: BattleStatus = BattleStatus.POTENTIAL
+    within_one_second: bool = False
+    drs_status: str = "UNAVAILABLE"
+    tyre_context: dict[str, object] = Field(default_factory=dict)
+    lap_number: int | None = None
+    train_size: int = 2
+    close_samples: int = Field(default=1, exclude=True)
+    end_samples: int = Field(default=0, exclude=True)
+    resolution_reason: str | None = None
+
+
+class BattleUpdate(BaseModel):
+    battle: BattleState
+    event_type: object | None = None
