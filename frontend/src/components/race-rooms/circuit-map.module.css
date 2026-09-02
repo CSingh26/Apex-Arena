@@ -8,8 +8,11 @@
 
 .marker { cursor: pointer; outline: none; }
 .markerDot { fill: var(--apex-violet); stroke: var(--panel-raised); stroke-width: 3; transition: r .16s ease, fill .16s ease; }
+.battleRing { fill: none; stroke: var(--apex-coral); stroke-width: 3; opacity: .9; }
+.markerBattle .markerDot { stroke: var(--apex-coral); }
 .marker:hover .markerDot, .marker:focus-visible .markerDot { fill: var(--apex-cyan); }
 .markerSelected .markerDot { fill: var(--apex-gold); stroke: #fff; stroke-width: 4; }
+.markerSelected .battleRing { stroke: var(--apex-gold); stroke-width: 4; }
 .markerLabel { fill: #fff; font: 800 12px var(--font-mono, ui-monospace), monospace; letter-spacing: .04em; pointer-events: none; text-anchor: middle; dominant-baseline: middle; }
 .markerSelected .markerLabel { fill: #10131c; font-size: 15px; }
 /* A car whose feed has gone quiet stays visible but reads as held, not live. */

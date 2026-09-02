@@ -201,6 +201,7 @@ export type SessionBootstrap = {
   room_status: RoomEligibility;
   capabilities: SessionCapabilities;
   room_slug: string | null;
+  intelligence: SessionIntelligenceState;
 };
 
 /** Public Race Rooms index model. One item represents one race weekend. */
@@ -286,18 +287,102 @@ export type EngineStatus = {
   latest_ingestion: IngestionRun | null;
 };
 
+export type EventOrigin = "SOURCE_FACT" | "DERIVED";
+export type EventImportance = "LOW" | "NORMAL" | "IMPORTANT" | "MAJOR" | "CRITICAL";
+export type EventConfidence = "LOW" | "MEDIUM" | "HIGH";
+export type RaceEventCategory = "BATTLES" | "PITS" | "RACE_CONTROL" | "FAST_LAPS";
+export type RaceEventFilter = "ALL" | "BATTLES" | "PITS" | "RACE_CONTROL" | "MY_DRIVER";
+export type RaceRoomMode = "FAN" | "ANALYST";
+
+export type DerivationEvidence = {
+  kind: string;
+  observed_at: string;
+  event_id: string | null;
+  value: string | number | boolean | null;
+};
+
+export type EventDerivation = {
+  algorithm: string;
+  version: number;
+  evidence: DerivationEvidence[];
+  exclusions_checked: string[];
+};
+
 export type NormalizedRaceEvent = {
   id: string;
   session_key: string;
   source: string;
+  raw_event_id: string | null;
   event_time: string;
+  received_at: string;
   processed_at: string;
   sequence_number: number;
   event_type: string;
+  event_origin: EventOrigin;
   driver_numbers: number[];
+  primary_driver_number: number | null;
+  secondary_driver_number: number | null;
+  position_before: number | null;
+  position_after: number | null;
+  gap_seconds: number | null;
+  interval_seconds: number | null;
   lap_number: number | null;
+  importance: number | null;
+  importance_level: EventImportance;
+  confidence: number | null;
+  confidence_level: EventConfidence;
+  derivation: EventDerivation | null;
   payload: Record<string, unknown>;
+  dedup_key: string;
   is_replay: boolean;
+};
+
+export type BattleTrend = "CLOSING" | "STABLE" | "FALLING_BACK";
+export type BattleIntensity = "BUILDING" | "CLOSE" | "INTENSE";
+export type BattleStatus = "POTENTIAL" | "ACTIVE" | "INTENSE" | "RESOLVED";
+
+export type BattleState = {
+  id: string;
+  session_key: string;
+  lead_driver_number: number;
+  chasing_driver_number: number;
+  lead_position: number;
+  chasing_position: number;
+  interval_seconds: number;
+  closest_interval_seconds: number;
+  interval_history: number[];
+  started_at: string;
+  last_updated_at: string;
+  trend: BattleTrend;
+  intensity: BattleIntensity;
+  status: BattleStatus;
+  within_one_second: boolean;
+  drs_status: string;
+  tyre_context: Record<string, unknown>;
+  lap_number: number | null;
+  train_size: number;
+  resolution_reason: string | null;
+};
+
+export type QualifyingIntelligence = {
+  session_key: string;
+  phase: string | null;
+  field_size: number;
+  cutoff_position: number | null;
+  positions: Record<string, number>;
+  best_laps: Record<string, number>;
+  session_best: number | null;
+  provisional_pole_driver: number | null;
+  eliminated_drivers: number[];
+  risk_cooldowns: Record<string, string>;
+};
+
+export type SessionIntelligenceState = {
+  session_key: string;
+  sequence_number: number;
+  current_battles: BattleState[];
+  recent_events: NormalizedRaceEvent[];
+  qualifying: QualifyingIntelligence | null;
 };
 
 export type DriverRaceState = {
@@ -329,6 +414,9 @@ export type RaceState = {
   drivers: Record<string, DriverRaceState>;
   race_control_state: Record<string, unknown>;
   weather: Record<string, unknown>;
+  current_battles: BattleState[];
+  recent_events: NormalizedRaceEvent[];
+  qualifying_intelligence: QualifyingIntelligence | null;
   last_updated_at: string | null;
   sequence_number: number;
   is_replay: boolean;
@@ -336,6 +424,16 @@ export type RaceState = {
 
 export type TimingMode = "race" | "qualifying" | "practice";
 export type TyreCompound = "SOFT" | "MEDIUM" | "HARD" | "INTERMEDIATE" | "WET" | "UNKNOWN";
+export type DriverBattleContextStatus = "CLOSING" | "UNDER_PRESSURE" | "BATTLING" | "CLEAR_AIR" | "UNAVAILABLE";
+export type DriverBattleContext = {
+  driver_number: number;
+  ahead_driver_number: number | null;
+  ahead_interval_seconds: number | null;
+  behind_driver_number: number | null;
+  behind_interval_seconds: number | null;
+  status: DriverBattleContextStatus;
+  battle_id: string | null;
+};
 export type DriverTimingState = {
   driver_number: number;
   name: string;
@@ -353,6 +451,7 @@ export type DriverTimingState = {
   is_fastest: boolean;
   is_personal_best: boolean;
   status: string;
+  battle_context: DriverBattleContext;
 };
 export type SessionTimingState = {
   session_key: string;
@@ -518,6 +617,7 @@ export type RaceRoomDetailResponse = {
   playback: RoomPlayback;
   circuit: CircuitIntelligence;
   weather: SessionWeather;
+  intelligence: SessionIntelligenceState;
   data_notice: string;
   diagnostics_available: boolean;
 };

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import { act, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { LiveCommandCenter } from "@/components/race-rooms/live-command-center";
@@ -10,6 +11,7 @@ const api = vi.hoisted(() => ({
   sessionStreamUrl: vi.fn((sessionKey: string, sequence: number) => `/stream/${sessionKey}?after=${sequence}`),
   getSessionTrack: vi.fn(),
   getSessionLocationSamples: vi.fn(),
+  getSessionEvents: vi.fn(),
 }));
 
 vi.mock("@/lib/api", () => api);
@@ -46,6 +48,9 @@ function state(sequence: number, position: number, gap: number, pits = 0): RaceS
     is_replay: true,
     race_control_state: sequence === 2 ? { event_type: "SAFETY_CAR" } : {},
     weather: {},
+    current_battles: [],
+    recent_events: [],
+    qualifying_intelligence: null,
     last_updated_at: "2026-08-10T00:00:00Z",
     drivers: {
       "63": {
@@ -78,6 +83,7 @@ describe("LiveCommandCenter", () => {
     api.sessionStreamUrl.mockClear();
     api.getSessionTrack.mockReset();
     api.getSessionLocationSamples.mockReset();
+    api.getSessionEvents.mockReset();
     api.getSessionTrack.mockResolvedValue({
       track: {
         session_key: "race-1",
@@ -92,6 +98,9 @@ describe("LiveCommandCenter", () => {
     });
     api.getSessionLocationSamples.mockResolvedValue({
       locations: { session_key: "race-1", count: 0, drivers: [], since: null, until: null, samples: [] },
+    });
+    api.getSessionEvents.mockResolvedValue({
+      session_key: "race-1", after_sequence_number: 0, count: 0, events: [],
     });
     vi.stubGlobal("EventSource", FakeEventSource);
   });
@@ -123,5 +132,28 @@ describe("LiveCommandCenter", () => {
     await waitFor(() => expect(api.getSessionState).toHaveBeenCalledTimes(2));
     await screen.findByRole("button", { name: /George Russell, position 2/i });
     expect(api.sessionStreamUrl).toHaveBeenLastCalledWith("race-1", 0);
+  });
+
+  it("switches presentation modes without refetching or recreating the stream", async () => {
+    const initial = state(1, 1, 0);
+    initial.drivers["63"].telemetry = {
+      speed: 312,
+      throttle: 96,
+      brake: 0,
+      gear: 8,
+      drs: true,
+    };
+    api.getSessionState.mockResolvedValue({ state: initial });
+    render(<LiveCommandCenter sessionKey="race-1" circuitName="Circuit" eventName="Grand Prix" playbackSequence={1} sessionClock={null} selectedDriver={63} onSelectDriver={vi.fn()} />);
+
+    await screen.findByRole("button", { name: /George Russell, position 1/i });
+    expect(screen.queryByText("SPEED")).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Analyst" }));
+
+    expect(screen.getByText("SPEED")).toBeVisible();
+    expect(api.getSessionState).toHaveBeenCalledOnce();
+    expect(api.getSessionEvents).toHaveBeenCalledOnce();
+    expect(FakeEventSource.instances).toHaveLength(1);
+    expect(screen.getByRole("button", { name: /George Russell, position 1/i })).toHaveAttribute("aria-pressed", "true");
   });
 });

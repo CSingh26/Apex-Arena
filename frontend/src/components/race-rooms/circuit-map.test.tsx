@@ -106,6 +106,18 @@ describe("CircuitMap", () => {
     expect(container.querySelectorAll("g[role='button']").length).toBe(2);
   });
 
+  it("emphasizes battle participants while preserving selected-driver precedence", () => {
+    const { container } = renderMap({
+      selectedDriver: 16,
+      battleDrivers: new Set([1, 16]),
+    });
+    const selected = screen.getByRole("button", { name: /Charles Leclerc/ });
+    expect(container.querySelectorAll("circle[class*='battleRing']")).toHaveLength(2);
+    expect(selected.getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByRole("img")).toHaveAccessibleName(/2 in active battles/i);
+    expect(screen.getByText(/Highlighted markers identify drivers/i)).toBeInTheDocument();
+  });
+
   it("reports the clicked driver so the rest of the room follows", async () => {
     const { onSelectDriver } = renderMap();
     await userEvent.click(screen.getByRole("button", { name: /Charles Leclerc/ }));

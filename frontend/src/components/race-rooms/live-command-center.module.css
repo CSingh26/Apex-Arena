@@ -1,7 +1,8 @@
-.commandCenter { margin: 18px 0 24px; overflow: hidden; border: 1px solid var(--line); border-radius: 20px; background: color-mix(in srgb, var(--panel-raised) 94%, var(--apex-violet) 6%); }
+.commandCenter { margin: 18px 0 24px; overflow: hidden; border: 1px solid var(--line); border-radius: 8px; background: color-mix(in srgb, var(--panel-raised) 94%, var(--apex-violet) 6%); }
 .banner { display: flex; align-items: center; gap: 12px; padding: 11px 16px; border-bottom: 1px solid var(--line); color: var(--muted); font: 700 .62rem var(--font-mono, ui-monospace), monospace; letter-spacing: .08em; text-transform: uppercase; }
 .banner b { color: var(--foreground); }
 .trackStatus { margin-left: auto; color: var(--apex-gold); }
+.banner > :last-child { margin-left: 8px; }
 .connection { display: inline-flex; align-items: center; gap: 6px; }
 .connection i { width: 7px; height: 7px; border-radius: 50%; background: var(--warning); }
 .connection_live i, .connection_historical i { background: var(--apex-mint); }
@@ -44,6 +45,7 @@
 .telemetryFallback { align-content: center; gap: 4px; min-height: 170px; padding: 14px; border: 1px dashed color-mix(in srgb, var(--line) 92%, transparent); border-radius: 12px; background: color-mix(in srgb, var(--panel) 74%, transparent); }
 .telemetryEyebrow { color: var(--apex-cyan); font: 700 .54rem var(--font-mono, ui-monospace), monospace; letter-spacing: .1em; text-transform: uppercase; }
 .speed { padding: 18px; border: 1px solid var(--line); border-radius: 12px; background: color-mix(in srgb, var(--apex-cyan) 9%, transparent); }
+.telemetry > section { margin: 0 0 12px; }
 .speed span, .telemetryGrid span { display: block; color: var(--faint); font: 700 .57rem var(--font-mono, ui-monospace), monospace; letter-spacing: .08em; }
 .speed b { display: block; margin-top: 4px; font-size: 1.5rem; }
 .telemetryGrid { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; margin-top: 12px; overflow: hidden; border: 1px solid var(--line); border-radius: 12px; }
@@ -62,8 +64,12 @@
 
 @media (max-width: 700px) {
   .commandCenter { margin-inline: -4px; border-radius: 14px; }
-  .banner { gap: 8px; padding: 9px 12px; font-size: .54rem; }
+  .banner { flex-wrap: wrap; gap: 8px; padding: 9px 12px; font-size: .54rem; }
+  .banner > :last-child { width: 100%; margin-left: 0; }
   .grid { grid-template-columns: 1fr; }
+  .telemetry { grid-row: 1; }
+  .tower { grid-row: 2; }
+  .map { grid-row: 3; }
   .tower, .map { border-right: 0; border-bottom: 1px solid var(--line); }
   .tower, .map, .telemetry { padding: 13px; }
   .rows { max-height: 330px; }

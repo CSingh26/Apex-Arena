@@ -25,6 +25,7 @@ type CircuitMapProps = {
   driverNumbers: number[];
   drivers: Map<number, CircuitMapDriver>;
   selectedDriver: number | null;
+  battleDrivers?: ReadonlySet<number>;
   onSelectDriver: (driverNumber: number) => void;
   sampleAt: (clockMs: number) => DriverLocationState[];
   currentClockMs: () => number;
@@ -49,6 +50,7 @@ export function CircuitMap({
   driverNumbers,
   drivers,
   selectedDriver,
+  battleDrivers = new Set<number>(),
   onSelectDriver,
   sampleAt,
   currentClockMs,
@@ -181,7 +183,7 @@ export function CircuitMap({
         viewBox={`0 0 ${width} ${height}`}
         preserveAspectRatio="xMidYMid meet"
         role="img"
-        aria-label={`Driver track positions, ${located} cars located`}
+        aria-label={`Driver track positions, ${located} cars located, ${battleDrivers.size} in active battles`}
       >
         {trackPath ? (
           <>
@@ -208,13 +210,14 @@ export function CircuitMap({
         {driverNumbers.map((driverNumber) => {
           const driver = drivers.get(driverNumber);
           const selected = selectedDriver === driverNumber;
+          const inBattle = battleDrivers.has(driverNumber);
           const label = driver?.code ?? String(driverNumber);
           const initial = initialPositions.get(driverNumber);
           return (
             <g
               key={driverNumber}
               ref={(element) => registerGroup(driverNumber, element)}
-              className={`${styles.marker} ${selected ? styles.markerSelected : ""}`}
+              className={`${styles.marker} ${inBattle ? styles.markerBattle : ""} ${selected ? styles.markerSelected : ""}`}
               // Placed on first render so a marker never flashes at the origin
               // before the animation loop takes over.
               transform={`translate(${initial?.x.toFixed(2) ?? 0} ${initial?.y.toFixed(2) ?? 0})`}
@@ -230,6 +233,7 @@ export function CircuitMap({
                 }
               }}
             >
+              {inBattle ? <circle className={styles.battleRing} r={SELECTED_RADIUS + 5} /> : null}
               <circle className={styles.markerDot} r={selected ? SELECTED_RADIUS : MARKER_RADIUS} />
               <text className={styles.markerLabel} y={1}>
                 {label.slice(0, 3)}
@@ -238,6 +242,9 @@ export function CircuitMap({
           );
         })}
       </svg>
+      {battleDrivers.size ? (
+        <p className="sr-only">Highlighted markers identify drivers in current timing-based battles.</p>
+      ) : null}
 
       {showDebug && debug ? (
         <dl className={styles.debug} aria-label="Location debug">
