@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 import logging
-from collections import defaultdict
+from collections import Counter, defaultdict
+from datetime import datetime, timedelta
 from typing import Protocol
 from uuid import NAMESPACE_URL, uuid5
 
@@ -12,6 +13,7 @@ from app.domain.intelligence import (
     OvertakeContext,
     PositionChange,
     RaceIntelligenceConfig,
+    RaceIntelligenceDiagnostics,
 )
 from app.domain.models import (
     DerivationEvidence,
@@ -29,6 +31,9 @@ from app.services.qualifying_intelligence import QualifyingEngine
 from app.services.race_state import RaceState, RaceStateEngine
 
 logger = logging.getLogger(__name__)
+DEFAULT_PIT_TRANSITION_SECONDS = 45.0
+PIT_TRANSITION_GRACE_SECONDS = 5.0
+SESSION_END_TYPES = {RaceEventType.SESSION_END, RaceEventType.SESSION_FINISH}
 
 
 class BattleSummaryRepository(Protocol):
@@ -51,15 +56,12 @@ class RaceIntelligenceCoordinator:
         self.positions = PositionTracker()
         self.overtakes = OvertakeDetector(self.config)
         self.battles = BattleEngine(self.config)
-        self.qualifying = QualifyingEngine(
-            cooldown_seconds=self.config.event_cooldown_seconds
-        )
-        self.importance = EventImportancePolicy(
-            cooldown_seconds=self.config.event_cooldown_seconds
-        )
+        self.qualifying = QualifyingEngine(cooldown_seconds=self.config.event_cooldown_seconds)
+        self.importance = EventImportancePolicy(cooldown_seconds=self.config.event_cooldown_seconds)
         self._pending_overtakes: dict[str, dict[int, PositionChange]] = defaultdict(dict)
         self._derived: dict[str, list[NormalizedRaceEvent]] = defaultdict(list)
         self._last_source_sequence: dict[str, int] = {}
+        self._position_change_causes: dict[str, Counter[str]] = defaultdict(Counter)
 
     async def consume(self, event: NormalizedRaceEvent) -> None:
         if event.event_origin is EventOrigin.DERIVED:
@@ -69,19 +71,29 @@ class RaceIntelligenceCoordinator:
         self._last_source_sequence[event.session_key] = event.sequence_number
         state = await self.race_state.get_state(event.session_key)
         candidates = self._advance_overtakes(event, state)
+        if event.event_type in SESSION_END_TYPES:
+            self.overtakes.reject_pending_for_session(event.session_key, "SESSION_ENDED")
+            self._pending_overtakes.pop(event.session_key, None)
 
         changes = self.positions.apply(event, state)
+        for change in changes:
+            self._position_change_causes[event.session_key][change.cause.value] += 1
         candidates.extend(self.positions.events_for(changes, source_event=event))
         for change in changes:
             if change.position_delta <= 0:
                 continue
-            self._pending_overtakes[event.session_key][change.driver_number] = change
             confirmed = self.overtakes.apply(change, self._overtake_context(change, event, state))
             if confirmed is not None:
-                candidates.append(confirmed)
+                candidates.append(self._enrich_overtake(confirmed, event, state))
+            if self.overtakes.is_pending(change):
+                self._pending_overtakes[event.session_key][change.driver_number] = change
+            else:
                 self._pending_overtakes[event.session_key].pop(change.driver_number, None)
 
         battle_updates = self.battles.apply(event, state)
+        for candidate in candidates:
+            if candidate.event_type is RaceEventType.OVERTAKE:
+                battle_updates.extend(self.battles.apply(candidate, state))
         if self.battle_summaries is not None:
             for update in battle_updates:
                 if update.event_type is RaceEventType.BATTLE_ENDED:
@@ -106,14 +118,35 @@ class RaceIntelligenceCoordinator:
         events = self._derived.pop(session_key, [])
         return [event.model_copy(deep=True) for event in events]
 
+    def diagnostics_for_session(self, session_key: str) -> RaceIntelligenceDiagnostics:
+        current_battles = self.battles.current_for_session(session_key)
+        return RaceIntelligenceDiagnostics(
+            position_states=self.positions.state_count(session_key),
+            tracked_battles=self.battles.tracked_count(session_key),
+            current_battles=len(current_battles),
+            maximum_battle_history=self.battles.maximum_history_size(session_key),
+            pending_overtakes=len(self._pending_overtakes.get(session_key, {})),
+            buffered_derived_events=len(self._derived.get(session_key, [])),
+            overtake_confirmations=self.overtakes.confirmation_count(session_key),
+            overtake_rejections_by_reason=self.overtakes.rejections_for_session(session_key),
+            position_changes_by_cause=dict(
+                sorted(self._position_change_causes.get(session_key, {}).items())
+            ),
+        )
+
     def _advance_overtakes(
         self,
         event: NormalizedRaceEvent,
         state: RaceState,
     ) -> list[NormalizedRaceEvent]:
+        if event.event_type is not RaceEventType.POSITION_SAMPLE:
+            return []
         confirmed: list[NormalizedRaceEvent] = []
         for driver, pending in list(self._pending_overtakes[event.session_key].items()):
             if event.sequence_number <= pending.source_sequence:
+                continue
+            participants = {pending.driver_number, *pending.related_driver_numbers}
+            if not participants.intersection(event.driver_numbers):
                 continue
             advanced = pending.model_copy(
                 update={
@@ -126,9 +159,26 @@ class RaceIntelligenceCoordinator:
                 self._overtake_context(pending, event, state),
             )
             if overtake is not None:
-                confirmed.append(overtake)
+                confirmed.append(self._enrich_overtake(overtake, event, state))
+                self._pending_overtakes[event.session_key].pop(driver, None)
+            elif not self.overtakes.is_pending(pending):
                 self._pending_overtakes[event.session_key].pop(driver, None)
         return confirmed
+
+    @staticmethod
+    def _enrich_overtake(
+        overtake: NormalizedRaceEvent,
+        source: NormalizedRaceEvent,
+        state: RaceState,
+    ) -> NormalizedRaceEvent:
+        return overtake.model_copy(
+            update={
+                "meeting_id": source.meeting_id,
+                "session_id": source.session_id,
+                "lap_number": source.lap_number or state.current_lap,
+                "is_replay": source.is_replay,
+            }
+        )
 
     @staticmethod
     def _overtake_context(
@@ -151,6 +201,9 @@ class RaceIntelligenceCoordinator:
         pit_available = bool(state.pit_stop_history) or any(
             bool(participant and participant.stint) for participant in participants
         )
+        primary = state.drivers.get(str(change.driver_number))
+        target_number = change.related_driver_numbers[0] if change.related_driver_numbers else None
+        target = state.drivers.get(str(target_number)) if target_number is not None else None
         return OvertakeContext(
             session_type=str(state.session_type or ""),
             observed_at=event.event_time,
@@ -158,7 +211,41 @@ class RaceIntelligenceCoordinator:
             pit_data_available=pit_available,
             location_available=state.has_locations,
             both_running=both_running,
+            ordering_persisted=(
+                primary is not None
+                and target is not None
+                and primary.position is not None
+                and target.position is not None
+                and primary.position < target.position
+            ),
+            pit_transition=RaceIntelligenceCoordinator._recent_pit_transition(
+                participants, event.event_time
+            ),
         )
+
+    @staticmethod
+    def _recent_pit_transition(participants: list[object], observed_at: datetime) -> bool:
+        for participant in participants:
+            if participant is None:
+                continue
+            pit_stops = getattr(participant, "pit_stops", [])
+            for pit_stop in reversed(pit_stops[-3:]):
+                value = pit_stop.get("date") or pit_stop.get("event_time")
+                if not isinstance(value, str):
+                    continue
+                try:
+                    pit_at = datetime.fromisoformat(value.replace("Z", "+00:00"))
+                except ValueError:
+                    continue
+                duration = RaceIntelligenceCoordinator._float(
+                    pit_stop.get("lane_duration") or pit_stop.get("pit_duration")
+                )
+                window = (duration or DEFAULT_PIT_TRANSITION_SECONDS) + (
+                    PIT_TRANSITION_GRACE_SECONDS
+                )
+                if pit_at <= observed_at <= pit_at + timedelta(seconds=window):
+                    return True
+        return False
 
     @staticmethod
     def _battle_event(
@@ -234,6 +321,7 @@ class RaceIntelligenceCoordinator:
         self._pending_overtakes.pop(session_key, None)
         self._derived.pop(session_key, None)
         self._last_source_sequence.pop(session_key, None)
+        self._position_change_causes.pop(session_key, None)
 
     @staticmethod
     def _float(value: object) -> float | None:

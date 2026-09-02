@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import time
 from collections import Counter
+from collections.abc import Callable
 from typing import Protocol
 
 from pydantic import BaseModel, Field
@@ -44,6 +45,14 @@ class IntelligenceRebuildSummary(BaseModel):
     resolved_battle_count: int = 0
     peak_current_battles: int = 0
     peak_pending_overtakes: int = 0
+    remaining_current_battles: int = 0
+    remaining_pending_overtakes: int = 0
+    overtake_confirmations: int = 0
+    overtake_rejections: int = 0
+    overtake_rejections_by_reason: dict[str, int] = Field(default_factory=dict)
+    pit_exclusions: int = 0
+    position_changes_by_cause: dict[str, int] = Field(default_factory=dict)
+    bounded_state_maxima: dict[str, int] = Field(default_factory=dict)
     elapsed_seconds: float = 0
     events_per_second: float = 0
     derived_dedup_keys: list[str] = Field(default_factory=list)
@@ -75,11 +84,13 @@ class IntelligenceRebuildService:
         *,
         config: RaceIntelligenceConfig | None = None,
         snapshots: ResettableSnapshotRepository | None = None,
+        timer: Callable[[], float] = time.perf_counter,
     ) -> None:
         self.events = events
         self.battles = battles
         self.config = config or RaceIntelligenceConfig()
         self.snapshots = snapshots
+        self.timer = timer
 
     async def run(
         self,
@@ -102,7 +113,8 @@ class IntelligenceRebuildService:
         derived: list[NormalizedRaceEvent] = []
         peak_battles = 0
         peak_pending = 0
-        started = time.perf_counter()
+        maxima: Counter[str] = Counter()
+        started = self.timer()
         for source in source_events:
             await race_state.consume(source)
             await coordinator.consume(source)
@@ -115,7 +127,22 @@ class IntelligenceRebuildService:
                 peak_pending,
                 len(coordinator.overtakes.pending_for_session(session_key)),
             )
-        elapsed = time.perf_counter() - started
+            diagnostics = coordinator.diagnostics_for_session(session_key)
+            maxima["position_states"] = max(maxima["position_states"], diagnostics.position_states)
+            maxima["tracked_battles"] = max(maxima["tracked_battles"], diagnostics.tracked_battles)
+            maxima["current_battles"] = max(maxima["current_battles"], diagnostics.current_battles)
+            maxima["battle_history_samples"] = max(
+                maxima["battle_history_samples"], diagnostics.maximum_battle_history
+            )
+            maxima["pending_overtakes"] = max(
+                maxima["pending_overtakes"], diagnostics.pending_overtakes
+            )
+            maxima["buffered_derived_events"] = max(
+                maxima["buffered_derived_events"], diagnostics.buffered_derived_events
+            )
+        elapsed = self.timer() - started
+        diagnostics = coordinator.diagnostics_for_session(session_key)
+        rejections = diagnostics.overtake_rejections_by_reason
 
         persisted = derived
         if not dry_run:
@@ -138,6 +165,14 @@ class IntelligenceRebuildService:
             resolved_battle_count=len(collector.resolved),
             peak_current_battles=peak_battles,
             peak_pending_overtakes=peak_pending,
+            remaining_current_battles=diagnostics.current_battles,
+            remaining_pending_overtakes=diagnostics.pending_overtakes,
+            overtake_confirmations=diagnostics.overtake_confirmations,
+            overtake_rejections=sum(rejections.values()),
+            overtake_rejections_by_reason=rejections,
+            pit_exclusions=(rejections.get("PIT_CYCLE", 0) + rejections.get("PIT_TRANSITION", 0)),
+            position_changes_by_cause=diagnostics.position_changes_by_cause,
+            bounded_state_maxima=dict(sorted(maxima.items())),
             elapsed_seconds=round(elapsed, 6),
             events_per_second=round(len(source_events) / elapsed, 2) if elapsed else 0,
             derived_dedup_keys=[event.dedup_key for event in persisted],
@@ -160,7 +195,11 @@ class IntelligenceRebuildService:
             after_sequence = max(event.sequence_number for event in page)
             if len(page) < 1000:
                 break
-        return sorted(
+        ordered = sorted(
             source,
-            key=lambda event: (event.sequence_number, event.event_time, str(event.id)),
+            key=lambda event: (event.event_time, event.sequence_number, str(event.id)),
         )
+        return [
+            event.model_copy(update={"sequence_number": replay_sequence})
+            for replay_sequence, event in enumerate(ordered, start=1)
+        ]

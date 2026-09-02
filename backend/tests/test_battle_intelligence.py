@@ -98,9 +98,7 @@ def test_battle_trend_ignores_small_noise_and_detects_falling_back() -> None:
     race = state()
     stable_service = engine()
     for index, gap in enumerate((1.60, 1.62, 1.64), start=1):
-        stable_updates = stable_service.apply(
-            interval(4, gap, second=index, sequence=index), race
-        )
+        stable_updates = stable_service.apply(interval(4, gap, second=index, sequence=index), race)
     stable = stable_updates[-1].battle
     assert stable.trend is BattleTrend.STABLE
 
@@ -149,6 +147,31 @@ def test_sustained_gap_pit_retirement_and_overtake_resolve_battles() -> None:
         start_battle(service, race)
         updates = service.apply(control_event(event_type, 4, sequence=10), race)
         assert updates[-1].event_type is RaceEventType.BATTLE_ENDED
+
+
+def test_changed_adjacency_resolves_old_edge_and_bounds_one_battle_per_chaser() -> None:
+    service = engine()
+    race = state()
+    start_battle(service, race)
+    race.drivers["16"].position = 3
+    race.drivers["63"].position = 4
+
+    updates = service.apply(interval(4, 1.4, second=4, sequence=4), race)
+
+    assert [update.event_type for update in updates] == [RaceEventType.BATTLE_ENDED]
+    assert updates[0].battle.resolution_reason == "adjacency_changed"
+    assert service.tracked_count("race") == 1
+    assert service.current_for_session("race") == []
+
+    service.apply(interval(4, 1.3, second=5, sequence=5), race)
+    service.apply(interval(4, 1.2, second=6, sequence=6), race)
+    assert service.tracked_count("race") == 1
+    assert service.current_for_session("race")[0].lead_driver_number == 63
+
+    race.drivers["4"].position = 1
+    updates = service.apply(interval(4, 0.9, second=7, sequence=7), race)
+    assert [update.event_type for update in updates] == [RaceEventType.BATTLE_ENDED]
+    assert service.tracked_count("race") == 0
 
 
 def test_missing_interval_and_non_race_sessions_never_create_battles() -> None:

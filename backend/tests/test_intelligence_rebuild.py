@@ -20,8 +20,9 @@ def source(
     *,
     position: int | None = None,
     interval: float | None = None,
+    second: int | None = None,
 ) -> NormalizedRaceEvent:
-    observed = START + timedelta(seconds=sequence)
+    observed = START + timedelta(seconds=sequence if second is None else second)
     payload: dict[str, object] = {
         "driver_number": driver,
         "normalized_session_type": "RACE",
@@ -182,6 +183,35 @@ async def test_rebuild_refuses_an_implicit_destructive_write() -> None:
     events, battles, snapshots = Events(), Battles(), Snapshots()
 
     with pytest.raises(ValueError, match="--replace-derived"):
-        await service(events, battles, snapshots).run(
-            "11334", dry_run=False, replace_derived=False
-        )
+        await service(events, battles, snapshots).run("11334", dry_run=False, replace_derived=False)
+
+
+@pytest.mark.asyncio
+async def test_rebuild_reorders_endpoint_grouped_facts_by_event_time() -> None:
+    rows = [
+        source(RaceEventType.POSITION_SAMPLE, 16, 1, position=4, second=0),
+        source(RaceEventType.POSITION_SAMPLE, 4, 2, position=5, second=0),
+        source(RaceEventType.POSITION_SAMPLE, 4, 3, position=4, second=10),
+        source(RaceEventType.POSITION_SAMPLE, 16, 4, position=5, second=10),
+        source(RaceEventType.INTERVAL_SAMPLE, 4, 5, interval=0.8, second=5),
+        source(RaceEventType.POSITION_SAMPLE, 4, 6, position=4, second=12),
+        source(RaceEventType.SESSION_FINISH, 4, 7, second=20),
+    ]
+    events, battles, snapshots = Events(), Battles(), Snapshots()
+    events.rows = rows
+
+    summary = await IntelligenceRebuildService(
+        events,  # type: ignore[arg-type]
+        battles,
+        snapshots=snapshots,
+        config=RaceIntelligenceConfig(
+            overtake_confirmation_seconds=2,
+            overtake_confirmation_samples=2,
+        ),
+    ).run("11334", dry_run=True, replace_derived=False)
+
+    assert summary.overtake_confirmations == 1
+    assert summary.derived_by_type[RaceEventType.OVERTAKE.value] == 1
+    assert summary.bounded_state_maxima["pending_overtakes"] == 1
+    assert summary.remaining_pending_overtakes == 0
+    assert summary.remaining_current_battles == 0

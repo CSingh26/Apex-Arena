@@ -53,6 +53,18 @@ class BattleEngine:
             if battle.status in {BattleStatus.ACTIVE, BattleStatus.INTENSE}
         ]
 
+    def tracked_count(self, session_key: str) -> int:
+        return len(self._battles.get(session_key, {}))
+
+    def maximum_history_size(self, session_key: str) -> int:
+        return max(
+            (
+                len(battle.interval_history)
+                for battle in self._battles.get(session_key, {}).values()
+            ),
+            default=0,
+        )
+
     def reset_session(self, session_key: str) -> None:
         self._battles.pop(session_key, None)
 
@@ -72,8 +84,14 @@ class BattleEngine:
             return []
         chaser_number = event.driver_numbers[0]
         chaser = race_state.drivers.get(str(chaser_number))
-        if chaser is None or chaser.position is None or chaser.position <= 1:
+        if chaser is None or chaser.position is None:
             return []
+        if chaser.position <= 1:
+            return self._resolve_changed_adjacency(
+                event.session_key,
+                chaser_number,
+                None,
+            )
         leader = next(
             (
                 driver
@@ -83,14 +101,23 @@ class BattleEngine:
             None,
         )
         if leader is None or leader.driver_number is None:
-            return []
+            return self._resolve_changed_adjacency(
+                event.session_key,
+                chaser_number,
+                None,
+            )
 
         battle_id = self._battle_id(event.session_key, leader.driver_number, chaser_number)
         session = self._battles[event.session_key]
+        updates = self._resolve_changed_adjacency(
+            event.session_key,
+            chaser_number,
+            battle_id,
+        )
         battle = session.get(battle_id)
         if battle is None:
             if interval > self.config.battle_start_interval_seconds:
-                return []
+                return updates
             battle = BattleState(
                 id=battle_id,
                 session_key=event.session_key,
@@ -106,7 +133,7 @@ class BattleEngine:
                 lap_number=event.lap_number or race_state.current_lap,
             )
             session[battle_id] = battle
-            return []
+            return updates
 
         battle.last_updated_at = event.event_time
         battle.lead_position = leader.position or battle.lead_position
@@ -116,8 +143,6 @@ class BattleEngine:
         battle.interval_history.append(interval)
         battle.interval_history = battle.interval_history[-self.config.battle_trend_window :]
         battle.trend = self._trend(battle.interval_history)
-        updates: list[BattleUpdate] = []
-
         if battle.status is BattleStatus.POTENTIAL:
             if interval > self.config.battle_start_interval_seconds:
                 session.pop(battle_id, None)
@@ -157,6 +182,27 @@ class BattleEngine:
             battle.end_samples = 0
         return self._deduplicate_updates(updates)
 
+    def _resolve_changed_adjacency(
+        self,
+        session_key: str,
+        chaser_number: int,
+        current_battle_id: str | None,
+    ) -> list[BattleUpdate]:
+        updates: list[BattleUpdate] = []
+        session = self._battles[session_key]
+        stale_ids = [
+            battle_id
+            for battle_id, battle in session.items()
+            if battle.chasing_driver_number == chaser_number and battle_id != current_battle_id
+        ]
+        for battle_id in stale_ids:
+            battle = session[battle_id]
+            if battle.status is BattleStatus.POTENTIAL:
+                session.pop(battle_id, None)
+            else:
+                updates.append(self._resolve(session_key, battle_id, "adjacency_changed"))
+        return updates
+
     def _resolve_for_event(self, event: NormalizedRaceEvent) -> list[BattleUpdate]:
         participants = set(event.driver_numbers)
         session = self._battles[event.session_key]
@@ -171,8 +217,7 @@ class BattleEngine:
                 )
             ]
         return [
-            self._resolve(event.session_key, battle_id, event.event_type.value)
-            for battle_id in ids
+            self._resolve(event.session_key, battle_id, event.event_type.value) for battle_id in ids
         ]
 
     def _resolve(self, session_key: str, battle_id: str, reason: str) -> BattleUpdate:
@@ -273,9 +318,7 @@ def rank_battles(
     }
 
     def score(battle: BattleState) -> tuple[int, int, float]:
-        selected = int(
-            selected_driver in {battle.lead_driver_number, battle.chasing_driver_number}
-        )
+        selected = int(selected_driver in {battle.lead_driver_number, battle.chasing_driver_number})
         return selected, intensity_score[battle.intensity], -battle.interval_seconds
 
     ranked: list[BattleState] = []

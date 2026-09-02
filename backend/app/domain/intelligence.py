@@ -62,6 +62,18 @@ class RaceIntelligenceConfig(BaseModel):
     event_cooldown_seconds: float = Field(default=20.0, ge=0)
 
 
+class RaceIntelligenceDiagnostics(BaseModel):
+    position_states: int = 0
+    tracked_battles: int = 0
+    current_battles: int = 0
+    maximum_battle_history: int = 0
+    pending_overtakes: int = 0
+    buffered_derived_events: int = 0
+    overtake_confirmations: int = 0
+    overtake_rejections_by_reason: dict[str, int] = Field(default_factory=dict)
+    position_changes_by_cause: dict[str, int] = Field(default_factory=dict)
+
+
 class OvertakeContext(BaseModel):
     session_type: str
     observed_at: datetime
@@ -69,6 +81,8 @@ class OvertakeContext(BaseModel):
     pit_data_available: bool = False
     location_available: bool = False
     both_running: bool = True
+    ordering_persisted: bool = True
+    pit_transition: bool = False
 
 
 class OvertakeCandidate(BaseModel):

@@ -43,6 +43,8 @@ def context(
     pit_data_available: bool = True,
     location_available: bool = True,
     both_running: bool = True,
+    ordering_persisted: bool = True,
+    pit_transition: bool = False,
 ) -> OvertakeContext:
     return OvertakeContext(
         session_type="RACE",
@@ -51,6 +53,8 @@ def context(
         pit_data_available=pit_data_available,
         location_available=location_available,
         both_running=both_running,
+        ordering_persisted=ordering_persisted,
+        pit_transition=pit_transition,
     )
 
 
@@ -104,9 +108,7 @@ def test_missing_location_does_not_block_timing_supported_pass() -> None:
     service = detector()
 
     service.apply(gain(), context(second=0, location_available=False))
-    event = service.apply(
-        gain(second=2, sequence=11), context(second=2, location_available=False)
-    )
+    event = service.apply(gain(second=2, sequence=11), context(second=2, location_available=False))
 
     assert event is not None
     assert event.confidence_level is EventConfidence.HIGH
@@ -116,9 +118,7 @@ def test_missing_pit_context_lowers_confidence_but_keeps_strong_pass() -> None:
     service = detector()
 
     service.apply(gain(), context(second=0, pit_data_available=False))
-    event = service.apply(
-        gain(second=2, sequence=11), context(second=2, pit_data_available=False)
-    )
+    event = service.apply(gain(second=2, sequence=11), context(second=2, pit_data_available=False))
 
     assert event is not None
     assert event.confidence_level is EventConfidence.MEDIUM
@@ -131,3 +131,27 @@ def test_weak_or_invalid_context_suppresses_overtake() -> None:
     assert service.apply(gain(second=2), context(second=2, interval=4.0)) is None
     assert service.apply(gain(second=4), context(second=4, both_running=False)) is None
     assert service.pending_count == 0
+
+
+def test_reverted_order_and_recent_pit_transition_reject_candidates() -> None:
+    reverted = detector()
+    reverted.apply(gain(), context(second=0))
+    assert (
+        reverted.apply(
+            gain(second=2, sequence=11),
+            context(second=2, ordering_persisted=False),
+        )
+        is None
+    )
+    assert reverted.rejections_for_session("race") == {"ORDERING_NOT_PERSISTED": 1}
+
+    pitted = detector()
+    pitted.apply(gain(), context(second=0))
+    assert (
+        pitted.apply(
+            gain(second=2, sequence=11),
+            context(second=2, pit_transition=True),
+        )
+        is None
+    )
+    assert pitted.rejections_for_session("race") == {"PIT_TRANSITION": 1}

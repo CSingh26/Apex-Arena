@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+from collections import Counter, defaultdict
 
 from app.domain.intelligence import (
     OvertakeCandidate,
@@ -30,6 +31,8 @@ class OvertakeDetector:
     def __init__(self, config: RaceIntelligenceConfig | None = None) -> None:
         self.config = config or RaceIntelligenceConfig()
         self._candidates: dict[tuple[str, int, int], OvertakeCandidate] = {}
+        self._confirmations: Counter[str] = Counter()
+        self._rejections: dict[str, Counter[str]] = defaultdict(Counter)
 
     @property
     def pending_count(self) -> int:
@@ -42,9 +45,28 @@ class OvertakeDetector:
             if candidate.session_key == session_key
         ]
 
+    def is_pending(self, change: PositionChange) -> bool:
+        return self._pair_key(change) in self._candidates
+
+    def confirmation_count(self, session_key: str) -> int:
+        return self._confirmations[session_key]
+
+    def rejections_for_session(self, session_key: str) -> dict[str, int]:
+        return dict(sorted(self._rejections.get(session_key, {}).items()))
+
+    def reject_pending_for_session(self, session_key: str, reason: str) -> int:
+        keys = [key for key in self._candidates if key[0] == session_key]
+        for key in keys:
+            self._candidates.pop(key, None)
+        if keys:
+            self._rejections[session_key][reason] += len(keys)
+        return len(keys)
+
     def reset_session(self, session_key: str) -> None:
         for key in [key for key in self._candidates if key[0] == session_key]:
             self._candidates.pop(key, None)
+        self._confirmations.pop(session_key, None)
+        self._rejections.pop(session_key, None)
 
     def apply(
         self,
@@ -53,21 +75,15 @@ class OvertakeDetector:
     ) -> NormalizedRaceEvent | None:
         pair = self._pair_key(change)
         target = change.related_driver_numbers[0] if change.related_driver_numbers else None
-        if (
-            target is None
-            or change.position_delta <= 0
-            or change.cause is not PositionChangeCause.ON_TRACK_CANDIDATE
-            or context.session_type.upper() not in RACE_LIKE_SESSIONS
-            or not context.both_running
-            or context.interval_before is None
-            or context.interval_before > self.config.overtake_max_interval_seconds
-        ):
+        rejection_reason = self._rejection_reason(change, context, target)
+        if rejection_reason is not None:
             self._candidates.pop(pair, None)
+            self._rejections[change.session_key][rejection_reason] += 1
             logger.debug(
-                "overtake_candidate result=rejected driver=%s target=%s cause=%s",
+                "overtake_candidate result=rejected driver=%s target=%s reason=%s",
                 change.driver_number,
                 target,
-                change.cause.value,
+                rejection_reason,
             )
             return None
 
@@ -109,6 +125,7 @@ class OvertakeDetector:
             return None
 
         self._candidates.pop(pair, None)
+        self._confirmations[change.session_key] += 1
         confidence_level = (
             EventConfidence.HIGH if context.pit_data_available else EventConfidence.MEDIUM
         )
@@ -175,6 +192,32 @@ class OvertakeDetector:
                 f"{target}:{candidate.first_sequence}"
             ),
         )
+
+    def _rejection_reason(
+        self,
+        change: PositionChange,
+        context: OvertakeContext,
+        target: int | None,
+    ) -> str | None:
+        if target is None:
+            return "MISSING_TARGET"
+        if change.position_delta <= 0:
+            return "NO_POSITION_GAIN"
+        if change.cause is not PositionChangeCause.ON_TRACK_CANDIDATE:
+            return change.cause.value
+        if context.session_type.upper() not in RACE_LIKE_SESSIONS:
+            return "SESSION_NOT_RACE_LIKE"
+        if context.pit_transition:
+            return "PIT_TRANSITION"
+        if not context.both_running:
+            return "DRIVER_NOT_RUNNING"
+        if not context.ordering_persisted:
+            return "ORDERING_NOT_PERSISTED"
+        if context.interval_before is None:
+            return "INTERVAL_UNAVAILABLE"
+        if context.interval_before > self.config.overtake_max_interval_seconds:
+            return "INTERVAL_TOO_LARGE"
+        return None
 
     @staticmethod
     def _pair_key(change: PositionChange) -> tuple[str, int, int]:

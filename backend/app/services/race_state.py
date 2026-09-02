@@ -255,6 +255,7 @@ class RaceStateEngine:
                     driver.best_laps_by_phase[state.current_phase] = duration
         elif event_type == RaceEventType.PIT_STOP:
             pit_stop = dict(payload)
+            pit_stop.setdefault("event_time", event.event_time.isoformat())
             state.pit_stop_history.append(pit_stop)
             self._driver(state, event).pit_stops.append(pit_stop)
         elif event_type == RaceEventType.PIT_ENTRY:

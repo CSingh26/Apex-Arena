@@ -31,6 +31,9 @@ class PositionTracker:
     def reset_session(self, session_key: str) -> None:
         self._states.pop(session_key, None)
 
+    def state_count(self, session_key: str) -> int:
+        return len(self._states.get(session_key, {}))
+
     def apply(self, event: NormalizedRaceEvent, race_state: RaceState) -> list[PositionChange]:
         if event.event_type is not RaceEventType.POSITION_SAMPLE or not event.driver_numbers:
             return []
@@ -140,9 +143,8 @@ class PositionTracker:
             return PositionChangeCause.RETIREMENT_INHERITANCE
         if any(bool(driver.context.get("lapped")) for driver in changed):
             return PositionChangeCause.LAPPED_ORDERING
-        if (
-            race_state.race_control_state.get("event_type") == RaceEventType.PENALTY.value
-            or any(bool(driver.context.get("penalty")) for driver in changed)
+        if race_state.race_control_state.get("event_type") == RaceEventType.PENALTY.value or any(
+            bool(driver.context.get("penalty")) for driver in changed
         ):
             return PositionChangeCause.PENALTY_OR_CLASSIFICATION
         before = {driver.confirmed_position for driver in changed}
@@ -156,8 +158,7 @@ class PositionTracker:
     @staticmethod
     def _batch_key(session_key: str, observed_at: datetime, changed: list[PositionState]) -> str:
         drivers = "-".join(
-            str(item.driver_number)
-            for item in sorted(changed, key=lambda item: item.driver_number)
+            str(item.driver_number) for item in sorted(changed, key=lambda item: item.driver_number)
         )
         return f"{session_key}:{observed_at.isoformat()}:{drivers}"
 
