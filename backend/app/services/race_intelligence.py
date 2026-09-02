@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 from __future__ import annotations
 
+import logging
 from collections import defaultdict
 from typing import Protocol
 from uuid import NAMESPACE_URL, uuid5
@@ -26,6 +27,8 @@ from app.services.overtake_intelligence import OvertakeDetector
 from app.services.position_intelligence import PositionTracker
 from app.services.qualifying_intelligence import QualifyingEngine
 from app.services.race_state import RaceState, RaceStateEngine
+
+logger = logging.getLogger(__name__)
 
 
 class BattleSummaryRepository(Protocol):
@@ -204,7 +207,15 @@ class RaceIntelligenceCoordinator:
         )
 
     def _score(self, event: NormalizedRaceEvent) -> NormalizedRaceEvent:
-        level, score, _ = self.importance.classify(event)
+        level, score, eligible = self.importance.classify(event)
+        logger.debug(
+            "event_importance session=%s event=%s level=%s score=%.2f agent_eligible=%s",
+            event.session_key,
+            event.event_type.value,
+            level.value,
+            score,
+            eligible,
+        )
         return event.model_copy(
             update={
                 "id": uuid5(NAMESPACE_URL, f"apexarena:{event.dedup_key}"),

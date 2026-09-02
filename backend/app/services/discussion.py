@@ -21,6 +21,7 @@ from app.domain.rooms import (
     MessageType,
     RoomMessage,
 )
+from app.services.agent_grounding import AgentEventEnvelope
 from app.services.discussion_triggers import DiscussionTrigger, DiscussionTriggerEvaluator
 from app.services.driver_identity import DriverIdentityResolver
 from app.services.race_state import RaceState
@@ -50,6 +51,7 @@ class GeneratedRoomMessage(BaseModel):
 class GroundingContext(BaseModel):
     evidence: dict[str, Any]
     data_quality: str
+    envelope: AgentEventEnvelope | None = None
 
 
 class DiscussionMetrics(BaseModel):
@@ -82,29 +84,12 @@ class MessageChainResult:
 
 class GroundingContextBuilder:
     def build(self, event: NormalizedRaceEvent, state: RaceState | None) -> GroundingContext:
-        evidence: dict[str, Any] = {
-            "event_type": event.event_type.value,
-            "event_sequence": event.sequence_number,
-            "lap_number": event.lap_number,
-            "driver_numbers": event.driver_numbers,
-        }
-        evidence.update(event.payload)
-        if state is not None:
-            evidence["race_status"] = state.status
-            evidence["race_current_lap"] = state.current_lap
-            if state.session_type is not None:
-                evidence["session_type"] = state.session_type
-            if state.current_phase is not None:
-                evidence["session_phase"] = state.current_phase
-            relevant = {
-                driver: driver_state.model_dump(mode="json")
-                for driver, driver_state in state.drivers.items()
-                if int(driver) in event.driver_numbers
-            }
-            if relevant:
-                evidence["relevant_driver_state"] = relevant
-        quality = str(event.payload.get("data_quality") or "partial")
-        return GroundingContext(evidence=evidence, data_quality=quality)
+        envelope = AgentEventEnvelope.from_event(event, state)
+        return GroundingContext(
+            evidence=envelope.as_evidence(),
+            data_quality=envelope.data_quality,
+            envelope=envelope,
+        )
 
 
 class GroundingValidator:
@@ -412,6 +397,60 @@ class DeterministicRoomGenerator:
                 EvidenceStatus.GROUNDED,
                 "Track position changed.",
                 keys,
+            )
+        if event.event_type in {
+            RaceEventType.BATTLE_STARTED,
+            RaceEventType.BATTLE_INTENSIFIED,
+            RaceEventType.DRS_RANGE_ENTERED,
+        }:
+            opponent_number = (
+                event.secondary_driver_number
+                or (event.driver_numbers[1] if len(event.driver_numbers) > 1 else None)
+            )
+            opponent = DriverIdentityResolver.public_label(evidence, opponent_number)
+            interval = evidence.get("interval_seconds")
+            interval_text = (
+                f" at {float(interval):.2f}s" if isinstance(interval, (int, float)) else ""
+            )
+            battle = evidence.get("battle")
+            trend = battle.get("trend") if isinstance(battle, dict) else None
+            trend_text = (
+                " and the recent interval trend is closing"
+                if trend == "CLOSING"
+                else ""
+            )
+            return self._message(
+                MessageType.ANALYSIS,
+                f"{driver} is in a sustained fight with {opponent}{interval_text}{trend_text}. "
+                "The timing supports the battle; it does not prove a pass until the order changes.",
+                Confidence.HIGH,
+                EvidenceStatus.GROUNDED,
+                "A timing-confirmed battle became important.",
+                ["event_type", "driver_numbers"]
+                + (["interval_seconds"] if interval is not None else [])
+                + (["battle"] if battle is not None else []),
+            )
+        if event.event_type in {
+            RaceEventType.QUALIFYING_CUTOFF_CHANGE,
+            RaceEventType.ELIMINATION_RISK,
+            RaceEventType.PROVISIONAL_POLE,
+        }:
+            if event.event_type == RaceEventType.PROVISIONAL_POLE:
+                text = f"{driver} has provisional pole. The remaining valid runs can still move it."
+            elif event.event_type == RaceEventType.ELIMINATION_RISK:
+                text = f"{driver} is near the elimination cutoff. That is risk, not a final result."
+            else:
+                text = (
+                    f"{driver} changed the qualifying cutoff order. The classification moved, "
+                    "but this is not an on-track overtake."
+                )
+            return self._message(
+                MessageType.ANALYSIS,
+                text,
+                Confidence.HIGH,
+                EvidenceStatus.GROUNDED,
+                "A qualifying intelligence event was supplied.",
+                ["event_type", "driver_numbers"],
             )
         if event.event_type in {
             RaceEventType.SAFETY_CAR,

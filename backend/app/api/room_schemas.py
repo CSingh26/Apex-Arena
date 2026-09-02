@@ -152,5 +152,6 @@ class RoomDiagnosticsResponse(BaseModel):
     connection_state: str
     latest_events: list[dict[str, Any]]
     race_state: dict[str, Any]
+    intelligence: dict[str, Any] = Field(default_factory=dict)
     playback: RoomPlaybackState
     discussion: dict[str, int]

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 from __future__ import annotations
 
+import logging
 from collections import defaultdict
 
 from app.domain.intelligence import (
@@ -15,6 +16,7 @@ from app.domain.models import NormalizedRaceEvent, RaceEventType
 from app.services.race_state import RaceState
 
 RACE_LIKE_SESSIONS = {"RACE", "SPRINT"}
+logger = logging.getLogger(__name__)
 RESOLVING_TYPES = {
     RaceEventType.PIT_ENTRY,
     RaceEventType.PIT_STOP,
@@ -198,6 +200,17 @@ class BattleEngine:
 
     @staticmethod
     def _update(battle: BattleState, event_type: RaceEventType | None) -> BattleUpdate:
+        if event_type is not None:
+            logger.info(
+                "battle_transition session=%s battle=%s event=%s interval=%.3f "
+                "trend=%s intensity=%s",
+                battle.session_key,
+                battle.id,
+                event_type.value,
+                battle.interval_seconds,
+                battle.trend.value,
+                battle.intensity.value,
+            )
         return BattleUpdate(battle=battle.model_copy(deep=True), event_type=event_type)
 
     @staticmethod

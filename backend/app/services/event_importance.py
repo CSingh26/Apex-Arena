@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 
 from app.domain.models import (
@@ -26,6 +27,7 @@ IMPORTANT_TYPES = {
     RaceEventType.QUALIFYING_CUTOFF_CHANGE,
 }
 BYPASS_COOLDOWN_TYPES = {RaceEventType.RED_FLAG, RaceEventType.OVERTAKE}
+logger = logging.getLogger(__name__)
 
 
 class EventImportancePolicy:
@@ -72,6 +74,12 @@ class EventImportancePolicy:
         if previous is not None:
             elapsed = (event.event_time - previous).total_seconds()
             if elapsed < self.cooldown_seconds:
+                logger.debug(
+                    "event_suppressed session=%s event=%s reason=cooldown elapsed=%.3f",
+                    event.session_key,
+                    event.event_type.value,
+                    elapsed,
+                )
                 return False
         self._last_emitted[key] = event.event_time
         return True

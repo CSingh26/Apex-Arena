@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 from __future__ import annotations
 
+import logging
 from collections import defaultdict
 from datetime import datetime
 
@@ -18,6 +19,7 @@ from app.services.race_state import RaceState
 
 RACE_LIKE_SESSIONS = {"RACE", "SPRINT"}
 RETIRED_STATUSES = {"RETIRED", "STOPPED", "DNF", "DNS"}
+logger = logging.getLogger(__name__)
 
 
 class PositionTracker:
@@ -98,6 +100,13 @@ class PositionTracker:
             )
             for driver in sorted(changed, key=lambda item: item.observed_position)
         ]
+        logger.debug(
+            "position_change_classified session=%s drivers=%s cause=%s batch=%s",
+            event.session_key,
+            changed_numbers,
+            cause.value,
+            batch_key,
+        )
         for driver in changed:
             driver.previous_confirmed_position = driver.confirmed_position
             driver.confirmed_position = driver.observed_position

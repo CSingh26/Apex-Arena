@@ -85,6 +85,15 @@ class OvertakeDetector:
                 last_sequence=change.source_sequence,
                 interval_before=context.interval_before,
             )
+            logger.debug(
+                "overtake_candidate result=pending session=%s driver=%s target=%s "
+                "position=%s interval=%s",
+                change.session_key,
+                change.driver_number,
+                target,
+                change.position_after,
+                context.interval_before,
+            )
             return None
         if change.source_sequence <= candidate.last_sequence:
             return None

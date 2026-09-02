@@ -384,6 +384,12 @@ async def room_diagnostics(
     )
     playback = await services.room_repository.get_playback(room.id)
     race_state = await services.race_state.get_state(session_key)
+    coordinator = getattr(services, "race_intelligence", None)
+    pending_overtakes = (
+        coordinator.overtakes.pending_for_session(session_key)
+        if coordinator is not None
+        else []
+    )
     live = services.openf1_live.status()
     return RoomDiagnosticsResponse(
         room_slug=room.slug,
@@ -397,6 +403,19 @@ async def room_diagnostics(
         connection_state=str(live["connection_state"]),
         latest_events=[event.model_dump(mode="json") for event in latest_events],
         race_state=race_state.model_dump(mode="json"),
+        intelligence={
+            "current_battles": [
+                battle.model_dump(mode="json") for battle in race_state.current_battles
+            ],
+            "pending_overtakes": [
+                candidate.model_dump(mode="json") for candidate in pending_overtakes
+            ],
+            "qualifying": (
+                race_state.qualifying_intelligence.model_dump(mode="json")
+                if race_state.qualifying_intelligence
+                else None
+            ),
+        },
         playback=playback,
         discussion=services.room_discussion.metrics.model_dump(),
     )
