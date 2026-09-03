@@ -83,6 +83,9 @@ class QualifyingEngine:
             return []
         previous = state.positions.get(driver)
         state.positions[driver] = position
+        if previous is None:
+            state.field_size = len(state.positions)
+            state.cutoff_position = qualifying_cutoff(state.field_size, state.phase)
         events: list[NormalizedRaceEvent] = []
         cutoff = state.cutoff_position
         if previous is not None and cutoff is not None:

@@ -66,6 +66,12 @@ def test_agent_eligibility_rejects_raw_samples(event_type: RaceEventType) -> Non
 
 def test_agent_eligibility_accepts_important_events_and_rejects_low_confidence() -> None:
     eligibility = AgentEligibility()
+    assert not eligibility.evaluate(
+        race_event(RaceEventType.LAP_COMPLETED, importance=EventImportance.LOW)
+    )
+    assert eligibility.evaluate(
+        race_event(RaceEventType.SAFETY_CAR, importance=EventImportance.MAJOR)
+    )
     assert eligibility.evaluate(
         race_event(
             RaceEventType.OVERTAKE,

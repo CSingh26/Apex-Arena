@@ -232,6 +232,7 @@ export function LiveCommandCenter({
   const [hasMoreEvents, setHasMoreEvents] = useState(false);
   const [loadingMoreEvents, setLoadingMoreEvents] = useState(false);
   const lastSequenceRef = useRef(0);
+  const eventPageCursorRef = useRef(0);
   const { mode, setMode } = useRaceRoomMode();
   const { panel: debugLocation, raw: debugRawPoints } = useLocationDebugFlags();
 
@@ -243,6 +244,7 @@ export function LiveCommandCenter({
     // lower sequence. Reconnect from the beginning instead of discarding the
     // valid, lower-numbered state as if it were stale network data.
     lastSequenceRef.current = 0;
+    eventPageCursorRef.current = 0;
     setState(null);
     setEvents(initialIntelligence?.recent_events ?? []);
     setConnection("reconnecting");
@@ -262,14 +264,23 @@ export function LiveCommandCenter({
       setConnection(next.is_replay ? "historical" : "live");
     };
     getSessionState(sessionKey, controller.signal)
-      .then(({ state: initial }) => setNewest(initial))
-      .catch(() => setConnection("unavailable"));
-    getSessionEvents(sessionKey, { limit: 100, minimumImportance: "NORMAL" }, controller.signal)
-      .then((response) => {
-        setEvents((current) => mergeEvents(current, response.events));
-        setHasMoreEvents(response.count === 100);
+      .then(({ state: initial }) => {
+        setNewest(initial);
+        return getSessionEvents(
+          sessionKey,
+          {
+            beforeSequenceNumber: initial.is_replay ? initial.sequence_number : undefined,
+            limit: 100,
+            minimumImportance: "NORMAL",
+          },
+          controller.signal,
+        ).then((response) => {
+          eventPageCursorRef.current = response.events.at(-1)?.sequence_number ?? 0;
+          setEvents((current) => mergeEvents(current, response.events));
+          setHasMoreEvents(response.count === 100);
+        }).catch(() => undefined);
       })
-      .catch(() => undefined);
+      .catch(() => setConnection("unavailable"));
     const connect = () => {
       source = new EventSource(sessionStreamUrl(sessionKey, lastSequenceRef.current));
       source.addEventListener("open", () => { retry = 0; setConnection("live"); });
@@ -306,6 +317,13 @@ export function LiveCommandCenter({
   const selected = activeDriver == null ? undefined : state?.drivers[String(activeDriver)];
   const activeRow = rows.find((row) => row.number === activeDriver);
   const selectedTiming = timing.find((row) => row.driver_number === activeDriver);
+  const replaySequence = state?.is_replay ? state.sequence_number : null;
+  const displayedEvents = useMemo(
+    () => replaySequence == null
+      ? events
+      : events.filter((event) => event.sequence_number <= replaySequence),
+    [events, replaySequence],
+  );
   const sessionLabel = state?.current_phase ?? state?.session_type?.replaceAll("_", " ") ?? "SESSION";
   const trackStatus = String(
     state?.race_control_state.event_type ?? (state?.status === "finished" ? "COMPLETED" : "GREEN"),
@@ -339,12 +357,14 @@ export function LiveCommandCenter({
     if (!sessionKey || loadingMoreEvents) return;
     setLoadingMoreEvents(true);
     try {
-      const after = events.at(-1)?.sequence_number ?? 0;
+      const after = eventPageCursorRef.current;
       const response = await getSessionEvents(sessionKey, {
         afterSequenceNumber: after,
+        beforeSequenceNumber: replaySequence ?? undefined,
         limit: 100,
         minimumImportance: "NORMAL",
       });
+      eventPageCursorRef.current = response.events.at(-1)?.sequence_number ?? after;
       setEvents((current) => mergeEvents(current, response.events));
       setHasMoreEvents(response.count === 100);
     } finally {
@@ -400,7 +420,7 @@ export function LiveCommandCenter({
     </div>
     </section>
     <BattleRail battles={battles} drivers={state?.drivers ?? {}} currentLap={state?.current_lap ?? null} selectedDriver={activeDriver} mode={mode} onSelectDriver={onSelectDriver} />
-    <RecentChanges events={events.slice(-5)} driverName={nameForDriver} />
-    <RaceEventFeed events={events} selectedDriver={activeDriver} driverName={nameForDriver} onLoadMore={loadMoreEvents} hasMore={hasMoreEvents} loadingMore={loadingMoreEvents} />
+    <RecentChanges events={displayedEvents.slice(-5)} driverName={nameForDriver} />
+    <RaceEventFeed events={displayedEvents} selectedDriver={activeDriver} driverName={nameForDriver} onLoadMore={loadMoreEvents} hasMore={hasMoreEvents} loadingMore={loadingMoreEvents} />
   </>;
 }

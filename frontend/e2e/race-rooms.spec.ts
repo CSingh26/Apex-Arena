@@ -56,6 +56,21 @@ async function replayRoom(request: APIRequestContext): Promise<{ event: EventWee
   throw new Error("The production smoke test needs at least one completed replay-ready session");
 }
 
+async function raceLikeReplayRoom(
+  request: APIRequestContext,
+): Promise<{ event: EventWeekend; session: SessionSummary }> {
+  const catalog = await eventCatalog(request);
+  for (const event of catalog.events) {
+    const session = event.sessions.find((item) => (
+      item.room_slug
+      && item.replay_available
+      && (item.session_type === "RACE" || item.session_type === "SPRINT")
+    ));
+    if (session) return { event, session };
+  }
+  throw new Error("The Sprint 3 smoke test needs a completed race-like replay session");
+}
+
 async function expectNoHorizontalOverflow(page: Page): Promise<void> {
   await expect.poll(() => page.evaluate(() => (
     Math.max(document.documentElement.scrollWidth, document.body.scrollWidth) - window.innerWidth
@@ -115,6 +130,7 @@ test("groups real standard and Sprint weekends in chronological public categorie
     "RACE",
   ]);
   expect(sprint?.sessions.map((session) => session.session_type)).toEqual([
+    "PRACTICE_1",
     "SPRINT_QUALIFYING",
     "SPRINT",
     "QUALIFYING",
@@ -171,13 +187,16 @@ test("keeps a replay conversation compact, inspectable, and session-aware", asyn
   await page.setViewportSize({ width: 1280, height: 800 });
   await page.goto(`/rooms/${session.room_slug}`);
   await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
-  await expect(page.getByRole("img", { name: /2026 circuit layout/ })).toBeVisible();
+  await expect(page.getByRole("region", { name: "Circuit map" }).getByRole("img", { name: /2026 circuit layout/ })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Session conversation" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Session timeline" })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Track dossier" })).toBeVisible();
-  await expect(page.locator(".circuit-records > div")).toHaveCount(3);
-  await expect(page.getByRole("heading", { name: "Track weather" })).toBeVisible();
-  await expect(page.locator(".weather-card__notice")).toBeVisible();
+  const dossier = page.locator(".circuit-dossier");
+    await expect(dossier.locator("summary")).toContainText("Track dossier");
+  await dossier.locator("summary").click();
+  await expect(dossier.locator(".circuit-records > div")).toHaveCount(3);
+  const weather = page.locator(".weather-card");
+  await weather.locator("summary").click();
+  await expect(weather.locator(".weather-card__notice")).toBeVisible();
   await expect(page.getByTestId("playback-controls")).toBeVisible();
   await expect(page.getByTestId("agent-roster").locator(".agent-profile")).toHaveCount(0);
   await page.getByTestId("agent-roster").getByRole("button", { name: /agents in this room/ }).click();
@@ -203,6 +222,64 @@ test("keeps a replay conversation compact, inspectable, and session-aware", asyn
   expect(browserErrors).toEqual([]);
 });
 
+test("turns a race replay into persistent Fan and Analyst intelligence", async ({ page, request }) => {
+  const browserErrors = collectBrowserErrors(page);
+  const { session } = await raceLikeReplayRoom(request);
+  const seek = await request.post(
+    `${API_BASE_URL}/api/v1/race-rooms/${session.room_slug}/playback`,
+    { data: { action: "seek_to_lap", lap_number: 6 } },
+  );
+  expect(seek.ok(), `lap seek returned HTTP ${seek.status()}`).toBeTruthy();
+
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto(`/rooms/${session.room_slug}`);
+  const fan = page.getByRole("button", { name: "Fan" });
+  const analyst = page.getByRole("button", { name: "Analyst" });
+  await expect(fan).toHaveAttribute("aria-pressed", "true");
+
+  const battleCards = page.locator('article[aria-label^="Battle for position"]');
+  await expect.poll(() => battleCards.count()).toBeGreaterThan(0);
+  expect(await battleCards.count()).toBeLessThanOrEqual(3);
+  await expect(battleCards.first()).toContainText(/closing|stable|falling back/i);
+  const selectedBattleDriver = battleCards.first().getByRole("button").last();
+  await selectedBattleDriver.scrollIntoViewIfNeeded();
+  await expect(selectedBattleDriver).toBeInViewport();
+  await selectedBattleDriver.click();
+  await expect(selectedBattleDriver).toHaveAttribute("aria-pressed", "true");
+
+  const feed = page.locator("section").filter({
+    has: page.getByRole("heading", { name: "Important events" }),
+  });
+  await feed.getByRole("button", { name: "Race control" }).click();
+  await expect(feed.getByText("Timing fact").first()).toBeVisible();
+  await feed.getByRole("button", { name: "Pits" }).click();
+  for (let pageNumber = 0; pageNumber < 15 && await feed.locator("li").count() === 0; pageNumber += 1) {
+    const loadMore = feed.getByRole("button", { name: "Load more events" });
+    await expect(loadMore).toBeVisible();
+    const response = page.waitForResponse((candidate) => (
+      candidate.url().includes(`/api/sessions/`)
+      && candidate.url().includes("after_sequence_number=")
+    ));
+    await loadMore.click();
+    await response;
+  }
+  await expect(feed.locator("li").first()).toContainText(/pit/i);
+
+  await analyst.click();
+  await expect(analyst).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByText("Battle evidence").first()).toBeVisible();
+  await expect(page.getByText("Timing-only view")).toBeVisible();
+  await page.reload();
+  await expect(analyst).toHaveAttribute("aria-pressed", "true");
+
+  await fan.click();
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(page.getByRole("heading", { name: "Current battles" })).toBeVisible();
+  expect(await battleCards.count()).toBeLessThanOrEqual(3);
+  await expectNoHorizontalOverflow(page);
+  expect(browserErrors).toEqual([]);
+});
+
 for (const width of VIEWPORT_WIDTHS) {
   test(`keeps navigation, grouped events, and a real room usable at ${width}px`, async ({ page, request }) => {
     const browserErrors = collectBrowserErrors(page);
@@ -210,12 +287,12 @@ for (const width of VIEWPORT_WIDTHS) {
     await page.setViewportSize({ width, height: width <= 768 ? 844 : 800 });
     await page.goto("/rooms");
     await expect(page.getByRole("heading", { name: "Race Rooms" })).toBeVisible();
-    await expect(page.locator(".app-nav")).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
-    await expect(page.locator(".app-nav")).toHaveCSS("position", "absolute");
+    const navigationShell = page.locator("main > header").first();
+    await expect(navigationShell).toHaveCSS("position", "sticky");
     await expectNoHorizontalOverflow(page);
 
     const menuButton = page.getByRole("button", { name: "Open navigation menu" });
-    if (width <= 800) {
+    if (width <= 720) {
       await expect(menuButton).toBeVisible();
       await menuButton.click();
       await expect(page.getByRole("dialog", { name: "Mobile navigation" })).toBeVisible();

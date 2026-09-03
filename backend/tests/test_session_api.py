@@ -146,6 +146,7 @@ async def test_session_events_forward_typed_bounded_filters() -> None:
         "11334",
         services,
         after_sequence_number=40,
+        before_sequence_number=80,
         limit=80,
         event_type=[RaceEventType.OVERTAKE, RaceEventType.BATTLE_STARTED],
         category=RaceEventCategory.BATTLES,
@@ -160,6 +161,7 @@ async def test_session_events_forward_typed_bounded_filters() -> None:
     repository.list_for_session.assert_awaited_once_with(
         "11334",
         after_sequence=40,
+        before_sequence=80,
         limit=80,
         event_types=[RaceEventType.OVERTAKE, RaceEventType.BATTLE_STARTED],
         driver_number=4,

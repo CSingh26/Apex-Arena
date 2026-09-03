@@ -9,6 +9,7 @@ from typing import Any
 from uuid import UUID
 
 from app.domain.models import NormalizedRaceEvent, RaceEventType
+from app.services.event_importance import EventImportancePolicy
 from app.services.raw_events import RawEventInput
 from app.services.session_semantics import (
     normalize_qualifying_phase,
@@ -35,6 +36,9 @@ ENDPOINT_EVENT_TYPES = {
 class OpenF1EventNormalizer:
     """Map live and historical OpenF1 records into one low-level event contract."""
 
+    def __init__(self, *, importance_policy: EventImportancePolicy | None = None) -> None:
+        self.importance_policy = importance_policy or EventImportancePolicy()
+
     def normalize(self, raw: RawEventInput, raw_event_id: UUID) -> NormalizedRaceEvent:
         endpoint = raw.provider_endpoint.removeprefix("v1/").strip("/")
         payload = self._enrich_payload(endpoint, raw.raw_payload)
@@ -54,7 +58,7 @@ class OpenF1EventNormalizer:
             lap_number=lap_number,
             payload=payload,
         )
-        return NormalizedRaceEvent(
+        event = NormalizedRaceEvent(
             session_id=raw.session_id,
             session_key=session_key,
             source=source,
@@ -63,10 +67,18 @@ class OpenF1EventNormalizer:
             received_at=raw.received_at,
             event_type=event_type,
             driver_numbers=driver_numbers,
+            primary_driver_number=driver_numbers[0] if driver_numbers else None,
             lap_number=lap_number,
             payload=payload,
             dedup_key=dedup_key,
             is_replay=raw.is_replay,
+        )
+        importance_level, importance, _ = self.importance_policy.classify(event)
+        return event.model_copy(
+            update={
+                "importance_level": importance_level,
+                "importance": importance,
+            }
         )
 
     def _event_type(self, endpoint: str, payload: dict[str, Any]) -> RaceEventType:

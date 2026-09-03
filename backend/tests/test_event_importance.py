@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from app.domain.models import (
     EventConfidence,
     EventImportance,
@@ -42,9 +44,18 @@ def race_event(
     )
 
 
-def test_routine_samples_are_low_and_agent_ineligible() -> None:
+@pytest.mark.parametrize(
+    "event_type",
+    [
+        RaceEventType.INTERVAL_SAMPLE,
+        RaceEventType.LAP_COMPLETED,
+        RaceEventType.STINT_UPDATE,
+        RaceEventType.SESSION_STATUS,
+    ],
+)
+def test_routine_samples_are_low_and_agent_ineligible(event_type: RaceEventType) -> None:
     level, score, eligible = EventImportancePolicy().classify(
-        race_event(RaceEventType.INTERVAL_SAMPLE)
+        race_event(event_type)
     )
     assert (level, score, eligible) == (EventImportance.LOW, 0.1, False)
 
@@ -80,6 +91,25 @@ def test_red_flag_is_critical_and_bypasses_repetition_cooldown() -> None:
     assert policy.should_emit(first)
     assert policy.should_emit(repeated)
     assert policy.classify(first) == (EventImportance.CRITICAL, 1.0, True)
+
+
+@pytest.mark.parametrize(
+    ("event_type", "expected"),
+    [
+        (RaceEventType.SAFETY_CAR, (EventImportance.MAJOR, 0.9, True)),
+        (RaceEventType.VIRTUAL_SAFETY_CAR, (EventImportance.MAJOR, 0.9, True)),
+        (RaceEventType.YELLOW_FLAG, (EventImportance.IMPORTANT, 0.7, True)),
+        (RaceEventType.PENALTY, (EventImportance.IMPORTANT, 0.7, True)),
+        (RaceEventType.INVESTIGATION, (EventImportance.IMPORTANT, 0.7, True)),
+        (RaceEventType.SESSION_FINISH, (EventImportance.IMPORTANT, 0.7, True)),
+        (RaceEventType.PIT_STOP, (EventImportance.NORMAL, 0.5, False)),
+    ],
+)
+def test_semantic_source_facts_receive_feed_worthy_importance(
+    event_type: RaceEventType,
+    expected: tuple[EventImportance, float, bool],
+) -> None:
+    assert EventImportancePolicy().classify(race_event(event_type)) == expected
 
 
 def test_informational_repetition_is_cooled_down() -> None:

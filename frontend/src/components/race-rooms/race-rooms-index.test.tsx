@@ -49,6 +49,9 @@ function weekend(overrides: Partial<RaceRoomEvent> = {}): RaceRoomEvent {
 }
 
 const completedLater = weekend({ event_id: "japan-2026", event_slug: "japanese-grand-prix-2026", round: 3, event_name: "Japanese Grand Prix", circuit_name: "Suzuka Circuit", country: "Japan", weekend_start: "2026-03-27T02:00:00Z", weekend_end: "2026-03-29T07:00:00Z" });
+const pendingCompleted = weekend({ event_id: "dutch-2026", event_slug: "dutch-grand-prix-2026", round: 15, event_name: "Dutch Grand Prix", circuit_name: "Circuit Zandvoort", country: "Netherlands", weekend_start: "2026-08-21T10:00:00Z", weekend_end: "2026-08-23T16:00:00Z", sessions: [
+  session({ room_slug: null, room_eligible: false, eligibility: "provider_pending", data_availability: "unavailable", replay_available: false, results_available: false }),
+] });
 const liveWeekend = weekend({ event_id: "britain-2026", event_slug: "british-grand-prix-2026", round: 9, event_name: "British Grand Prix", circuit_name: "Silverstone Circuit", country: "United Kingdom", weekend_start: "2026-07-17T10:00:00Z", weekend_end: "2026-07-19T16:00:00Z", weekend_status: "live", sessions: [session({ scheduled_start: "2099-07-18T14:00:00Z", actual_start: null, status: "scheduled", room_slug: null, room_eligible: false, eligibility: "future_read_only", data_availability: "unavailable", replay_available: false, results_available: false })] });
 const upcomingSprint = weekend({ event_id: "belgium-2026", event_slug: "belgian-grand-prix-2026", round: 13, event_name: "Belgian Grand Prix", circuit_name: "Circuit de Spa-Francorchamps", country: "Belgium", weekend_start: "2099-07-24T10:00:00Z", weekend_end: "2099-07-26T16:00:00Z", weekend_status: "upcoming", is_sprint_weekend: true, sessions: [
   session({ session_type: "SPRINT_QUALIFYING", display_name: "Sprint Qualifying", scheduled_start: "2099-07-24T15:00:00Z", actual_start: null, status: "scheduled", room_slug: null, room_eligible: false, eligibility: "future_read_only", replay_available: false, results_available: false }),
@@ -60,7 +63,7 @@ describe("RaceRoomsIndex", () => {
   beforeEach(() => {
     getRaceRoomEvents.mockClear();
     window.history.replaceState(null, "", "/rooms");
-    getRaceRoomEvents.mockResolvedValue({ events: [upcomingSprint, completedLater, liveWeekend, weekend()], total: 4, limit: 100, offset: 0 });
+    getRaceRoomEvents.mockResolvedValue({ events: [upcomingSprint, pendingCompleted, completedLater, liveWeekend, weekend()], total: 5, limit: 100, offset: 0 });
   });
 
   it("uses the themed race loader while the schedule is pending", () => {
@@ -83,7 +86,7 @@ describe("RaceRoomsIndex", () => {
     const completed = screen.getByRole("heading", { name: "Completed Events" }).closest("section");
     expect(completed).not.toBeNull();
     const headings = within(completed as HTMLElement).getAllByRole("heading", { level: 3 });
-    expect(headings.map((heading) => heading.textContent)).toEqual(["Australian Grand Prix", "Japanese Grand Prix"]);
+    expect(headings.map((heading) => heading.textContent)).toEqual(["Japanese Grand Prix", "Australian Grand Prix", "Dutch Grand Prix"]);
     expect(within(completed as HTMLElement).getByRole("link", { name: /Open Australian Grand Prix Qualifying/ })).toHaveAttribute("href", "/rooms/australian-grand-prix-qualifying");
     expect(within(completed as HTMLElement).getByRole("img", { name: "Australian Grand Prix 2026 circuit layout" })).toBeVisible();
 

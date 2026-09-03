@@ -84,6 +84,7 @@ export function getSessionEvents(
   sessionKey: string,
   options: {
     afterSequenceNumber?: number;
+    beforeSequenceNumber?: number;
     limit?: number;
     eventTypes?: string[];
     category?: RaceEventCategory;
@@ -98,6 +99,9 @@ export function getSessionEvents(
   const params = new URLSearchParams();
   if (options.afterSequenceNumber != null) {
     params.set("after_sequence_number", String(options.afterSequenceNumber));
+  }
+  if (options.beforeSequenceNumber != null) {
+    params.set("before_sequence_number", String(options.beforeSequenceNumber));
   }
   if (options.limit != null) params.set("limit", String(options.limit));
   for (const eventType of options.eventTypes ?? []) params.append("event_type", eventType);

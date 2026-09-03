@@ -481,6 +481,7 @@ async def session_events(
     session_key: str,
     services: Services,
     after_sequence_number: int = Query(default=0, ge=0),
+    before_sequence_number: int | None = Query(default=None, ge=0),
     limit: int = Query(default=100, ge=1, le=250),
     event_type: Annotated[list[RaceEventType] | None, Query()] = None,
     category: RaceEventCategory | None = None,
@@ -501,6 +502,7 @@ async def session_events(
     events = await services.normalized_event_repository.list_for_session(
         session_key,
         after_sequence=after_sequence_number,
+        before_sequence=before_sequence_number,
         limit=limit,
         event_types=event_types,
         driver_number=driver_number,

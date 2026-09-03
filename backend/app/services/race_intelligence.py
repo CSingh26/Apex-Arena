@@ -307,6 +307,7 @@ class RaceIntelligenceCoordinator:
             update={
                 "id": uuid5(NAMESPACE_URL, f"apexarena:{event.dedup_key}"),
                 "processed_at": event.event_time,
+                "sequence_number": self._last_source_sequence[event.session_key],
                 "importance_level": level,
                 "importance": score,
             }

@@ -126,9 +126,10 @@ export function describeRaceEvent(
   event: NormalizedRaceEvent,
   driverName: (driverNumber: number) => string = (number) => `Car ${number}`,
 ): string {
-  const primary = event.primary_driver_number == null
+  const primaryDriver = event.primary_driver_number ?? event.driver_numbers[0] ?? null;
+  const primary = primaryDriver == null
     ? "A driver"
-    : driverName(event.primary_driver_number);
+    : driverName(primaryDriver);
   const secondary = event.secondary_driver_number == null
     ? "another driver"
     : driverName(event.secondary_driver_number);

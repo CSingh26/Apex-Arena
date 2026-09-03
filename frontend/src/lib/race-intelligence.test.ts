@@ -2,6 +2,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  describeRaceEvent,
   describeRecentChanges,
   filterRaceEvents,
   mergeSessionIntelligence,
@@ -148,5 +149,14 @@ describe("race intelligence reducers", () => {
       "Norris passed Leclerc for P4.",
       "Hamilton entered the pits.",
     ]);
+  });
+
+  it("names the driver for historical pit facts that predate primary-driver backfill", () => {
+    const pit = event("pit", 39, "PIT_STOP", [44]);
+    pit.primary_driver_number = null;
+
+    expect(describeRaceEvent(pit, (number) => number === 44 ? "Hamilton" : `Car ${number}`)).toBe(
+      "Hamilton completed a pit stop.",
+    );
   });
 });

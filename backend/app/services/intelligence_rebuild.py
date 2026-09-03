@@ -20,6 +20,8 @@ class ReplaceableEventRepository(NormalizedEventRepository, Protocol):
         self,
         session_key: str,
         events: list[NormalizedRaceEvent],
+        *,
+        source_events: list[NormalizedRaceEvent],
     ) -> list[NormalizedRaceEvent]: ...
 
 
@@ -146,7 +148,11 @@ class IntelligenceRebuildService:
 
         persisted = derived
         if not dry_run:
-            persisted = await self.events.replace_derived_for_session(session_key, derived)
+            persisted = await self.events.replace_derived_for_session(
+                session_key,
+                derived,
+                source_events=source_events,
+            )
             await self.battles.replace_for_session(
                 session_key,
                 list(collector.resolved.values()),

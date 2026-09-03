@@ -9,6 +9,7 @@ import pytest
 from app.domain.intelligence import BattleState, RaceIntelligenceConfig
 from app.domain.models import EventOrigin, NormalizedRaceEvent, RaceEventType
 from app.services.intelligence_rebuild import IntelligenceRebuildService
+from app.storage.repositories import canonical_replay_sequence_numbers
 
 START = datetime(2026, 7, 19, 13, tzinfo=UTC)
 
@@ -67,6 +68,7 @@ class Events:
         )
         self.rows = [*stream(), stale]
         self.replaced: list[NormalizedRaceEvent] | None = None
+        self.source_sequences: dict[object, int] | None = None
 
     async def list_for_session(
         self,
@@ -85,16 +87,13 @@ class Events:
         self,
         session_key: str,
         events: list[NormalizedRaceEvent],
+        *,
+        source_events: list[NormalizedRaceEvent],
     ) -> list[NormalizedRaceEvent]:
-        source_max = max(
-            event.sequence_number
-            for event in self.rows
-            if event.event_origin is EventOrigin.SOURCE_FACT
+        self.source_sequences, self.replaced = canonical_replay_sequence_numbers(
+            source_events,
+            events,
         )
-        self.replaced = [
-            event.model_copy(update={"sequence_number": source_max + index})
-            for index, event in enumerate(events, start=1)
-        ]
         return self.replaced
 
     async def insert(self, event: NormalizedRaceEvent):
@@ -171,11 +170,49 @@ async def test_rebuild_replaces_derived_summaries_and_snapshots_safely() -> None
 
     assert summary.replaced_derived is True
     assert events.replaced is not None
-    assert events.replaced[0].sequence_number == 7
+    assert events.replaced[0].sequence_number == 6
+    assert events.source_sequences is not None
+    assert sorted(events.source_sequences.values()) == [1, 2, 3, 4, 5, 7]
     assert all(event.event_origin is EventOrigin.DERIVED for event in events.replaced)
     assert battles.replaced is not None
     assert len(battles.replaced) == 1
     assert snapshots.deleted == ["11334"]
+
+
+def test_canonical_replay_sequences_interleave_derivations_after_source_facts() -> None:
+    first = source(RaceEventType.POSITION_SAMPLE, 16, 20, position=4, second=1)
+    second = source(RaceEventType.POSITION_SAMPLE, 4, 30, position=5, second=2)
+    first_derived = first.model_copy(
+        update={
+            "id": uuid4(),
+            "source": "apexarena",
+            "event_origin": EventOrigin.DERIVED,
+            "event_type": RaceEventType.POSITION_CHANGE,
+            "sequence_number": 1,
+            "dedup_key": "derived:first",
+        }
+    )
+    second_derived = second.model_copy(
+        update={
+            "id": uuid4(),
+            "source": "apexarena",
+            "event_origin": EventOrigin.DERIVED,
+            "event_type": RaceEventType.BATTLE_STARTED,
+            "sequence_number": 2,
+            "dedup_key": "derived:second",
+        }
+    )
+
+    source_sequences, derived = canonical_replay_sequence_numbers(
+        [
+            first.model_copy(update={"sequence_number": 1}),
+            second.model_copy(update={"sequence_number": 2}),
+        ],
+        [first_derived, second_derived],
+    )
+
+    assert source_sequences == {first.id: 1, second.id: 3}
+    assert [event.sequence_number for event in derived] == [2, 4]
 
 
 @pytest.mark.asyncio

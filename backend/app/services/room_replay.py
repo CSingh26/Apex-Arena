@@ -96,8 +96,10 @@ class RoomReplayCoordinator:
         self,
         session_key: str | None,
         playback: RoomPlaybackState,
+        *,
+        applied_event_time: datetime | None = None,
     ) -> RoomPlaybackState:
-        """Map replay progress onto the session's own recorded time span."""
+        """Align replay state with the timestamp of its most recent event."""
 
         if session_key is None:
             return playback
@@ -105,8 +107,19 @@ class RoomReplayCoordinator:
         if span is None:
             return playback
         start, end, maximum = span
-        progress = min(1.0, max(0.0, playback.current_event_sequence / maximum))
-        return playback.model_copy(update={"session_clock": start + (end - start) * progress})
+        if playback.current_event_sequence <= 0:
+            return playback.model_copy(update={"session_clock": start})
+        event_time = applied_event_time
+        if event_time is None:
+            target_sequence = min(playback.current_event_sequence, maximum)
+            events = await self.events.list_for_session(
+                session_key,
+                after_sequence=max(0, target_sequence - 1),
+                limit=1,
+            )
+            if events and events[0].sequence_number == target_sequence:
+                event_time = events[0].event_time
+        return playback.model_copy(update={"session_clock": event_time or end})
 
     async def start(self, room: RaceRoom, *, restart: bool = False) -> RoomPlaybackState:
         if room.session_key is None:
@@ -285,7 +298,12 @@ class RoomReplayCoordinator:
                             last_event_at=event.event_time,
                         )
                         await self._publish_session_update(event)
-                        await self._publish(room, advanced, RoomStatus.REPLAYING)
+                        await self._publish(
+                            room,
+                            advanced,
+                            RoomStatus.REPLAYING,
+                            applied_event_time=event.event_time,
+                        )
                 if should_wait:
                     await asyncio.sleep(0.1)
                     continue
@@ -415,8 +433,14 @@ class RoomReplayCoordinator:
         room: RaceRoom,
         playback: RoomPlaybackState,
         status: RoomStatus,
+        *,
+        applied_event_time: datetime | None = None,
     ) -> RoomPlaybackState:
-        published = await self.with_session_clock(room.session_key, playback)
+        published = await self.with_session_clock(
+            room.session_key,
+            playback,
+            applied_event_time=applied_event_time,
+        )
         try:
             await self.event_bus.publish_room_state(str(room.id), published.model_dump(mode="json"))
         except Exception as exc:

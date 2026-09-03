@@ -18,13 +18,25 @@ ROUTINE_TYPES = {
     RaceEventType.CAR_DATA_SAMPLE,
     RaceEventType.LOCATION_SAMPLE,
     RaceEventType.WEATHER_UPDATE,
+    RaceEventType.LAP_COMPLETED,
+    RaceEventType.STINT_UPDATE,
+    RaceEventType.SESSION_STATUS,
 }
 CRITICAL_TYPES = {RaceEventType.RED_FLAG}
+MAJOR_TYPES = {
+    RaceEventType.SAFETY_CAR,
+    RaceEventType.VIRTUAL_SAFETY_CAR,
+}
 IMPORTANT_TYPES = {
     RaceEventType.OVERTAKE,
     RaceEventType.BATTLE_INTENSIFIED,
     RaceEventType.DRS_RANGE_ENTERED,
     RaceEventType.QUALIFYING_CUTOFF_CHANGE,
+    RaceEventType.YELLOW_FLAG,
+    RaceEventType.PENALTY,
+    RaceEventType.INVESTIGATION,
+    RaceEventType.SESSION_START,
+    RaceEventType.SESSION_FINISH,
 }
 BYPASS_COOLDOWN_TYPES = {RaceEventType.RED_FLAG, RaceEventType.OVERTAKE}
 logger = logging.getLogger(__name__)
@@ -46,6 +58,8 @@ class EventImportancePolicy:
             return EventImportance.LOW, 0.2, False
         if event.event_type in CRITICAL_TYPES:
             return EventImportance.CRITICAL, 1.0, True
+        if event.event_type in MAJOR_TYPES:
+            return EventImportance.MAJOR, 0.9, True
         if event.event_type is RaceEventType.OVERTAKE and event.position_after == 1:
             return EventImportance.MAJOR, 0.92, True
         if event.event_type is RaceEventType.OVERTAKE:

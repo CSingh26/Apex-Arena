@@ -52,6 +52,28 @@ def test_cutoff_adapts_to_twenty_and_twenty_two_car_fields() -> None:
     assert qualifying_cutoff(22, "Q3") is None
 
 
+def test_q1_cutoff_updates_as_the_timing_feed_discovers_the_field() -> None:
+    service = QualifyingEngine()
+    race = state("Q1", field_size=0)
+
+    for sequence, driver in enumerate(range(1, 23), start=1):
+        service.apply(
+            event(
+                RaceEventType.POSITION_SAMPLE,
+                driver=driver,
+                second=sequence,
+                sequence=sequence,
+                position=driver,
+            ),
+            race,
+        )
+
+    intelligence = service.state_for("qualifying")
+    assert intelligence is not None
+    assert intelligence.field_size == 22
+    assert intelligence.cutoff_position == 16
+
+
 def test_phase_changes_emit_session_phase_event_without_overtake_semantics() -> None:
     service = QualifyingEngine()
     race = state("Q1")
@@ -162,4 +184,3 @@ def test_elimination_risk_uses_cooldown_and_never_emits_overtake() -> None:
     assert [item.event_type for item in risky] == [RaceEventType.ELIMINATION_RISK]
     assert cooled_down == []
     assert all(item.event_type is not RaceEventType.OVERTAKE for item in risky)
-

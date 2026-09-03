@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from app.domain.intelligence import PositionChange, PositionChangeCause, PositionState
 from app.domain.models import (
@@ -19,6 +19,8 @@ from app.services.race_state import RaceState
 
 RACE_LIKE_SESSIONS = {"RACE", "SPRINT"}
 RETIRED_STATUSES = {"RETIRED", "STOPPED", "DNF", "DNS"}
+DEFAULT_PIT_TRANSITION_SECONDS = 45.0
+PIT_TRANSITION_GRACE_SECONDS = 5.0
 logger = logging.getLogger(__name__)
 
 
@@ -84,7 +86,7 @@ class PositionTracker:
         if len(changed) < 2:
             return []
 
-        cause = self._classify(changed, race_state)
+        cause = self._classify(changed, race_state, event.event_time)
         batch_key = self._batch_key(event.session_key, event.event_time, changed)
         changed_numbers = [driver.driver_number for driver in changed]
         changes = [
@@ -133,11 +135,17 @@ class PositionTracker:
         return events
 
     @staticmethod
-    def _classify(changed: list[PositionState], race_state: RaceState) -> PositionChangeCause:
+    def _classify(
+        changed: list[PositionState],
+        race_state: RaceState,
+        observed_at: datetime,
+    ) -> PositionChangeCause:
         session_type = str(race_state.session_type or "").upper()
         if session_type not in RACE_LIKE_SESSIONS:
             return PositionChangeCause.PENALTY_OR_CLASSIFICATION
         if any(driver.in_pit for driver in changed):
+            return PositionChangeCause.PIT_CYCLE
+        if PositionTracker._has_recent_pit_stop(changed, race_state, observed_at):
             return PositionChangeCause.PIT_CYCLE
         if any(driver.status in RETIRED_STATUSES for driver in changed):
             return PositionChangeCause.RETIREMENT_INHERITANCE
@@ -154,6 +162,34 @@ class PositionTracker:
         if len(changed) > 2:
             return PositionChangeCause.TIMING_CORRECTION
         return PositionChangeCause.UNKNOWN
+
+    @staticmethod
+    def _has_recent_pit_stop(
+        changed: list[PositionState],
+        race_state: RaceState,
+        observed_at: datetime,
+    ) -> bool:
+        for changed_driver in changed:
+            driver = race_state.drivers.get(str(changed_driver.driver_number))
+            if driver is None:
+                continue
+            for pit_stop in reversed(driver.pit_stops[-3:]):
+                value = pit_stop.get("date") or pit_stop.get("event_time")
+                if not isinstance(value, str):
+                    continue
+                try:
+                    pit_at = datetime.fromisoformat(value.replace("Z", "+00:00"))
+                except ValueError:
+                    continue
+                duration = PositionTracker._float(
+                    pit_stop.get("lane_duration") or pit_stop.get("pit_duration")
+                )
+                transition = (duration or DEFAULT_PIT_TRANSITION_SECONDS) + (
+                    PIT_TRANSITION_GRACE_SECONDS
+                )
+                if pit_at <= observed_at <= pit_at + timedelta(seconds=transition):
+                    return True
+        return False
 
     @staticmethod
     def _batch_key(session_key: str, observed_at: datetime, changed: list[PositionState]) -> str:
@@ -221,3 +257,12 @@ class PositionTracker:
         except (TypeError, ValueError):
             return None
         return parsed if parsed > 0 else None
+
+    @staticmethod
+    def _float(value: object) -> float | None:
+        if value is None or isinstance(value, bool):
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None

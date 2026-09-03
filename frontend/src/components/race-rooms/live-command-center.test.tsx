@@ -4,7 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { LiveCommandCenter } from "@/components/race-rooms/live-command-center";
-import type { RaceState } from "@/lib/types";
+import type { NormalizedRaceEvent, RaceState } from "@/lib/types";
 
 const api = vi.hoisted(() => ({
   getSessionState: vi.fn(),
@@ -76,6 +76,37 @@ function state(sequence: number, position: number, gap: number, pits = 0): RaceS
   };
 }
 
+function event(id: string, sequence: number): NormalizedRaceEvent {
+  return {
+    id,
+    session_key: "race-1",
+    source: "fixture",
+    raw_event_id: null,
+    event_time: "2026-08-10T00:00:00Z",
+    received_at: "2026-08-10T00:00:00Z",
+    processed_at: "2026-08-10T00:00:00Z",
+    sequence_number: sequence,
+    event_type: "PIT_STOP",
+    event_origin: "SOURCE_FACT",
+    driver_numbers: [63],
+    primary_driver_number: 63,
+    secondary_driver_number: null,
+    position_before: null,
+    position_after: null,
+    gap_seconds: null,
+    interval_seconds: null,
+    lap_number: 1,
+    importance: 0.5,
+    importance_level: "NORMAL",
+    confidence: 1,
+    confidence_level: "HIGH",
+    derivation: null,
+    payload: {},
+    dedup_key: id,
+    is_replay: true,
+  };
+}
+
 describe("LiveCommandCenter", () => {
   beforeEach(() => {
     FakeEventSource.instances = [];
@@ -118,6 +149,51 @@ describe("LiveCommandCenter", () => {
     expect(screen.getByText("SAFETY CAR")).toBeVisible();
     expect(screen.getAllByText("+1.221")).toHaveLength(2);
     expect(screen.getByText("1", { selector: "dd" })).toBeVisible();
+  });
+
+  it("bounds the replay event feed to the state sequence", async () => {
+    api.getSessionState.mockResolvedValue({ state: state(1, 1, 0) });
+    render(<LiveCommandCenter sessionKey="race-1" circuitName="Circuit" eventName="Grand Prix" playbackSequence={1} sessionClock={null} selectedDriver={null} onSelectDriver={vi.fn()} />);
+
+    await waitFor(() => expect(api.getSessionEvents).toHaveBeenCalledWith(
+      "race-1",
+      { beforeSequenceNumber: 1, limit: 100, minimumImportance: "NORMAL" },
+      expect.anything(),
+    ));
+  });
+
+  it("paginates from the API page instead of server-rendered recent events", async () => {
+    api.getSessionState.mockResolvedValue({ state: state(10, 1, 0) });
+    api.getSessionEvents
+      .mockResolvedValueOnce({ session_key: "race-1", after_sequence_number: 0, count: 100, events: [event("visible", 1)] })
+      .mockResolvedValueOnce({ session_key: "race-1", after_sequence_number: 1, count: 0, events: [] });
+    render(<LiveCommandCenter
+      sessionKey="race-1"
+      circuitName="Circuit"
+      eventName="Grand Prix"
+      playbackSequence={10}
+      sessionClock={null}
+      selectedDriver={null}
+      onSelectDriver={vi.fn()}
+      initialIntelligence={{
+        session_key: "race-1",
+        sequence_number: 10,
+        current_battles: [],
+        recent_events: [event("recent", 10)],
+        qualifying: null,
+      }}
+    />);
+
+    await userEvent.click(await screen.findByRole("button", { name: "Load more events" }));
+    await waitFor(() => expect(api.getSessionEvents).toHaveBeenLastCalledWith(
+      "race-1",
+      {
+        afterSequenceNumber: 1,
+        beforeSequenceNumber: 10,
+        limit: 100,
+        minimumImportance: "NORMAL",
+      },
+    ));
   });
 
   it("accepts lower sequence states after replay restart or backward seek", async () => {

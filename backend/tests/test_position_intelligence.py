@@ -92,6 +92,20 @@ def test_pit_transition_classifies_inherited_positions_without_overtake_semantic
     assert {change.cause for change in changes} == {PositionChangeCause.PIT_CYCLE}
 
 
+def test_recorded_pit_stop_classifies_the_following_swap_without_pit_sample_flags() -> None:
+    tracker = PositionTracker()
+    state = race_state()
+    seed_pair(tracker, state)
+    state.drivers["16"].pit_stops.append(
+        {"event_time": (START + timedelta(seconds=1)).isoformat(), "pit_duration": 20}
+    )
+
+    assert tracker.apply(position_event(4, 4, second=2, sequence=3), state) == []
+    changes = tracker.apply(position_event(16, 5, second=3, sequence=4), state)
+
+    assert {change.cause for change in changes} == {PositionChangeCause.PIT_CYCLE}
+
+
 def test_retirement_classifies_inherited_positions() -> None:
     tracker = PositionTracker()
     state = race_state()

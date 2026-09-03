@@ -75,7 +75,7 @@ export function RaceEventFeed({
       )}
       {hasMore ? (
         <button className={styles.loadMore} type="button" onClick={onLoadMore} disabled={loadingMore}>
-          {loadingMore ? "Loading earlier events" : "Load earlier events"}
+          {loadingMore ? "Loading more events" : "Load more events"}
         </button>
       ) : null}
     </section>

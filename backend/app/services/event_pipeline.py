@@ -40,6 +40,7 @@ class NormalizedEventRepository(Protocol):
         after_sequence: int = 0,
         limit: int = 100,
         *,
+        before_sequence: int | None = None,
         event_types: list[RaceEventType] | None = None,
         driver_number: int | None = None,
         lap_number: int | None = None,

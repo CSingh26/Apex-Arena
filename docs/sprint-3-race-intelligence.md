@@ -11,6 +11,11 @@ filtering; they do not infer overtakes or battles from raw telemetry.
 
 - Typed `RaceEvent` metadata distinguishes `SOURCE_FACT` from `DERIVED` events and stores
   controlled importance, confidence, driver, position, interval, and derivation evidence.
+- Source facts are scored at normalization time: routine timing remains `LOW`, pit stops are
+  `NORMAL`, race-control facts are `IMPORTANT` or above, and red flags are `CRITICAL`. Existing
+  source rows receive the same policy through migration `20260902_0013`.
+- Historical source facts without a primary driver are backfilled from their first recorded driver
+  through migration `20260902_0014`, preserving readable pit and race-control context.
 - The position tracker confirms coherent ordering changes and classifies pit, retirement,
   penalty/classification, lapped-order, and timing-correction causes.
 - Overtakes require a race-like session, an adjacent order reversal, usable interval
@@ -45,11 +50,15 @@ The local PostgreSQL dataset contains one completed session:
 | Source facts | 6,739 |
 | Location samples | 0 |
 
-The imported facts were stored endpoint-by-endpoint: for example, position facts occupy
-source sequences 899-1341 and interval facts 1342-6341 even though their event timestamps
-overlap. Historical reconstruction therefore sorts source facts by event timestamp, then
-original source sequence and ID, and assigns deterministic monotonic replay sequences. Live
-processing continues to use its normal monotonic ingestion sequence.
+The imported facts were originally stored endpoint-by-endpoint: position facts occupied source
+sequences 899-1341 and interval facts 1342-6341 even though their event timestamps overlap.
+Historical reconstruction sorts source facts by event timestamp, then original source sequence
+and ID. Its replacement transaction preserves source IDs and payloads while assigning one
+canonical monotonic timeline that interleaves each derived event immediately after its triggering
+source fact. The Race Room, REST pagination, and replay all consume that same timeline. A replay
+room's session clock uses the timestamp of its applied event, and its event feed is bounded to
+the active replay sequence so it cannot reveal later race outcomes. Live processing continues to
+use its normal monotonic ingestion sequence.
 
 The final read-only validation and explicit local rebuild produced:
 
@@ -69,7 +78,13 @@ The final read-only validation and explicit local rebuild produced:
 | Reverted-order exclusions | 26 |
 | Timing-correction exclusions | 21 |
 | End-of-session candidate closures | 7 |
-| Rebuild throughput | 433.55 source events/second |
+| Rebuild throughput | 442.59 source events/second |
+
+The source-fact importance backfill for this session yields 6,537 `LOW` routine samples, 145
+`NORMAL` facts (including 28 pit stops), 50 `IMPORTANT` race-control/session facts, six `MAJOR`
+safety-car facts, and one `CRITICAL` red flag. This keeps the compact feed and agent eligibility
+useful without elevating high-frequency timing data. Agent prompts accept persisted source facts
+only at `IMPORTANT` or higher, while the compact feed can retain normal pit context.
 
 Representative persisted events from that rebuild:
 
@@ -83,8 +98,8 @@ Representative persisted events from that rebuild:
   seconds; importance `IMPORTANT`.
 
 Repeated rebuilds use source facts only, generate stable derived IDs/deduplication keys, and
-atomically replace derived rows, battle summaries, and stale session snapshots only when
-`--replace-derived` is explicit. Dry-run validation never changes stored data.
+atomically replace derived rows, canonical replay sequences, battle summaries, and stale session
+snapshots only when `--replace-derived` is explicit. Dry-run validation never changes stored data.
 
 ## Bounded State And Performance
 

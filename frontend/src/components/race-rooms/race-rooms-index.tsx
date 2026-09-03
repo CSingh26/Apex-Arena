@@ -95,6 +95,16 @@ function isPublicEvent(event: RaceRoomEvent): boolean {
   return Boolean(event.event_slug);
 }
 
+function hasReplayReadySession(event: RaceRoomEvent): boolean {
+  return event.sessions.some((session) => Boolean(session.room_slug) && session.replay_available);
+}
+
+function orderCategoryEvents(events: RaceRoomEvent[], status: EventWeekendStatus): RaceRoomEvent[] {
+  const grouped = events.filter((event) => event.weekend_status === status);
+  if (status !== "completed") return grouped;
+  return [...grouped].sort((a, b) => Number(hasReplayReadySession(b)) - Number(hasReplayReadySession(a)));
+}
+
 type OpenPreview = (event: RaceRoomEvent, session?: EventSessionSummary) => void;
 
 function SessionAction({ event, session, onPreview }: { event: RaceRoomEvent; session: EventSessionSummary; onPreview: OpenPreview }) {
@@ -249,8 +259,7 @@ export function RaceRoomsIndex() {
   }, [retryKey, search, season, sessionType, status, weekendFormat]);
 
   const sections = useMemo(() => {
-    const ordered = [...events].sort((a, b) => new Date(a.weekend_start).getTime() - new Date(b.weekend_start).getTime());
-    const group = (value: EventWeekendStatus) => ordered.filter((event) => event.weekend_status === value);
+    const group = (value: EventWeekendStatus) => orderCategoryEvents(events, value);
     return { live: group("live"), completed: group("completed"), upcoming: group("upcoming") };
   }, [events]);
   const previewEvent = events.find((event) => event.event_slug === previewSlug);

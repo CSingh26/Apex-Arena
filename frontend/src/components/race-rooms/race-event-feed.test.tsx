@@ -40,7 +40,7 @@ describe("RaceEventFeed", () => {
     await userEvent.click(screen.getByRole("button", { name: "My driver" }));
     expect(screen.getByText(/Driver 4 began closing on Driver 16/i)).toBeVisible();
     expect(screen.queryByText(/entered the pits/i)).not.toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: /load earlier events/i }));
+    await userEvent.click(screen.getByRole("button", { name: /load more events/i }));
     expect(onLoadMore).toHaveBeenCalledOnce();
   });
 
