@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+from app.domain.intelligence import BattleIntensity, BattleState, BattleStatus, BattleTrend
 from app.services.race_state import DriverRaceState, RaceState
 from app.services.session_realtime import location_state, telemetry_state, timing_state
 
@@ -59,6 +60,40 @@ def test_timing_state_derives_sorted_race_rows_and_tyre_age() -> None:
     assert leader.is_personal_best is True
     assert second.gap_to_leader == 1.75
     assert second.pit_stop_count == 1
+
+
+def test_timing_state_exposes_backend_normalized_driver_battle_context() -> None:
+    race_state = state()
+    observed_at = datetime(2026, 7, 19, 13, 12, tzinfo=UTC)
+    race_state.current_battles = [
+        BattleState(
+            id="race:4:1",
+            session_key=race_state.session_key,
+            lead_driver_number=4,
+            chasing_driver_number=1,
+            lead_position=1,
+            chasing_position=2,
+            interval_seconds=0.72,
+            closest_interval_seconds=0.68,
+            interval_history=[0.9, 0.8, 0.72],
+            started_at=observed_at,
+            last_updated_at=observed_at,
+            trend=BattleTrend.CLOSING,
+            intensity=BattleIntensity.INTENSE,
+            status=BattleStatus.INTENSE,
+            within_one_second=True,
+        )
+    ]
+
+    timing = timing_state(race_state)
+    leader = next(row for row in timing.drivers if row.driver_number == 4)
+    chaser = next(row for row in timing.drivers if row.driver_number == 1)
+
+    assert leader.battle_context.status == "UNDER_PRESSURE"
+    assert leader.battle_context.behind_driver_number == 1
+    assert chaser.battle_context.status == "CLOSING"
+    assert chaser.battle_context.ahead_driver_number == 4
+    assert chaser.battle_context.ahead_interval_seconds == 0.72
 
 
 def test_telemetry_and_location_views_are_bounded_and_provider_neutral() -> None:

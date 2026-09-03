@@ -23,10 +23,14 @@ async def session_event_stream(
     """Replay missed persisted events, send current state, then tail Redis Streams."""
 
     cursor = last_sequence_number
+    state = await services.race_state.get_state(session_key)
+    state_cursor = state.sequence_number
+    replay_bound = state_cursor if state.is_replay else None
     missed = await services.normalized_event_repository.list_for_session(
         session_key,
         after_sequence=cursor,
         limit=services.settings.engine_recent_events_limit,
+        before_sequence=replay_bound,
     )
     for event in missed:
         cursor = max(cursor, event.sequence_number)
@@ -36,8 +40,6 @@ async def session_event_stream(
             event_id=str(event.sequence_number),
         )
 
-    state = await services.race_state.get_state(session_key)
-    state_cursor = state.sequence_number
     yield format_sse("state", state.model_dump(mode="json"))
 
     event_stream = services.event_bus.event_stream(session_key)
@@ -84,11 +86,17 @@ async def session_event_stream(
             if kind == "event":
                 if sequence_number <= cursor:
                     continue
+                if replay_bound is not None and sequence_number > state_cursor:
+                    continue
                 cursor = sequence_number
             elif kind == "state":
                 if sequence_number <= state_cursor:
                     continue
                 state_cursor = sequence_number
+                if record["data"].get("is_replay"):
+                    replay_bound = state_cursor
+                else:
+                    replay_bound = None
             yield format_sse(
                 kind,
                 record["data"],

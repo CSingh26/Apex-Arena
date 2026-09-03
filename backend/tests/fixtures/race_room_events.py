@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
-from app.domain.models import NormalizedRaceEvent, RaceEventType
+from app.domain.models import EventImportance, NormalizedRaceEvent, RaceEventType
 
 
 def race_room_event(
@@ -23,6 +23,7 @@ def race_room_event(
         event_type=event_type,
         driver_numbers=[4, 81],
         lap_number=lap,
+        importance_level=EventImportance.IMPORTANT,
         payload=payload or {},
         dedup_key=f"fixture:{event_type}:{sequence}",
         is_replay=True,

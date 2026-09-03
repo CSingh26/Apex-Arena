@@ -6,7 +6,7 @@ from uuid import uuid4
 
 import pytest
 
-from app.domain.models import RaceEventType
+from app.domain.models import EventImportance, RaceEventType
 from app.services.normalization import OpenF1EventNormalizer
 from app.services.raw_events import RawEventInput
 
@@ -73,6 +73,20 @@ def test_normalizer_preserves_driver_lap_and_replay_source() -> None:
     assert event.event_time == datetime(2026, 7, 19, 14, 2, 3, tzinfo=UTC)
 
 
+def test_normalizer_sets_the_primary_driver_for_a_pit_fact() -> None:
+    event = OpenF1EventNormalizer().normalize(
+        RawEventInput(
+            provider_endpoint="pit",
+            session_key="9999",
+            raw_payload={"driver_number": 4, "lap_number": 13},
+        ),
+        uuid4(),
+    )
+
+    assert event.driver_numbers == [4]
+    assert event.primary_driver_number == 4
+
+
 def test_normalized_dedup_key_is_deterministic() -> None:
     normalizer = OpenF1EventNormalizer()
     raw = RawEventInput(
@@ -103,3 +117,32 @@ def test_race_control_flags_are_specialized() -> None:
 
     assert red.event_type == RaceEventType.RED_FLAG
     assert investigation.event_type == RaceEventType.INVESTIGATION
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "payload", "level", "score"),
+    [
+        ("intervals", {"driver_number": 4, "interval": 1.2}, EventImportance.LOW, 0.1),
+        ("pit", {"driver_number": 4, "lap_number": 13}, EventImportance.NORMAL, 0.5),
+        ("race_control", {"flag": "RED"}, EventImportance.CRITICAL, 1.0),
+        (
+            "race_control",
+            {"message": "SAFETY CAR DEPLOYED"},
+            EventImportance.MAJOR,
+            0.9,
+        ),
+    ],
+)
+def test_normalizer_scores_source_event_importance(
+    endpoint: str,
+    payload: dict[str, object],
+    level: EventImportance,
+    score: float,
+) -> None:
+    event = OpenF1EventNormalizer().normalize(
+        RawEventInput(provider_endpoint=endpoint, session_key="9999", raw_payload=payload),
+        uuid4(),
+    )
+
+    assert event.importance_level is level
+    assert event.importance == score

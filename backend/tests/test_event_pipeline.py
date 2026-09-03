@@ -6,7 +6,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from app.domain.models import NormalizedRaceEvent
+from app.domain.models import EventOrigin, NormalizedRaceEvent, RaceEventType
 from app.services.event_pipeline import (
     EventDeduplicator,
     EventOrderingBuffer,
@@ -97,6 +97,34 @@ class Consumer:
 class FailingConsumer:
     async def consume(self, event: NormalizedRaceEvent) -> None:
         raise ConnectionError("provider consumer unavailable")
+
+
+class DerivedProducer:
+    def __init__(self) -> None:
+        self.pending: list[NormalizedRaceEvent] = []
+        self.consume_count = 0
+
+    async def consume(self, event: NormalizedRaceEvent) -> None:
+        self.consume_count += 1
+        if event.event_origin is EventOrigin.DERIVED:
+            return
+        self.pending.append(
+            event.model_copy(
+                update={
+                    "id": uuid4(),
+                    "source": "apexarena",
+                    "event_origin": EventOrigin.DERIVED,
+                    "event_type": RaceEventType.POSITION_CHANGE,
+                    "raw_event_id": None,
+                    "dedup_key": f"derived:{event.dedup_key}",
+                }
+            )
+        )
+
+    def drain_derived(self, session_key: str) -> list[NormalizedRaceEvent]:
+        ready = [event for event in self.pending if event.session_key == session_key]
+        self.pending = [event for event in self.pending if event.session_key != session_key]
+        return ready
 
 
 def processor() -> tuple[RaceEventProcessor, NormalizedRepository, Consumer]:
@@ -202,3 +230,38 @@ async def test_consumer_outage_does_not_rollback_persisted_event() -> None:
     assert result.normalized_inserted == 1
     assert await normalized.count("spa-race") == 1
     assert len(healthy.events) == 1
+
+
+@pytest.mark.asyncio
+async def test_derived_events_follow_source_with_monotonic_sequence_without_recursion() -> None:
+    normalized = NormalizedRepository()
+    producer = DerivedProducer()
+    recorder = Consumer()
+    pipeline = RaceEventProcessor(
+        raw_events=RawProviderEventService(RawRepository()),
+        normalizer=OpenF1EventNormalizer(),
+        normalized_repository=normalized,
+        deduplicator=EventDeduplicator(),
+        ordering_buffer=EventOrderingBuffer(window_ms=0),
+        sequence_numbers=SequenceNumberService(normalized),
+        consumers=[producer, recorder],
+    )
+
+    await pipeline.ingest(
+        RawEventInput(
+            provider_endpoint="position",
+            session_key="race",
+            raw_payload={"driver_number": 4, "position": 5},
+        )
+    )
+
+    events = await normalized.list_for_session("race")
+    assert [(event.event_origin, event.sequence_number) for event in events] == [
+        (EventOrigin.SOURCE_FACT, 1),
+        (EventOrigin.DERIVED, 2),
+    ]
+    assert [event.event_origin for event in recorder.events] == [
+        EventOrigin.SOURCE_FACT,
+        EventOrigin.DERIVED,
+    ]
+    assert producer.consume_count == 2

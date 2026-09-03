@@ -24,6 +24,7 @@ from app.api.room_schemas import (
     RoomMessagesResponse,
 )
 from app.api.room_streaming import race_room_stream
+from app.api.schemas import SessionIntelligenceResponse
 from app.domain.rooms import (
     MessageTopic,
     MessageType,
@@ -34,6 +35,7 @@ from app.domain.rooms import (
     WeekendStatus,
 )
 from app.services.container import AppServices
+from app.services.race_state import RaceState
 from app.services.room_eligibility import (
     RoomActionUnavailableError,
     RoomEligibilityService,
@@ -163,10 +165,13 @@ async def sync_race_room_catalog(
 async def race_room_detail(room_slug: str, services: Services) -> RaceRoomDetailResponse:
     room = await require_room(room_slug, services)
     circuit = services.circuit_intelligence.for_circuit(room.circuit_name)
-    agents, playback, weather = await asyncio.gather(
+    agents, playback, weather, state = await asyncio.gather(
         services.room_repository.get_agents(room.id),
         services.room_repository.get_playback(room.id),
         services.circuit_weather.for_session(room.session_key),
+        services.race_state.get_state(room.session_key)
+        if getattr(services, "race_state", None) is not None and room.session_key
+        else asyncio.sleep(0, result=RaceState(session_key=room.session_key or "")),
     )
     notices = {
         SourceAvailability.TELEMETRY: "Detailed normalized telemetry is available.",
@@ -187,6 +192,7 @@ async def race_room_detail(room_slug: str, services: Services) -> RaceRoomDetail
         playback=await services.room_replay.with_session_clock(room.session_key, playback),
         circuit=circuit,
         weather=weather,
+        intelligence=SessionIntelligenceResponse.from_state(state),
         data_notice=notices[room.source_availability],
         diagnostics_available=(
             services.settings.app_env != "production" or services.settings.room_diagnostics_enabled
@@ -378,6 +384,12 @@ async def room_diagnostics(
     )
     playback = await services.room_repository.get_playback(room.id)
     race_state = await services.race_state.get_state(session_key)
+    coordinator = getattr(services, "race_intelligence", None)
+    pending_overtakes = (
+        coordinator.overtakes.pending_for_session(session_key)
+        if coordinator is not None
+        else []
+    )
     live = services.openf1_live.status()
     return RoomDiagnosticsResponse(
         room_slug=room.slug,
@@ -391,6 +403,19 @@ async def room_diagnostics(
         connection_state=str(live["connection_state"]),
         latest_events=[event.model_dump(mode="json") for event in latest_events],
         race_state=race_state.model_dump(mode="json"),
+        intelligence={
+            "current_battles": [
+                battle.model_dump(mode="json") for battle in race_state.current_battles
+            ],
+            "pending_overtakes": [
+                candidate.model_dump(mode="json") for candidate in pending_overtakes
+            ],
+            "qualifying": (
+                race_state.qualifying_intelligence.model_dump(mode="json")
+                if race_state.qualifying_intelligence
+                else None
+            ),
+        },
         playback=playback,
         discussion=services.room_discussion.metrics.model_dump(),
     )

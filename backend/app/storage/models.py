@@ -156,9 +156,19 @@ class NormalizedRaceEventRecord(Base):
     sequence_number: Mapped[int] = mapped_column(Integer)
     event_type: Mapped[str] = mapped_column(String(40), index=True)
     driver_numbers: Mapped[list[int]] = mapped_column(JSON_TYPE, default=list)
+    event_origin: Mapped[str] = mapped_column(String(20), default="SOURCE_FACT", index=True)
+    primary_driver_number: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    secondary_driver_number: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    position_before: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    position_after: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    gap_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    interval_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
     lap_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
     importance: Mapped[float | None] = mapped_column(Float, nullable=True)
+    importance_level: Mapped[str] = mapped_column(String(20), default="LOW", index=True)
     confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    confidence_level: Mapped[str] = mapped_column(String(20), default="HIGH")
+    derivation: Mapped[dict[str, Any] | None] = mapped_column(JSON_TYPE, nullable=True)
     payload: Mapped[dict[str, Any]] = mapped_column(JSON_TYPE)
     dedup_key: Mapped[str] = mapped_column(String(64), index=True)
     is_replay: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -182,6 +192,28 @@ class RaceStateSnapshotRecord(Base):
     session_status: Mapped[str] = mapped_column(String(40), default="unknown")
     state: Mapped[dict[str, Any]] = mapped_column(JSON_TYPE)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class BattleSummaryRecord(Base):
+    __tablename__ = "battle_summaries"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    battle_key: Mapped[str] = mapped_column(String(180), unique=True, index=True)
+    session_key: Mapped[str] = mapped_column(String(80), index=True)
+    lead_driver_number: Mapped[int] = mapped_column(Integer, index=True)
+    chasing_driver_number: Mapped[int] = mapped_column(Integer, index=True)
+    lead_position: Mapped[int] = mapped_column(Integer)
+    chasing_position: Mapped[int] = mapped_column(Integer)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    ended_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    closest_interval_seconds: Mapped[float] = mapped_column(Float)
+    peak_intensity: Mapped[str] = mapped_column(String(20))
+    outcome: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    context: Mapped[dict[str, Any]] = mapped_column(JSON_TYPE, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
 
 
 class IngestionRunRecord(Base):

@@ -6,7 +6,8 @@ from uuid import uuid4
 
 import pytest
 
-from app.domain.models import NormalizedRaceEvent, RaceEventType, RaceStateSnapshot
+from app.domain.intelligence import BattleState, BattleStatus
+from app.domain.models import EventOrigin, NormalizedRaceEvent, RaceEventType, RaceStateSnapshot
 from app.services.race_state import RaceStateEngine, SnapshotPersistResult
 
 
@@ -202,6 +203,44 @@ async def test_snapshot_is_persisted_on_configured_interval() -> None:
     assert snapshot is not None
     assert snapshot.current_lap == 1
     assert snapshot.sequence_number == 2
+
+
+@pytest.mark.asyncio
+async def test_derived_battle_events_reconstruct_current_battles() -> None:
+    engine = RaceStateEngine(SnapshotRepository(), snapshot_every_n_events=100)
+    now = datetime(2026, 7, 19, 13, tzinfo=UTC)
+    battle = BattleState(
+        id="spa-race:16:4",
+        session_key="spa-race",
+        lead_driver_number=16,
+        chasing_driver_number=4,
+        lead_position=4,
+        chasing_position=5,
+        interval_seconds=0.8,
+        closest_interval_seconds=0.8,
+        interval_history=[1.2, 1.0, 0.8],
+        started_at=now,
+        last_updated_at=now,
+        status=BattleStatus.ACTIVE,
+    )
+    started = event(
+        RaceEventType.BATTLE_STARTED,
+        1,
+        {"battle": battle.model_dump(mode="json")},
+    ).model_copy(update={"event_origin": EventOrigin.DERIVED})
+
+    state = await engine.apply(started)
+    assert [item.id for item in state.current_battles] == ["spa-race:16:4"]
+
+    battle.status = BattleStatus.RESOLVED
+    ended = event(
+        RaceEventType.BATTLE_ENDED,
+        2,
+        {"battle": battle.model_dump(mode="json")},
+    ).model_copy(update={"event_origin": EventOrigin.DERIVED})
+    state = await engine.apply(ended)
+
+    assert state.current_battles == []
 
 
 @pytest.mark.asyncio

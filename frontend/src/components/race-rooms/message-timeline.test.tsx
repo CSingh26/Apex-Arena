@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import { useState } from "react";
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
@@ -44,11 +44,21 @@ describe("MessageTimeline", () => {
     expect(screen.queryByText(pace.content)).not.toBeInTheDocument();
   });
 
-  it("shows a purposeful replay empty state and a jump-to-latest control", async () => {
-    render(<TimelineHarness items={[]} />);
-    expect(screen.getByText("The room is waiting for lights out.")).toBeVisible();
+  it("keeps follow-latest scrolling inside the conversation feed", async () => {
+    const { rerender } = render(<TimelineHarness items={[strategy]} />);
+    const feed = screen.getByRole("log", { name: "Agent conversation" });
+    Object.defineProperty(feed, "scrollHeight", { configurable: true, value: 960 });
+    vi.mocked(HTMLElement.prototype.scrollIntoView).mockClear();
+
+    rerender(<TimelineHarness items={[strategy, pace]} />);
+
+    await waitFor(() => expect(feed.scrollTop).toBe(960));
+    expect(HTMLElement.prototype.scrollIntoView).not.toHaveBeenCalled();
+
+    feed.scrollTop = 0;
     await userEvent.click(screen.getByRole("button", { name: /at latest/i }));
-    expect(HTMLElement.prototype.scrollIntoView).toHaveBeenCalled();
+    expect(feed.scrollTop).toBe(960);
+    expect(HTMLElement.prototype.scrollIntoView).not.toHaveBeenCalled();
   });
 
   it("marks important race updates without relying on colour alone", () => {

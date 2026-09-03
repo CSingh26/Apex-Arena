@@ -51,6 +51,13 @@ export const detail: RaceRoomDetailResponse = {
     source: "OpenF1",
     notice: "Latest weather sample published by OpenF1 for this session.",
   },
+  intelligence: {
+    session_key: room.session_key ?? "",
+    sequence_number: 0,
+    current_battles: [],
+    recent_events: [],
+    qualifying: null,
+  },
   data_notice: "Detailed normalized telemetry is available.",
   diagnostics_available: true,
 };

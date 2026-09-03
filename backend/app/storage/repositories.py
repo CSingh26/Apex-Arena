@@ -5,10 +5,16 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 
-from app.domain.models import NormalizedRaceEvent, RaceEventType, RaceStateSnapshot
+from app.domain.models import (
+    EventImportance,
+    EventOrigin,
+    NormalizedRaceEvent,
+    RaceEventType,
+    RaceStateSnapshot,
+)
 from app.services.event_pipeline import NormalizedPersistResult, PipelineResult
 from app.services.historical import IngestionRunSummary
 from app.services.race_state import SnapshotPersistResult
@@ -23,6 +29,38 @@ from app.storage.models import (
     RaceStateSnapshotRecord,
     RawProviderEventRecord,
 )
+
+
+def canonical_replay_sequence_numbers(
+    source_events: list[NormalizedRaceEvent],
+    derived_events: list[NormalizedRaceEvent],
+) -> tuple[dict[UUID, int], list[NormalizedRaceEvent]]:
+    """Interleave derivations after their triggering source fact."""
+
+    ordered_sources = sorted(source_events, key=lambda event: event.sequence_number)
+    source_sequences = {event.sequence_number for event in ordered_sources}
+    if len(source_sequences) != len(ordered_sources):
+        raise ValueError("Canonical source replay sequences must be unique")
+
+    derived_by_source: dict[int, list[tuple[int, NormalizedRaceEvent]]] = {}
+    for index, event in enumerate(derived_events):
+        if event.sequence_number not in source_sequences:
+            raise ValueError("Derived event does not reference a canonical source sequence")
+        derived_by_source.setdefault(event.sequence_number, []).append((index, event))
+
+    source_result: dict[UUID, int] = {}
+    derived_result: list[NormalizedRaceEvent | None] = [None] * len(derived_events)
+    sequence = 0
+    for source in ordered_sources:
+        sequence += 1
+        source_result[source.id] = sequence
+        for index, event in derived_by_source.get(source.sequence_number, []):
+            sequence += 1
+            derived_result[index] = event.model_copy(update={"sequence_number": sequence})
+
+    if any(event is None for event in derived_result):
+        raise ValueError("Canonical replay sequence generation was incomplete")
+    return source_result, [event for event in derived_result if event is not None]
 
 
 class SqlIngestionRunRepository:
@@ -141,8 +179,7 @@ class SqlNormalizedEventRepository:
         self.database = database
 
     async def insert(self, event: NormalizedRaceEvent) -> NormalizedPersistResult:
-        values = event.model_dump()
-        values["event_type"] = event.event_type.value
+        values = self._event_values(event)
         statement = (
             insert(NormalizedRaceEventRecord)
             .values(**values)
@@ -162,6 +199,73 @@ class SqlNormalizedEventRepository:
                 )
             ).scalar_one()
             return NormalizedPersistResult(record_id=existing_id, is_new=False)
+
+    @staticmethod
+    def _event_values(event: NormalizedRaceEvent) -> dict[str, Any]:
+        values = event.model_dump(
+            exclude={
+                "event_type",
+                "event_origin",
+                "importance_level",
+                "confidence_level",
+                "derivation",
+            }
+        )
+        values["event_type"] = event.event_type.value
+        values["event_origin"] = event.event_origin.value
+        values["importance_level"] = event.importance_level.value
+        values["confidence_level"] = event.confidence_level.value
+        values["derivation"] = (
+            event.derivation.model_dump(mode="json") if event.derivation is not None else None
+        )
+        return values
+
+    async def replace_derived_for_session(
+        self,
+        session_key: str,
+        events: list[NormalizedRaceEvent],
+        *,
+        source_events: list[NormalizedRaceEvent],
+    ) -> list[NormalizedRaceEvent]:
+        """Atomically replace derivations and canonicalize the historical timeline."""
+
+        source_sequences, persisted = canonical_replay_sequence_numbers(
+            source_events,
+            events,
+        )
+        async with self.database.session_factory() as session:
+            source_records = (
+                (
+                    await session.execute(
+                        select(NormalizedRaceEventRecord)
+                        .where(
+                            NormalizedRaceEventRecord.session_key == session_key,
+                            NormalizedRaceEventRecord.event_origin == EventOrigin.SOURCE_FACT.value,
+                        )
+                        .with_for_update()
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            if {record.id for record in source_records} != set(source_sequences):
+                raise ValueError("Stored source facts changed during intelligence rebuild")
+            await session.execute(
+                delete(NormalizedRaceEventRecord).where(
+                    NormalizedRaceEventRecord.session_key == session_key,
+                    NormalizedRaceEventRecord.event_origin == EventOrigin.DERIVED.value,
+                )
+            )
+            for record in source_records:
+                record.sequence_number = -record.sequence_number
+            await session.flush()
+            for record in source_records:
+                record.sequence_number = source_sequences[record.id]
+            session.add_all(
+                [NormalizedRaceEventRecord(**self._event_values(event)) for event in persisted]
+            )
+            await session.commit()
+            return persisted
 
     async def max_sequence(self, session_key: str) -> int:
         statement = select(func.max(NormalizedRaceEventRecord.sequence_number)).where(
@@ -187,14 +291,53 @@ class SqlNormalizedEventRepository:
             return int((await session.execute(statement)).scalar_one())
 
     async def list_for_session(
-        self, session_key: str, after_sequence: int = 0, limit: int = 100
+        self,
+        session_key: str,
+        after_sequence: int = 0,
+        limit: int = 100,
+        *,
+        before_sequence: int | None = None,
+        event_types: list[RaceEventType] | None = None,
+        driver_number: int | None = None,
+        lap_number: int | None = None,
+        minimum_importance: EventImportance | None = None,
+        event_origin: EventOrigin | None = None,
+        before_time: datetime | None = None,
     ) -> list[NormalizedRaceEvent]:
+        predicates = [
+            NormalizedRaceEventRecord.session_key == session_key,
+            NormalizedRaceEventRecord.sequence_number > after_sequence,
+        ]
+        if before_sequence is not None:
+            predicates.append(NormalizedRaceEventRecord.sequence_number <= before_sequence)
+        if event_types:
+            predicates.append(
+                NormalizedRaceEventRecord.event_type.in_([value.value for value in event_types])
+            )
+        if driver_number is not None:
+            predicates.append(
+                or_(
+                    NormalizedRaceEventRecord.primary_driver_number == driver_number,
+                    NormalizedRaceEventRecord.secondary_driver_number == driver_number,
+                    NormalizedRaceEventRecord.driver_numbers.contains([driver_number]),
+                )
+            )
+        if lap_number is not None:
+            predicates.append(NormalizedRaceEventRecord.lap_number == lap_number)
+        if minimum_importance is not None:
+            levels = list(EventImportance)
+            predicates.append(
+                NormalizedRaceEventRecord.importance_level.in_(
+                    [level.value for level in levels[levels.index(minimum_importance) :]]
+                )
+            )
+        if event_origin is not None:
+            predicates.append(NormalizedRaceEventRecord.event_origin == event_origin.value)
+        if before_time is not None:
+            predicates.append(NormalizedRaceEventRecord.event_time < before_time)
         statement = (
             select(NormalizedRaceEventRecord)
-            .where(
-                NormalizedRaceEventRecord.session_key == session_key,
-                NormalizedRaceEventRecord.sequence_number > after_sequence,
-            )
+            .where(*predicates)
             .order_by(NormalizedRaceEventRecord.sequence_number)
             .limit(limit)
         )

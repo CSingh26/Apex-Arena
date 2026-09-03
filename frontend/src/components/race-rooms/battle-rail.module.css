@@ -1,0 +1,30 @@
+.rail { margin: 20px 0 24px; }
+.heading { display: flex; align-items: end; justify-content: space-between; gap: 16px; margin-bottom: 12px; }
+.heading span { color: var(--apex-cyan); font: 700 .58rem var(--font-mono, ui-monospace), monospace; letter-spacing: .08em; text-transform: uppercase; }
+.heading h2 { margin: 4px 0 0; font-size: 1.05rem; }
+.heading small { color: var(--faint); font: 650 .6rem var(--font-mono, ui-monospace), monospace; text-transform: uppercase; }
+.cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.card { min-width: 0; min-height: 220px; padding: 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel-raised); }
+.card > header { display: flex; align-items: start; justify-content: space-between; gap: 12px; }
+.card > header span { color: var(--faint); font: 750 .56rem var(--font-mono, ui-monospace), monospace; letter-spacing: .08em; }
+.card h3 { margin: 3px 0 0; font-size: .88rem; text-transform: uppercase; }
+.card > header > b { color: var(--apex-gold); font: 800 1.05rem var(--font-mono, ui-monospace), monospace; }
+.intensity_intense { border-color: color-mix(in srgb, var(--apex-coral) 58%, var(--line)); }
+.intensity_close { border-color: color-mix(in srgb, var(--apex-gold) 45%, var(--line)); }
+.matchup { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: stretch; gap: 6px; margin-top: 14px; }
+.matchup button { min-width: 0; padding: 9px; border: 1px solid transparent; border-radius: 6px; background: var(--panel); color: var(--foreground); cursor: pointer; text-align: left; }
+.matchup button:hover, .matchup button:focus-visible, .matchup button[aria-pressed="true"] { border-color: var(--apex-cyan); outline: none; }
+.matchup strong, .matchup span, .matchup small { display: block; }
+.matchup strong { color: var(--muted); font: 700 .6rem var(--font-mono, ui-monospace), monospace; }
+.matchup span { overflow: hidden; margin-top: 3px; font-size: .78rem; font-weight: 800; text-overflow: ellipsis; white-space: nowrap; }
+.matchup small { overflow: hidden; margin-top: 5px; color: var(--faint); font-size: .58rem; text-overflow: ellipsis; white-space: nowrap; }
+.interval { align-self: center; color: var(--faint); font: 700 .55rem var(--font-mono, ui-monospace), monospace; text-transform: uppercase; }
+.meaning { margin: 12px 0 0; font-size: .75rem; font-weight: 750; }
+.tags { display: flex; flex-wrap: wrap; gap: 5px; min-height: 22px; margin-top: 8px; }
+.tags span { padding: 4px 6px; border: 1px solid var(--line); border-radius: 4px; color: var(--muted); font: 650 .54rem var(--font-mono, ui-monospace), monospace; text-transform: uppercase; }
+.evidence { margin-top: 10px; border-top: 1px solid var(--line); padding-top: 8px; }
+.evidence summary { color: var(--apex-cyan); cursor: pointer; font-size: .64rem; font-weight: 750; }
+.evidence p { margin: 7px 0 0; color: var(--muted); font: 600 .59rem/1.5 var(--font-mono, ui-monospace), monospace; }
+.empty { min-height: 78px; margin: 0; padding: 22px; border-block: 1px solid var(--line); color: var(--muted); font-size: .76rem; }
+@media (max-width: 850px) { .cards { grid-template-columns: 1fr; } .card { min-height: 0; } }
+@media (prefers-reduced-motion: reduce) { .card, .matchup button { transition: none; } }

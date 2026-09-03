@@ -21,7 +21,8 @@ from app.api.room_routes import (
 )
 from app.api.room_schemas import PlaybackRequest, ReplayRequest
 from app.domain.circuits import SessionWeather
-from app.domain.models import NormalizedRaceEvent, RaceEventType
+from app.domain.intelligence import BattleIntensity, BattleState, BattleStatus, BattleTrend
+from app.domain.models import EventOrigin, NormalizedRaceEvent, RaceEventType
 from app.domain.rooms import (
     Confidence,
     EvidenceStatus,
@@ -251,6 +252,67 @@ async def test_room_detail_has_timing_only_notice_and_safe_diagnostics_flag() ->
     assert response.circuit.circuit_name == "Circuit de Spa-Francorchamps"
     assert response.weather.available is False
     services.circuit_weather.for_session.assert_awaited_once_with("belgian-race-session")
+
+
+@pytest.mark.asyncio
+async def test_room_detail_bootstraps_bounded_session_intelligence() -> None:
+    room = api_room()
+    services = route_services(room)
+    timestamp = datetime(2026, 7, 19, 13, 20, tzinfo=UTC)
+    battle = BattleState(
+        id="11334:16:4",
+        session_key=room.session_key or "",
+        lead_driver_number=16,
+        chasing_driver_number=4,
+        lead_position=4,
+        chasing_position=5,
+        interval_seconds=0.72,
+        closest_interval_seconds=0.68,
+        interval_history=[0.9, 0.8, 0.72],
+        started_at=timestamp,
+        last_updated_at=timestamp,
+        trend=BattleTrend.CLOSING,
+        intensity=BattleIntensity.INTENSE,
+        status=BattleStatus.INTENSE,
+        within_one_second=True,
+    )
+    recent = [
+        NormalizedRaceEvent(
+            session_key=room.session_key or "",
+            source="apexarena",
+            event_origin=EventOrigin.DERIVED,
+            event_time=timestamp,
+            received_at=timestamp,
+            sequence_number=index,
+            event_type=RaceEventType.BATTLE_INTENSIFIED,
+            primary_driver_number=4,
+            secondary_driver_number=16,
+            dedup_key=f"recent-{index}",
+        )
+        for index in range(1, 8)
+    ]
+    services.race_state = SimpleNamespace(
+        get_state=AsyncMock(
+            return_value=RaceState(
+                session_key=room.session_key or "",
+                sequence_number=7,
+                current_battles=[battle],
+                recent_events=recent,
+            )
+        )
+    )
+
+    response = await race_room_detail(room.slug, services)
+
+    assert response.intelligence.sequence_number == 7
+    assert response.intelligence.current_battles == [battle]
+    assert [event.sequence_number for event in response.intelligence.recent_events] == [
+        3,
+        4,
+        5,
+        6,
+        7,
+    ]
 
 
 @pytest.mark.asyncio

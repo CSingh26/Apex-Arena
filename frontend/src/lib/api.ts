@@ -23,6 +23,9 @@ import type {
   ConstructorStandingsResponse,
   SessionBootstrap,
   SessionCapabilities,
+  EventImportance,
+  EventOrigin,
+  RaceEventCategory,
 } from "@/lib/types";
 import { apiPath } from "@/lib/app-paths";
 
@@ -79,10 +82,38 @@ export function getConstructorStandings(signal?: AbortSignal): Promise<Construct
 
 export function getSessionEvents(
   sessionKey: string,
+  options: {
+    afterSequenceNumber?: number;
+    beforeSequenceNumber?: number;
+    limit?: number;
+    eventTypes?: string[];
+    category?: RaceEventCategory;
+    driverNumber?: number;
+    lapNumber?: number;
+    minimumImportance?: EventImportance;
+    eventOrigin?: EventOrigin;
+    beforeTime?: string;
+  } = {},
   signal?: AbortSignal,
 ): Promise<SessionEventsResponse> {
+  const params = new URLSearchParams();
+  if (options.afterSequenceNumber != null) {
+    params.set("after_sequence_number", String(options.afterSequenceNumber));
+  }
+  if (options.beforeSequenceNumber != null) {
+    params.set("before_sequence_number", String(options.beforeSequenceNumber));
+  }
+  if (options.limit != null) params.set("limit", String(options.limit));
+  for (const eventType of options.eventTypes ?? []) params.append("event_type", eventType);
+  if (options.category) params.set("category", options.category);
+  if (options.driverNumber != null) params.set("driver_number", String(options.driverNumber));
+  if (options.lapNumber != null) params.set("lap_number", String(options.lapNumber));
+  if (options.minimumImportance) params.set("minimum_importance", options.minimumImportance);
+  if (options.eventOrigin) params.set("event_origin", options.eventOrigin);
+  if (options.beforeTime) params.set("before_time", options.beforeTime);
+  const query = params.toString();
   return request<SessionEventsResponse>(
-    `/sessions/${encodeURIComponent(sessionKey)}/events`,
+    `/sessions/${encodeURIComponent(sessionKey)}/events${query ? `?${query}` : ""}`,
     signal,
   );
 }

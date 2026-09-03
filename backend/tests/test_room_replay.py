@@ -449,6 +449,20 @@ async def test_speed_and_seek_controls_update_durable_playback_and_publish() -> 
 
 
 @pytest.mark.asyncio
+async def test_seek_publishes_rebuilt_session_state_for_paused_viewers() -> None:
+    room = replay_room().model_copy(update={"status": RoomStatus.PAUSED})
+    replay, _, _, _, _, bus = coordinator(
+        room,
+        [replay_event(1, 1), replay_event(2, 2), replay_event(3, 3)],
+    )
+
+    playback = await replay.seek_to_sequence(room, 2)
+
+    assert playback.current_event_sequence == 2
+    assert [state.sequence_number for state in bus.session_states] == [2]
+
+
+@pytest.mark.asyncio
 async def test_running_replay_and_seek_are_serialized_into_one_coherent_state() -> None:
     room = replay_room()
     replay, rooms, _, discussion, race_state, _ = coordinator(
@@ -604,16 +618,23 @@ def clocked_coordinator(
 
 
 @pytest.mark.asyncio
-async def test_session_clock_maps_replay_progress_onto_real_session_time() -> None:
-    """Persisted events are sequenced per endpoint, not by timestamp.
-
-    The circuit map needs a clock that only moves forward with playback, so it
-    is derived from progress through the sequence across the session's own
-    recorded span rather than from the last applied event's timestamp.
-    """
+async def test_session_clock_uses_the_timestamp_of_the_applied_replay_event() -> None:
+    """Locations must align with the state created by the replayed event."""
 
     room = replay_room()
-    events = [replay_event(sequence, sequence) for sequence in range(1, 11)]
+    event_times = [
+        datetime(2026, 7, 19, 13, minute, tzinfo=UTC)
+        for minute in (1, 2, 4, 6, 8, 12, 17, 25, 39, 55)
+    ]
+    events = [
+        replay_event(sequence, sequence).model_copy(
+            update={
+                "event_time": event_times[sequence - 1],
+                "received_at": event_times[sequence - 1],
+            }
+        )
+        for sequence in range(1, 11)
+    ]
     replay, _ = clocked_coordinator(room, events, FakeSessionTimes())
 
     at_start = await replay.with_session_clock(room.session_key, RoomPlaybackState(room_id=room.id))
@@ -625,23 +646,32 @@ async def test_session_clock_maps_replay_progress_onto_real_session_time() -> No
     )
 
     assert at_start.session_clock == datetime(2026, 7, 19, 13, 0, tzinfo=UTC)
-    assert halfway.session_clock == datetime(2026, 7, 19, 13, 30, tzinfo=UTC)
-    assert at_end.session_clock == datetime(2026, 7, 19, 14, 0, tzinfo=UTC)
+    assert halfway.session_clock == datetime(2026, 7, 19, 13, 8, tzinfo=UTC)
+    assert at_end.session_clock == datetime(2026, 7, 19, 13, 55, tzinfo=UTC)
     assert at_start.session_clock < halfway.session_clock < at_end.session_clock
 
 
 @pytest.mark.asyncio
-async def test_session_clock_is_clamped_and_cached() -> None:
+async def test_session_clock_clamps_to_the_final_recorded_event() -> None:
     room = replay_room()
     times = FakeSessionTimes()
-    replay, _ = clocked_coordinator(room, [replay_event(1, 1)], times)
+    final_event_time = datetime(2026, 7, 19, 13, 17, tzinfo=UTC)
+    replay, _ = clocked_coordinator(
+        room,
+        [
+            replay_event(1, 1).model_copy(
+                update={"event_time": final_event_time, "received_at": final_event_time}
+            )
+        ],
+        times,
+    )
 
     beyond = await replay.with_session_clock(
         room.session_key, RoomPlaybackState(room_id=room.id, current_event_sequence=10_000)
     )
     await replay.with_session_clock(room.session_key, RoomPlaybackState(room_id=room.id))
 
-    assert beyond.session_clock == datetime(2026, 7, 19, 14, 0, tzinfo=UTC)
+    assert beyond.session_clock == final_event_time
     assert times.calls == 1
 
 

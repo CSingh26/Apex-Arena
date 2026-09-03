@@ -15,6 +15,19 @@ from app.services.session_semantics import is_qualifying_session
 TimingMode = Literal["race", "qualifying", "practice"]
 TyreCompound = Literal["SOFT", "MEDIUM", "HARD", "INTERMEDIATE", "WET", "UNKNOWN"]
 LocationSource = Literal["live", "historical", "unavailable"]
+BattleContextStatus = Literal[
+    "CLOSING", "UNDER_PRESSURE", "BATTLING", "CLEAR_AIR", "UNAVAILABLE"
+]
+
+
+class DriverBattleContext(BaseModel):
+    driver_number: int
+    ahead_driver_number: int | None = None
+    ahead_interval_seconds: float | None = None
+    behind_driver_number: int | None = None
+    behind_interval_seconds: float | None = None
+    status: BattleContextStatus = "UNAVAILABLE"
+    battle_id: str | None = None
 
 
 class DriverTimingState(BaseModel):
@@ -34,6 +47,7 @@ class DriverTimingState(BaseModel):
     is_fastest: bool = False
     is_personal_best: bool = False
     status: str = "RUNNING"
+    battle_context: DriverBattleContext
 
 
 class SessionTimingState(BaseModel):
@@ -128,6 +142,7 @@ def timing_state(state: RaceState) -> SessionTimingState:
     for row in rows:
         row.is_fastest = fastest is not None and row.best_lap == fastest
         row.is_personal_best = row.latest_lap is not None and row.latest_lap == row.best_lap
+    _apply_battle_context(rows, state)
     return SessionTimingState(
         session_key=state.session_key,
         sequence_number=state.sequence_number,
@@ -258,7 +273,44 @@ def _timing_row(number: str, driver: DriverRaceState, state: RaceState) -> Drive
         tyre_age_laps=tyre_age,
         pit_stop_count=len(driver.pit_stops),
         status="FINISHED" if state.status == "finished" else "RUNNING",
+        battle_context=DriverBattleContext(driver_number=driver_number),
     )
+
+
+def _apply_battle_context(rows: list[DriverTimingState], state: RaceState) -> None:
+    by_number = {row.driver_number: row for row in rows}
+    for index, row in enumerate(rows):
+        ahead = rows[index - 1] if index > 0 else None
+        behind = rows[index + 1] if index + 1 < len(rows) else None
+        row.battle_context = DriverBattleContext(
+            driver_number=row.driver_number,
+            ahead_driver_number=ahead.driver_number if ahead else None,
+            ahead_interval_seconds=_float(row.interval),
+            behind_driver_number=behind.driver_number if behind else None,
+            behind_interval_seconds=_float(behind.interval) if behind else None,
+            status="CLEAR_AIR" if row.position is not None else "UNAVAILABLE",
+        )
+    for battle in state.current_battles:
+        leader = by_number.get(battle.lead_driver_number)
+        chaser = by_number.get(battle.chasing_driver_number)
+        if leader is not None:
+            leader.battle_context = leader.battle_context.model_copy(
+                update={
+                    "behind_driver_number": battle.chasing_driver_number,
+                    "behind_interval_seconds": battle.interval_seconds,
+                    "status": "UNDER_PRESSURE",
+                    "battle_id": battle.id,
+                }
+            )
+        if chaser is not None:
+            chaser.battle_context = chaser.battle_context.model_copy(
+                update={
+                    "ahead_driver_number": battle.lead_driver_number,
+                    "ahead_interval_seconds": battle.interval_seconds,
+                    "status": "CLOSING" if battle.trend.value == "CLOSING" else "BATTLING",
+                    "battle_id": battle.id,
+                }
+            )
 
 
 def _abbreviation(driver: DriverRaceState, driver_number: int) -> str:

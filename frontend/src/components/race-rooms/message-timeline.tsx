@@ -67,7 +67,6 @@ export function MessageTimeline({ messages, agents, selectedAgent, totalLaps, se
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [followingLatest, setFollowingLatest] = useState(true);
   const feedRef = useRef<HTMLDivElement>(null);
-  const endRef = useRef<HTMLDivElement>(null);
   const qualifying = sessionType.toUpperCase().includes("QUALIFY") || sessionType.toUpperCase().includes("SHOOTOUT");
   const filters = useMemo(() => ({ agent: selectedAgent, topic, type, lap }), [selectedAgent, topic, type, lap]);
   const filtered = useMemo(() => filterRoomMessages(messages, filters), [filters, messages]);
@@ -86,7 +85,9 @@ export function MessageTimeline({ messages, agents, selectedAgent, totalLaps, se
   }, [lap, selectedAgent, topic, type]);
 
   useEffect(() => {
-    if (followingLatest) endRef.current?.scrollIntoView({ block: "end" });
+    if (followingLatest && feedRef.current) {
+      feedRef.current.scrollTop = feedRef.current.scrollHeight;
+    }
   }, [followingLatest, visible.length]);
 
   const onFeedScroll = () => {
@@ -97,7 +98,7 @@ export function MessageTimeline({ messages, agents, selectedAgent, totalLaps, se
 
   const jumpToLatest = () => {
     setFollowingLatest(true);
-    endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+    if (feedRef.current) feedRef.current.scrollTop = feedRef.current.scrollHeight;
   };
 
   const jumpToSequence = (sequence: number) => {
@@ -137,7 +138,6 @@ export function MessageTimeline({ messages, agents, selectedAgent, totalLaps, se
         </article>;
       })}
       {!visible.length && <div className="room-state room-state--quiet"><span aria-hidden>◌</span><b>{messages.length ? "No messages match these filters." : "The room is waiting for lights out."}</b><p>{messages.length ? "Clear a filter to return to the conversation." : "Start the replay and the five agents will respond to meaningful race events."}</p>{filtersActive && <button className="control-button" type="button" onClick={clear}>Clear filters</button>}</div>}
-      <div ref={endRef} />
     </div>
     <ConversationTimeline messages={filtered} totalLaps={totalLaps} sessionType={sessionType} onSelect={jumpToSequence} />
   </section>;

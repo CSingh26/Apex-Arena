@@ -9,6 +9,7 @@ from pydantic import BaseModel
 
 from app.domain.models import NormalizedRaceEvent, RaceEventType
 from app.domain.rooms import MessageTopic
+from app.services.agent_grounding import AgentEligibility
 from app.services.session_semantics import is_qualifying_session
 
 
@@ -58,6 +59,36 @@ TRIGGER_RULES: dict[RaceEventType, tuple[MessageTopic, TriggerPriority, list[str
         MessageTopic.RACECRAFT,
         TriggerPriority.HIGH,
         ["lena-cross", "theo-voss"],
+    ),
+    RaceEventType.BATTLE_STARTED: (
+        MessageTopic.RACECRAFT,
+        TriggerPriority.MEDIUM,
+        ["lena-cross", "theo-voss"],
+    ),
+    RaceEventType.BATTLE_INTENSIFIED: (
+        MessageTopic.RACECRAFT,
+        TriggerPriority.HIGH,
+        ["lena-cross", "theo-voss"],
+    ),
+    RaceEventType.DRS_RANGE_ENTERED: (
+        MessageTopic.RACECRAFT,
+        TriggerPriority.HIGH,
+        ["lena-cross", "mira-vale"],
+    ),
+    RaceEventType.QUALIFYING_CUTOFF_CHANGE: (
+        MessageTopic.PACE,
+        TriggerPriority.HIGH,
+        ["theo-voss", "lena-cross"],
+    ),
+    RaceEventType.ELIMINATION_RISK: (
+        MessageTopic.PACE,
+        TriggerPriority.MEDIUM,
+        ["theo-voss", "nova"],
+    ),
+    RaceEventType.PROVISIONAL_POLE: (
+        MessageTopic.PACE,
+        TriggerPriority.HIGH,
+        ["theo-voss", "lena-cross"],
     ),
     RaceEventType.PIT_STOP: (
         MessageTopic.PIT_STOP,
@@ -142,11 +173,13 @@ class DiscussionTriggerEvaluator:
         agent_cooldown_seconds: int = 10,
         room_max_triggers_per_minute: int = 12,
         dedup_capacity: int = 5000,
+        eligibility: AgentEligibility | None = None,
     ) -> None:
         self.topic_cooldown_seconds = topic_cooldown_seconds
         self.agent_cooldown_seconds = agent_cooldown_seconds
         self.room_max_triggers_per_minute = room_max_triggers_per_minute
         self.dedup_capacity = dedup_capacity
+        self.eligibility = eligibility or AgentEligibility()
         self._seen: set[tuple[str, str]] = set()
         self._seen_order: deque[tuple[str, str]] = deque()
         self._topic_last_at: dict[tuple[str, MessageTopic], float] = {}
@@ -154,6 +187,8 @@ class DiscussionTriggerEvaluator:
         self._room_triggers: dict[str, deque[float]] = defaultdict(deque)
 
     def evaluate(self, event: NormalizedRaceEvent) -> DiscussionTrigger | None:
+        if not self.eligibility.evaluate(event):
+            return None
         rule = TRIGGER_RULES.get(event.event_type)
         event_identity = (event.session_key, event.dedup_key)
         if rule is None or event_identity in self._seen or not self._is_meaningful(event):
