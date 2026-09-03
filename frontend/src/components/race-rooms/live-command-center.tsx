@@ -238,18 +238,20 @@ export function LiveCommandCenter({
 
   useEffect(() => {
     if (!sessionKey || playbackSequence == null) return;
-    if (playbackSequence >= lastSequenceRef.current) return;
+    const hasAppliedState = lastSequenceRef.current > 0;
+    const jumpedBackward = playbackSequence < lastSequenceRef.current;
+    const jumpedForward = hasAppliedState && playbackSequence > lastSequenceRef.current + 1;
+    if (!jumpedBackward && !jumpedForward) return;
 
-    // Restarting or seeking backward deliberately moves the replay state to a
-    // lower sequence. Reconnect from the beginning instead of discarding the
-    // valid, lower-numbered state as if it were stale network data.
+    // Replays can jump when a control seeks across the timeline. Reconnect
+    // from a clean cursor so the next state fetch bounds the event feed again.
     lastSequenceRef.current = 0;
     eventPageCursorRef.current = 0;
     setState(null);
-    setEvents(initialIntelligence?.recent_events ?? []);
+    setEvents([]);
     setConnection("reconnecting");
     setStreamEpoch((value) => value + 1);
-  }, [initialIntelligence, playbackSequence, sessionKey]);
+  }, [playbackSequence, sessionKey]);
 
   useEffect(() => {
     if (!sessionKey) return;

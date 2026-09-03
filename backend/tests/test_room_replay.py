@@ -449,6 +449,20 @@ async def test_speed_and_seek_controls_update_durable_playback_and_publish() -> 
 
 
 @pytest.mark.asyncio
+async def test_seek_publishes_rebuilt_session_state_for_paused_viewers() -> None:
+    room = replay_room().model_copy(update={"status": RoomStatus.PAUSED})
+    replay, _, _, _, _, bus = coordinator(
+        room,
+        [replay_event(1, 1), replay_event(2, 2), replay_event(3, 3)],
+    )
+
+    playback = await replay.seek_to_sequence(room, 2)
+
+    assert playback.current_event_sequence == 2
+    assert [state.sequence_number for state in bus.session_states] == [2]
+
+
+@pytest.mark.asyncio
 async def test_running_replay_and_seek_are_serialized_into_one_coherent_state() -> None:
     room = replay_room()
     replay, rooms, _, discussion, race_state, _ = coordinator(

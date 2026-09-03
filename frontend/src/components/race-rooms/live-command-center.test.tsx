@@ -210,6 +210,24 @@ describe("LiveCommandCenter", () => {
     expect(api.sessionStreamUrl).toHaveBeenLastCalledWith("race-1", 0);
   });
 
+  it("refreshes session intelligence after a forward replay seek", async () => {
+    api.getSessionState
+      .mockResolvedValueOnce({ state: state(1, 1, 0) })
+      .mockResolvedValueOnce({ state: state(8, 2, 1.221, 1) });
+    const { rerender } = render(<LiveCommandCenter sessionKey="race-1" circuitName="Circuit" eventName="Grand Prix" playbackSequence={1} sessionClock={null} selectedDriver={null} onSelectDriver={vi.fn()} />);
+
+    await screen.findByRole("button", { name: /George Russell, position 1/i });
+    rerender(<LiveCommandCenter sessionKey="race-1" circuitName="Circuit" eventName="Grand Prix" playbackSequence={8} sessionClock={null} selectedDriver={null} onSelectDriver={vi.fn()} />);
+
+    await waitFor(() => expect(api.getSessionState).toHaveBeenCalledTimes(2));
+    await screen.findByRole("button", { name: /George Russell, position 2/i });
+    expect(api.getSessionEvents).toHaveBeenLastCalledWith(
+      "race-1",
+      { beforeSequenceNumber: 8, limit: 100, minimumImportance: "NORMAL" },
+      expect.anything(),
+    );
+  });
+
   it("switches presentation modes without refetching or recreating the stream", async () => {
     const initial = state(1, 1, 0);
     initial.drivers["63"].telemetry = {

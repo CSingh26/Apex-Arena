@@ -192,6 +192,7 @@ class RoomReplayCoordinator:
         async with self._locks.setdefault(room.id, asyncio.Lock()):
             playback = await self._rebuild_to_sequence(room, sequence)
             room_status = await self._status_after_seek(room, sequence, maximum)
+            await self._publish_session_state(room.session_key)
             return await self._publish(room, playback, room_status)
 
     async def seek_to_lap(self, room: RaceRoom, lap_number: int) -> RoomPlaybackState:
@@ -213,6 +214,7 @@ class RoomReplayCoordinator:
                 target_sequence,
                 maximum,
             )
+            await self._publish_session_state(room.session_key)
             return await self._publish(room, playback, room_status)
 
     async def seek_to_phase(self, room: RaceRoom, phase: str) -> RoomPlaybackState:
@@ -233,6 +235,7 @@ class RoomReplayCoordinator:
         async with self._locks.setdefault(room.id, asyncio.Lock()):
             playback = await self._rebuild_to_sequence(room, target_sequence)
             room_status = await self._status_after_seek(room, target_sequence, maximum)
+            await self._publish_session_state(room.session_key)
             return await self._publish(room, playback, room_status)
 
     async def seek_to_session_time(
@@ -252,6 +255,7 @@ class RoomReplayCoordinator:
         async with self._locks.setdefault(room.id, asyncio.Lock()):
             playback = await self._rebuild_to_sequence(room, target_sequence)
             room_status = await self._status_after_seek(room, target_sequence, maximum)
+            await self._publish_session_state(room.session_key)
             return await self._publish(room, playback, room_status)
 
     async def close(self) -> None:
@@ -466,6 +470,16 @@ class RoomReplayCoordinator:
             logger.error(
                 "Replay session publication failed session=%s error=%s",
                 event.session_key,
+                type(exc).__name__,
+            )
+
+    async def _publish_session_state(self, session_key: str) -> None:
+        try:
+            await self.event_bus.publish_state(await self.race_state.get_state(session_key))
+        except Exception as exc:
+            logger.error(
+                "Replay session state publication failed session=%s error=%s",
+                session_key,
                 type(exc).__name__,
             )
 
