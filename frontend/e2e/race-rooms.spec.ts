@@ -240,12 +240,15 @@ test("turns a race replay into persistent Fan and Analyst intelligence", async (
   const battleCards = page.locator('article[aria-label^="Battle for position"]');
   await expect.poll(() => battleCards.count()).toBeGreaterThan(0);
   expect(await battleCards.count()).toBeLessThanOrEqual(3);
-  await expect(battleCards.first()).toContainText(/closing|stable|falling back/i);
-  const selectedBattleDriver = battleCards.first().getByRole("button").last();
-  await selectedBattleDriver.scrollIntoViewIfNeeded();
-  await expect(selectedBattleDriver).toBeInViewport();
-  await selectedBattleDriver.click();
-  await expect(selectedBattleDriver).toHaveAttribute("aria-pressed", "true");
+  await expect(async () => {
+    const firstBattle = battleCards.first();
+    await expect(firstBattle).toContainText(/closing|stable|falling back/i, { timeout: 1_000 });
+    const selectedBattleDriver = firstBattle.getByRole("button").last();
+    await selectedBattleDriver.scrollIntoViewIfNeeded({ timeout: 1_000 });
+    await expect(selectedBattleDriver).toBeInViewport({ timeout: 1_000 });
+    await selectedBattleDriver.click({ timeout: 1_000 });
+    await expect(selectedBattleDriver).toHaveAttribute("aria-pressed", "true", { timeout: 1_000 });
+  }).toPass({ timeout: 10_000 });
 
   const feed = page.locator("section").filter({
     has: page.getByRole("heading", { name: "Important events" }),
