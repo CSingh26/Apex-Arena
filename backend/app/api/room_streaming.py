@@ -106,6 +106,11 @@ async def race_room_stream(
                     async for frame in catch_up(sequence - 1):
                         yield frame
                 cursor = max(cursor, sequence)
+            elif record["kind"] == "playback_state":
+                message_high_water = int(record["data"].get("current_message_sequence") or 0)
+                if message_high_water > cursor:
+                    async for frame in catch_up(message_high_water):
+                        yield frame
             yield _sse(
                 str(record["kind"]),
                 record["data"],

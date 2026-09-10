@@ -326,6 +326,61 @@ async def test_non_message_redis_frames_do_not_advance_the_message_cursor() -> N
 
 
 @pytest.mark.asyncio
+async def test_playback_state_recovers_durable_messages_through_its_high_water() -> None:
+    room_id = uuid4()
+    message = stream_message(room_id, 1)
+    initial_backlog_read = False
+
+    async def list_messages(
+        _room_id: UUID,
+        *,
+        after_sequence: int,
+        limit: int,
+    ) -> list[RoomMessage]:
+        nonlocal initial_backlog_read
+        if not initial_backlog_read:
+            initial_backlog_read = True
+            return []
+        return ([message] if message.sequence > after_sequence else [])[:limit]
+
+    advanced_playback = RoomPlaybackState(room_id=room_id, current_message_sequence=1)
+    bus = FakeRoomEventBus(
+        [
+            {
+                "stream_id": "5-0",
+                "kind": "playback_state",
+                "sequence_number": 1,
+                "data": advanced_playback.model_dump(mode="json"),
+            },
+            {
+                "stream_id": "6-0",
+                "kind": "room_message",
+                "sequence_number": 1,
+                "data": message.model_dump(mode="json"),
+            },
+        ]
+    )
+    services = stream_services(room_id, event_bus=bus)
+    services.room_repository.list_messages.side_effect = list_messages
+    stream = race_room_stream(ConnectedRequest(), services, room_id, 0)
+    try:
+        await anext(stream)  # connection
+        await anext(stream)  # initial playback
+        recovered_message = await anext(stream)
+        playback_state = await anext(stream)
+        next_frame = await anext(stream)
+
+        assert recovered_message.startswith("id: 1\n")
+        assert event_data(recovered_message)["sequence"] == 1
+        assert "event: playback_state" in playback_state
+        assert "id:" not in playback_state
+        assert event_data(playback_state)["current_message_sequence"] == 1
+        assert next_frame == ": heartbeat\n\n"
+    finally:
+        await stream.aclose()
+
+
+@pytest.mark.asyncio
 async def test_live_room_catch_up_yields_after_one_bounded_page() -> None:
     room_id = uuid4()
     calls: list[int] = []
