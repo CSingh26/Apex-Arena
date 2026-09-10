@@ -132,7 +132,7 @@ class RoomReplayCoordinator:
             if restart:
                 await self.rooms.reset_discussion(room.id)
                 self.discussion.reset_session(room.session_key, str(room.id))
-                await self.race_state.reset_session(room.session_key)
+                await self.race_state.reset_session(room.session_key, is_replay=True)
                 playback = await self.rooms.update_playback(
                     room.id,
                     current_event_sequence=0,
@@ -329,7 +329,7 @@ class RoomReplayCoordinator:
         displayed_lap: int | None = None,
     ) -> RoomPlaybackState:
         assert room.session_key is not None
-        await self.race_state.reset_session(room.session_key)
+        await self.race_state.reset_session(room.session_key, is_replay=True)
         await self._prime_driver_profiles(room.session_key)
         self.discussion.reset_session(room.session_key, str(room.id))
         cursor = 0

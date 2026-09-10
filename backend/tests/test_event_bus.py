@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 
 from app.domain.models import NormalizedRaceEvent, RaceEventType
-from app.services.race_state import RaceStateEngine, SnapshotPersistResult
+from app.services.race_state import RaceState, RaceStateEngine, SnapshotPersistResult
 from app.storage.redis import EventBus, RaceEventRedisPublisher, RedisPublishError
 
 
@@ -31,6 +31,10 @@ class FakeRedis:
 
     async def xread(self, streams: dict[str, str], **_: Any) -> list[object]:
         return []
+
+    async def xrevrange(self, stream: str, *, count: int) -> list[object]:
+        matches = [entry for entry in self.entries if entry[0] == stream]
+        return [("1-1", matches[-1][1])] if matches else []
 
 
 class Snapshots:
@@ -85,3 +89,14 @@ async def test_redis_publish_failure_is_explicit_and_secret_safe() -> None:
         await bus.publish_event(race_event())
 
     assert "private connection details" not in str(error.value)
+
+
+@pytest.mark.asyncio
+async def test_latest_state_returns_the_latest_safe_snapshot() -> None:
+    redis = FakeRedis()
+    bus = EventBus(redis)  # type: ignore[arg-type]
+    state = RaceState(session_key="spa/race", sequence_number=7)
+    await bus.publish_state(state)
+
+    assert await bus.latest_state("spa/race") == state
+    assert await EventBus(FakeRedis()).latest_state("missing") is None  # type: ignore[arg-type]

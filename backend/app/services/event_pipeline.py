@@ -222,8 +222,6 @@ class RaceEventProcessor:
                 await self.raw_events.mark_status(event.raw_event_id, "duplicate")
             return PipelineResult(normalized_duplicates=1)
 
-        if event.raw_event_id:
-            await self.raw_events.mark_status(event.raw_event_id, "normalized")
         await self._notify_consumers(sequenced)
         result = PipelineResult(normalized_inserted=1)
         for consumer in self.consumers:
@@ -232,6 +230,8 @@ class RaceEventProcessor:
                 continue
             for derived in drain(sequenced.session_key):
                 result.add(await self._persist_derived(derived))
+        if event.raw_event_id:
+            await self.raw_events.mark_status(event.raw_event_id, "normalized")
         return result
 
     async def _persist_derived(self, event: NormalizedRaceEvent) -> PipelineResult:

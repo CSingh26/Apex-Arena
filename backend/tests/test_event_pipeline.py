@@ -44,6 +44,26 @@ class RawRepository:
         self.statuses[record_id] = status
 
 
+class FailNormalizedStatusOnceRawRepository(RawRepository):
+    def __init__(self) -> None:
+        super().__init__()
+        self.fail_normalized_status = True
+
+    async def insert(self, event: RawEventCreate) -> RawEventRepositoryResult:
+        result = await super().insert(event)
+        if result.is_new:
+            return result
+        return result.model_copy(
+            update={"needs_normalization": self.statuses.get(result.record_id) is None}
+        )
+
+    async def mark_status(self, record_id: UUID, status: str) -> None:
+        if status == "normalized" and self.fail_normalized_status:
+            self.fail_normalized_status = False
+            raise RuntimeError("raw status unavailable")
+        await super().mark_status(record_id, status)
+
+
 class NormalizedRepository:
     def __init__(self) -> None:
         self.events: dict[str, NormalizedRaceEvent] = {}
@@ -230,6 +250,35 @@ async def test_consumer_outage_does_not_rollback_persisted_event() -> None:
     assert result.normalized_inserted == 1
     assert await normalized.count("spa-race") == 1
     assert len(healthy.events) == 1
+
+
+@pytest.mark.asyncio
+async def test_raw_status_failure_after_normalized_commit_publishes_exactly_once_on_retry() -> None:
+    raw_repository = FailNormalizedStatusOnceRawRepository()
+    normalized = NormalizedRepository()
+    consumer = Consumer()
+    pipeline = RaceEventProcessor(
+        raw_events=RawProviderEventService(raw_repository),
+        normalizer=OpenF1EventNormalizer(),
+        normalized_repository=normalized,
+        deduplicator=EventDeduplicator(),
+        ordering_buffer=EventOrderingBuffer(window_ms=0),
+        sequence_numbers=SequenceNumberService(normalized),
+        consumers=[consumer],
+    )
+    raw = RawEventInput(
+        provider_endpoint="laps",
+        provider_event_id="status-retry",
+        session_key="spa-race",
+        raw_payload={"driver_number": 4, "lap_number": 1},
+    )
+
+    with pytest.raises(RuntimeError, match="raw status unavailable"):
+        await pipeline.ingest(raw)
+    await pipeline.ingest(raw)
+
+    assert await normalized.count("spa-race") == 1
+    assert len(consumer.events) == 1
 
 
 @pytest.mark.asyncio

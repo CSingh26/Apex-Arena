@@ -222,13 +222,15 @@ class FakeRaceState:
     def __init__(self) -> None:
         self.consumed: list[int] = []
         self.resets: list[str] = []
+        self.reset_modes: list[bool] = []
         self.primed_profiles: list[list[int]] = []
 
     async def consume(self, event: NormalizedRaceEvent) -> None:
         self.consumed.append(event.sequence_number)
 
-    async def reset_session(self, session_key: str) -> None:
+    async def reset_session(self, session_key: str, *, is_replay: bool = False) -> None:
         self.resets.append(session_key)
+        self.reset_modes.append(is_replay)
 
     async def prime_driver_profiles(
         self,
@@ -381,6 +383,7 @@ async def test_restart_resets_discussion_state_and_replays_from_sequence_zero() 
     assert rooms.reset_count == 1
     assert discussion.resets == [("belgian-race-session", str(room.id))]
     assert race_state.resets == ["belgian-race-session"]
+    assert race_state.reset_modes == [True]
     assert events.reads[-2:] == [
         ("belgian-race-session", 0, 1),
         ("belgian-race-session", 1, 1),
@@ -445,6 +448,7 @@ async def test_speed_and_seek_controls_update_durable_playback_and_publish() -> 
     ]
     assert race_state.consumed == [3, 3]
     assert race_state.resets == ["belgian-race-session", "belgian-race-session"]
+    assert race_state.reset_modes == [True, True]
     assert len(bus.states) == 3
 
 

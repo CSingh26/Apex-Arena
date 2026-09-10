@@ -259,3 +259,50 @@ async def test_reset_clears_cached_dedup_state_and_persisted_snapshots() -> None
     assert (await engine.get_state("spa-race")).sequence_number == 0
     replayed = await engine.apply(pit)
     assert len(replayed.pit_stop_history) == 1
+
+
+@pytest.mark.asyncio
+async def test_api_state_refreshes_from_shared_live_state_after_initial_read():
+    from app.services.race_state import RaceState
+
+    latest = RaceState(session_key="live", sequence_number=1)
+
+    async def source(key):
+        return latest
+
+    engine = RaceStateEngine(SnapshotRepository(), live_state_reader=source)
+    assert (await engine.get_state("live")).sequence_number == 1
+    latest = latest.model_copy(update={"sequence_number": 8})
+    assert (await engine.get_state("live")).sequence_number == 8
+
+
+@pytest.mark.asyncio
+async def test_delayed_live_lap_update_does_not_rewind_the_live_clock():
+    engine = RaceStateEngine(SnapshotRepository())
+    first = event(RaceEventType.POSITION_SAMPLE, 1, {"position": 1}).model_copy(
+        update={"is_replay": False}
+    )
+    await engine.apply(first)
+    delayed = event(RaceEventType.LAP_COMPLETED, 2, {"lap_duration": 81.046}).model_copy(
+        update={
+            "is_replay": False,
+            "event_time": datetime(2026, 7, 19, 13, tzinfo=UTC),
+        }
+    )
+    state = await engine.apply(delayed)
+    assert state.last_updated_at == first.event_time
+
+
+@pytest.mark.asyncio
+async def test_replay_reset_does_not_reload_final_live_state_from_redis():
+    from app.services.race_state import RaceState
+
+    async def final_live(key):
+        return RaceState(session_key=key, sequence_number=100, status="finished")
+
+    engine = RaceStateEngine(SnapshotRepository(), live_state_reader=final_live)
+    assert (await engine.get_state("live")).sequence_number == 100
+    await engine.reset_session("live", is_replay=True)
+    state = await engine.get_state("live")
+    assert state.sequence_number == 0
+    assert state.is_replay is True

@@ -58,6 +58,13 @@ class EventBus:
     def __init__(self, redis: Redis) -> None:
         self.redis = redis
 
+    async def latest_state(self, session_key: str) -> RaceState | None:
+        records = await self.redis.xrevrange(self.state_stream(session_key), count=1)
+        if not records:
+            return None
+        state = RaceState.model_validate_json(records[0][1]["data"])
+        return state if state.session_key == session_key else None
+
     async def publish_event(self, event: NormalizedRaceEvent) -> str:
         return await self._publish(
             self.event_stream(event.session_key),
