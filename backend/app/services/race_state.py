@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import math
 from collections import defaultdict
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any, Protocol
 from uuid import UUID
@@ -107,9 +109,11 @@ class RaceStateEngine:
         self,
         snapshots: RaceStateSnapshotRepository,
         snapshot_every_n_events: int = 10,
+        live_state_reader: Callable[[str], Awaitable[RaceState | None]] | None = None,
     ) -> None:
         self.snapshots = snapshots
         self.snapshot_every_n_events = max(1, snapshot_every_n_events)
+        self.live_state_reader = live_state_reader
         self._states: dict[str, RaceState] = {}
         self._applied_dedup_keys: dict[str, set[str]] = defaultdict(set)
         self._locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
@@ -129,7 +133,11 @@ class RaceStateEngine:
 
             self._apply_event(state, event)
             state.sequence_number = event.sequence_number
-            state.last_updated_at = event.event_time
+            state.last_updated_at = (
+                event.event_time
+                if event.is_replay or state.last_updated_at is None
+                else max(state.last_updated_at, event.event_time)
+            )
             state.is_replay = event.is_replay
 
             if (
@@ -141,11 +149,28 @@ class RaceStateEngine:
 
     async def get_state(self, session_key: str) -> RaceState:
         async with self._locks[session_key]:
-            return (await self._load_state(session_key)).model_copy(deep=True)
+            current = await self._load_state(session_key)
+            if self.live_state_reader is not None and not current.is_replay:
+                try:
+                    shared = await self.live_state_reader(session_key)
+                except Exception as exc:
+                    logging.getLogger(__name__).warning(
+                        "Shared state unavailable error=%s", type(exc).__name__
+                    )
+                    shared = None
+                if shared is None:
+                    snapshot = await self.snapshots.latest(session_key)
+                    shared = RaceState.model_validate(snapshot.state) if snapshot else None
+                if shared is not None and shared.sequence_number >= current.sequence_number:
+                    current = shared
+                    self._states[session_key] = current
+            return current.model_copy(deep=True)
 
-    async def reset_session(self, session_key: str) -> None:
+    async def reset_session(self, session_key: str, *, is_replay: bool = False) -> None:
         async with self._locks[session_key]:
             self._states.pop(session_key, None)
+            if is_replay:
+                self._states[session_key] = RaceState(session_key=session_key, is_replay=True)
             self._applied_dedup_keys.pop(session_key, None)
             delete_for_session = getattr(self.snapshots, "delete_for_session", None)
             if delete_for_session is not None:

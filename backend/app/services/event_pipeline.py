@@ -86,6 +86,10 @@ class EventDeduplicator:
             self._expires_at[dedup_key] = now + self.ttl_seconds
             return False
 
+    async def forget(self, dedup_key: str) -> None:
+        async with self._lock:
+            self._expires_at.pop(dedup_key, None)
+
 
 class EventOrderingBuffer:
     """Event-time watermark buffer; adapters flush at batch or idle boundaries."""
@@ -166,12 +170,16 @@ class RaceEventProcessor:
 
     async def ingest(self, raw: RawEventInput) -> PipelineResult:
         raw_result = await self.raw_events.persist(raw)
-        if not raw_result.is_new:
+        if not raw_result.is_new and not raw_result.needs_normalization:
             return PipelineResult(raw_duplicates=1)
 
         event = self.normalizer.normalize(raw, raw_result.record_id)
         ready = self.ordering_buffer.add(event)
-        result = PipelineResult(raw_inserted=1, buffered=self.ordering_buffer.pending())
+        result = PipelineResult(
+            raw_inserted=int(raw_result.is_new),
+            raw_duplicates=int(not raw_result.is_new),
+            buffered=self.ordering_buffer.pending(),
+        )
         for ordered_event in ready:
             result.add(await self._persist_ordered(ordered_event))
         result.buffered = self.ordering_buffer.pending()
@@ -204,7 +212,11 @@ class RaceEventProcessor:
 
         sequence_number = await self.sequence_numbers.next(event.session_key)
         sequenced = event.model_copy(update={"sequence_number": sequence_number})
-        persisted = await self.normalized_repository.insert(sequenced)
+        try:
+            persisted = await self.normalized_repository.insert(sequenced)
+        except BaseException:
+            await self.deduplicator.forget(event.dedup_key)
+            raise
         if not persisted.is_new:
             if event.raw_event_id:
                 await self.raw_events.mark_status(event.raw_event_id, "duplicate")

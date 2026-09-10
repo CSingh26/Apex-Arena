@@ -42,6 +42,7 @@ class RawEventCreate(BaseModel):
 class RawEventRepositoryResult(BaseModel):
     record_id: UUID
     is_new: bool
+    needs_normalization: bool = False
 
 
 class RawEventRepository(Protocol):
@@ -55,6 +56,7 @@ class RawEventRepository(Protocol):
 class RawPersistResult(BaseModel):
     record_id: UUID
     is_new: bool
+    needs_normalization: bool = False
     provider_event_id: str
     deterministic_hash: str
     payload_hash: str
@@ -116,7 +118,7 @@ class RawProviderEventService:
             self._counters.inserted += 1
         else:
             self._counters.duplicates += 1
-        logger.info(
+        logger.debug(
             "Raw provider event %s provider=%s endpoint=%s session=%s",
             "inserted" if result.is_new else "duplicate",
             raw.provider,
@@ -126,6 +128,7 @@ class RawProviderEventService:
         return RawPersistResult(
             record_id=result.record_id,
             is_new=result.is_new,
+            needs_normalization=result.needs_normalization,
             provider_event_id=provider_event_id,
             deterministic_hash=deterministic_hash,
             payload_hash=payload_hash,

@@ -148,14 +148,18 @@ class SqlRawEventRepository:
             if inserted_id is not None:
                 return RawEventRepositoryResult(record_id=inserted_id, is_new=True)
 
-            existing_id = (
+            existing_id, processing_status = (
                 await session.execute(
-                    select(RawProviderEventRecord.id).where(
-                        RawProviderEventRecord.deterministic_hash == event.deterministic_hash
-                    )
+                    select(
+                        RawProviderEventRecord.id, RawProviderEventRecord.processing_status
+                    ).where(RawProviderEventRecord.deterministic_hash == event.deterministic_hash)
                 )
-            ).scalar_one()
-            return RawEventRepositoryResult(record_id=existing_id, is_new=False)
+            ).one()
+            return RawEventRepositoryResult(
+                record_id=existing_id,
+                is_new=False,
+                needs_normalization=processing_status == "pending",
+            )
 
     async def count(self, session_key: str | None = None) -> int:
         statement = select(func.count(RawProviderEventRecord.id))
