@@ -99,7 +99,7 @@ def test_combined_reconciliation_takes_lease_without_live_mqtt(settings: Setting
             assert client.get("/health/live").status_code == 200
 
     lease.assert_awaited_once()
-    start.assert_not_awaited()
+    start.assert_awaited_once()
     reconciliation.assert_awaited_once()
 
 
@@ -123,3 +123,24 @@ def test_ingestor_role_owns_live_startup_and_health(settings: Settings) -> None:
     assert response.status_code == 200
     assert response.json()["role"] == "ingestor"
     start.assert_awaited_once()
+
+
+def test_rest_mode_starts_live_worker_without_mqtt_autoconnect(settings: Settings) -> None:
+    configured = settings_with(
+        settings,
+        app_process_role="combined",
+        openf1_ingestion_mode="rest",
+        openf1_live_auto_connect=False,
+    )
+    with (
+        patch(
+            "app.services.container.Database.acquire_ingestor_lease",
+            new_callable=AsyncMock,
+            return_value=True,
+        ) as lease,
+        patch("app.main.AppServices.start_live_services", new_callable=AsyncMock) as start,
+    ):
+        with TestClient(create_app(configured)) as client:
+            assert client.get("/health/live").status_code == 200
+    start.assert_awaited_once()
+    lease.assert_awaited_once()

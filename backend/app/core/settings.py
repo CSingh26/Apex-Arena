@@ -80,6 +80,7 @@ class Settings(BaseSettings):
     openf1_rest_include_high_frequency: bool = False
     openf1_mqtt_connect_timeout_seconds: int = Field(default=10, ge=1, le=120)
     openf1_live_catalog_sync_seconds: int = Field(default=60, ge=15, le=900)
+    openf1_live_poll_seconds: int = Field(default=5, ge=1, le=30)
     recent_session_reconciliation_enabled: bool = False
     recent_session_auto_backfill_enabled: bool = False
     recent_session_reconciliation_lookback_days: int = Field(default=14, ge=1, le=60)
@@ -89,7 +90,7 @@ class Settings(BaseSettings):
     recent_session_auto_backfill_max_concurrent: int = Field(default=1, ge=1, le=3)
     openf1_live_topics: str = (
         "v1/sessions,v1/drivers,v1/position,v1/intervals,v1/laps,v1/pit,"
-        "v1/stints,v1/race_control,v1/weather"
+        "v1/stints,v1/race_control,v1/weather,v1/location,v1/car_data"
     )
 
     jolpica_base_url: str = "https://api.jolpi.ca/ergast/f1"
@@ -396,11 +397,18 @@ class Settings(BaseSettings):
         """Choose the DSN that preserves the process role's connection semantics."""
         needs_session_lease = self.app_process_role == "ingestor" or (
             self.app_process_role in {"combined", "all"}
-            and (self.openf1_live_auto_connect or self.recent_session_reconciliation_enabled)
+            and (self.live_worker_enabled or self.recent_session_reconciliation_enabled)
         )
         if needs_session_lease:
             return self.async_migration_database_url
         return self.async_database_url
+
+    @property
+    def live_worker_enabled(self) -> bool:
+        """REST mode owns live polling even when MQTT auto-connect is off."""
+        return self.live_mode_enabled and (
+            self.openf1_live_auto_connect or self.openf1_ingestion_mode == "rest"
+        )
 
     @property
     def normalized_base_path(self) -> str:
