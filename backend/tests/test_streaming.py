@@ -298,6 +298,140 @@ async def test_stream_recovers_a_persisted_gap_before_a_later_redis_event(
 
 
 @pytest.mark.asyncio
+async def test_replay_state_advance_recovers_skipped_redis_events_without_future_or_duplicates(
+    settings: Settings,
+) -> None:
+    events = [
+        NormalizedRaceEvent(
+            session_key="spa-race",
+            source="openf1_historical",
+            event_time=datetime(2026, 7, 19, 13, tzinfo=UTC),
+            received_at=datetime(2026, 7, 19, 13, tzinfo=UTC),
+            sequence_number=sequence,
+            event_type=RaceEventType.LAP_COMPLETED,
+            dedup_key=f"replay-state-advance-{sequence}",
+            is_replay=True,
+        )
+        for sequence in (2, 3, 4)
+    ]
+
+    async def list_events(
+        _session_key: str,
+        *,
+        after_sequence: int,
+        before_sequence: int | None = None,
+        **_: Any,
+    ) -> list[NormalizedRaceEvent]:
+        return [
+            event
+            for event in events
+            if event.sequence_number > after_sequence
+            and (before_sequence is None or event.sequence_number <= before_sequence)
+        ]
+
+    async def current_state(_: str) -> RaceState:
+        return RaceState(session_key="spa-race", sequence_number=1, is_replay=True)
+
+    advanced_state = RaceState(session_key="spa-race", sequence_number=3, is_replay=True)
+    bus = FakeEventBus(
+        [
+            {
+                "stream": "events:spa-race",
+                "stream_id": "3-0",
+                "kind": "event",
+                "sequence_number": 3,
+                "data": events[1].model_dump(mode="json"),
+            },
+            {
+                "stream": "events:spa-race",
+                "stream_id": "4-0",
+                "kind": "event",
+                "sequence_number": 4,
+                "data": events[2].model_dump(mode="json"),
+            },
+            {
+                "stream": "states:spa-race",
+                "stream_id": "3-0",
+                "kind": "state",
+                "sequence_number": 3,
+                "data": advanced_state.model_dump(mode="json"),
+            },
+        ]
+    )
+    runtime = SimpleNamespace(
+        settings=settings,
+        normalized_event_repository=SimpleNamespace(list_for_session=list_events),
+        race_state=SimpleNamespace(get_state=current_state),
+        event_bus=bus,
+    )
+    stream = session_event_stream(ConnectedRequest(), runtime, "spa-race", 1)  # type: ignore[arg-type]
+
+    initial_state = await anext(stream)
+    recovered_two = await anext(stream)
+    recovered_three = await anext(stream)
+    advanced_state_frame = await anext(stream)
+    next_frame = await anext(stream)
+    await stream.aclose()
+
+    assert "event: state" in initial_state
+    assert recovered_two.startswith("id: 2\n")
+    assert recovered_three.startswith("id: 3\n")
+    assert "event: state" in advanced_state_frame
+    assert '"sequence_number":3' in advanced_state_frame
+    assert next_frame == ": heartbeat\n\n"
+    assert all("id: 4" not in frame for frame in (recovered_two, recovered_three, next_frame))
+
+
+@pytest.mark.asyncio
+async def test_live_catch_up_yields_after_one_bounded_page(settings: Settings) -> None:
+    calls: list[int] = []
+
+    async def list_events(
+        _session_key: str,
+        *,
+        after_sequence: int,
+        limit: int,
+        **_: Any,
+    ) -> list[NormalizedRaceEvent]:
+        calls.append(after_sequence)
+        return [
+            NormalizedRaceEvent(
+                session_key="spa-race",
+                source="openf1",
+                event_time=datetime(2026, 7, 19, 13, tzinfo=UTC),
+                received_at=datetime(2026, 7, 19, 13, tzinfo=UTC),
+                sequence_number=sequence,
+                event_type=RaceEventType.LAP_COMPLETED,
+                dedup_key=f"sustained-live-{sequence}",
+            )
+            for sequence in range(after_sequence + 1, after_sequence + limit + 1)
+        ]
+
+    async def current_state(_: str) -> RaceState:
+        return RaceState(session_key="spa-race", sequence_number=0)
+
+    runtime = SimpleNamespace(
+        settings=settings.model_copy(update={"engine_recent_events_limit": 2}),
+        normalized_event_repository=SimpleNamespace(list_for_session=list_events),
+        race_state=SimpleNamespace(get_state=current_state),
+        event_bus=FakeEventBus(),
+    )
+    stream = session_event_stream(ConnectedRequest(), runtime, "spa-race", 0)  # type: ignore[arg-type]
+
+    initial_state = await anext(stream)
+    recovered_one = await anext(stream)
+    recovered_two = await anext(stream)
+    yielded_frame = await anext(stream)
+    await stream.aclose()
+
+    assert "event: state" in initial_state
+    assert recovered_one.startswith("id: 1\n")
+    assert recovered_two.startswith("id: 2\n")
+    assert yielded_frame == ": heartbeat\n\n"
+    assert calls == [0]
+
+
+@pytest.mark.asyncio
 async def test_session_stream_prefers_numeric_last_event_id_for_reconnect(monkeypatch) -> None:
     recovered_sequences: list[int] = []
 

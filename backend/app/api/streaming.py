@@ -50,22 +50,33 @@ async def _session_event_stream(
         nonlocal cursor
         if bound is not None and cursor >= bound:
             return
+        page_limit = max(1, services.settings.engine_recent_events_limit)
+        remaining_events = None if bound is not None else page_limit
         while not await request.is_disconnected():
+            query_limit = page_limit if remaining_events is None else remaining_events
             missed = await services.normalized_event_repository.list_for_session(
                 session_key,
                 after_sequence=cursor,
-                limit=services.settings.engine_recent_events_limit,
+                limit=query_limit,
                 before_sequence=bound,
             )
             previous = cursor
+            emitted = 0
             for event in missed:
+                if remaining_events is not None and emitted >= remaining_events:
+                    break
                 if event.sequence_number <= cursor or (
                     bound is not None and event.sequence_number > bound
                 ):
                     continue
                 cursor = event.sequence_number
+                emitted += 1
                 yield format_sse("event", event.model_dump(mode="json"), event_id=str(cursor))
-            if cursor == previous or len(missed) < services.settings.engine_recent_events_limit:
+            if remaining_events is not None:
+                remaining_events -= emitted
+                if remaining_events <= 0:
+                    break
+            if cursor == previous or len(missed) < query_limit:
                 break
             if bound is not None and cursor >= bound:
                 break
@@ -135,6 +146,8 @@ async def _session_event_stream(
                 state_cursor = sequence_number
                 if record["data"].get("is_replay"):
                     replay_bound = state_cursor
+                    async for frame in catch_up(replay_bound):
+                        yield frame
                 else:
                     replay_bound = None
             yield format_sse(

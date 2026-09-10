@@ -56,6 +56,8 @@ class RedisPublishError(RuntimeError):
 class EventBus:
     """Redis Streams transport for normalized events, race state, and live status."""
 
+    _MAX_DIAGNOSTIC_SESSIONS = 256
+
     def __init__(self, redis: Redis) -> None:
         self.redis = redis
         self._diagnostics: dict[str, dict[str, Any]] = {}
@@ -221,20 +223,23 @@ class EventBus:
         try:
             result = await self.redis.xadd(stream, values, maxlen=maxlen, approximate=True)
             if kind in {"event", "state"}:
-                if len(self._diagnostics) > 256:
-                    self._diagnostics.pop(next(iter(self._diagnostics)))
-                details = self._diagnostics.setdefault(key, {})
+                details = self._diagnostic_details(key)
                 details[f"last_successful_{kind}_publish_at"] = datetime.now(UTC).isoformat()
                 details["last_error"] = None
             return result
         except Exception as exc:
             if kind in {"event", "state"}:
-                self._diagnostics.setdefault(key, {})["last_error"] = {
+                self._diagnostic_details(key)["last_error"] = {
                     "type": type(exc).__name__,
                     "at": datetime.now(UTC).isoformat(),
                 }
             logger.error("Redis publish failed stream=%s error=%s", stream, type(exc).__name__)
             raise RedisPublishError(f"Redis publish failed ({type(exc).__name__})") from exc
+
+    def _diagnostic_details(self, key: str) -> dict[str, Any]:
+        if key not in self._diagnostics and len(self._diagnostics) >= self._MAX_DIAGNOSTIC_SESSIONS:
+            self._diagnostics.pop(next(iter(self._diagnostics)))
+        return self._diagnostics.setdefault(key, {})
 
     @staticmethod
     def _decode_streams(streams: list[object]) -> list[dict[str, Any]]:

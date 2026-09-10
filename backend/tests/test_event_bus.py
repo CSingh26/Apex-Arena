@@ -121,3 +121,16 @@ async def test_bus_diagnostics_track_publish_health_and_session_clients() -> Non
     with pytest.raises(RedisPublishError):
         await bus.publish_state(RaceState(session_key="spa/race"))
     assert bus.diagnostics("spa/race")["last_error"]["type"] == "ConnectionError"
+
+
+@pytest.mark.asyncio
+async def test_failed_publish_diagnostics_evict_the_oldest_session() -> None:
+    bus = EventBus(FakeRedis(fail=True))  # type: ignore[arg-type]
+
+    for index in range(257):
+        event = race_event().model_copy(update={"session_key": f"session-{index}"})
+        with pytest.raises(RedisPublishError):
+            await bus.publish_event(event)
+
+    assert bus.diagnostics("session-0")["last_error"] is None
+    assert bus.diagnostics("session-256")["last_error"]["type"] == "ConnectionError"
