@@ -220,12 +220,14 @@ class SqlRaceRoomRepository:
                 RaceRoomRecord.scheduled_start <= upper_bound,
                 or_(
                     RaceRoomRecord.status == RoomStatus.COMPLETED.value,
-                    RaceRoomRecord.scheduled_start
-                    + case(
-                        (RaceRoomRecord.session_type == SessionType.RACE.value, timedelta(hours=4)),
-                        else_=timedelta(hours=2),
-                    )
-                    <= upper_bound,
+                    and_(
+                        RaceRoomRecord.session_type == SessionType.RACE.value,
+                        RaceRoomRecord.scheduled_start <= upper_bound - timedelta(hours=4),
+                    ),
+                    and_(
+                        RaceRoomRecord.session_type != SessionType.RACE.value,
+                        RaceRoomRecord.scheduled_start <= upper_bound - timedelta(hours=2),
+                    ),
                 ),
                 or_(
                     RaceRoomRecord.session_key.is_(None),

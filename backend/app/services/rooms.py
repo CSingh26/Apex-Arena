@@ -466,6 +466,7 @@ class RaceRoomService:
                             room_eligible=True,
                             eligibility=RoomEligibilityStatus.ALREADY_EXISTS,
                             data_availability=room.source_availability,
+                            provider_status=self._provider_status(room, None),
                             replay_available=room.replay_available,
                             results_available=room.results_available,
                         )

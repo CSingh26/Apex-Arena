@@ -64,6 +64,26 @@ async def test_live_room_binds_provider_published_after_first_sync():
 
 
 @pytest.mark.asyncio
+async def test_durable_room_fallback_preserves_archived_provider_status():
+    repo = FakeRoomRepository()
+    writer = RaceRoomService(repo, FakeSeason([monza()]), 2026)
+    await writer.sync_meetings([monza()], [provider()], now=START + timedelta(hours=5))
+    slug = "2026-italian-grand-prix-race"
+    repo.rooms[slug] = repo.rooms[slug].model_copy(
+        update={
+            "status": RoomStatus.COMPLETED,
+            "mode": RoomMode.ARCHIVED,
+            "replay_available": True,
+        }
+    )
+
+    reader = RaceRoomService(repo, FakeSeason([]), 2026)
+    events, _ = await reader.grouped_events(now=START + timedelta(days=1))
+
+    assert events[0].sessions[0].provider_status == "ARCHIVED"
+
+
+@pytest.mark.asyncio
 async def test_discovery_error_is_not_cached_forever_or_called_not_published(monkeypatch):
     repo = FakeRoomRepository()
     client = FakeOpenF1([], failure=TimeoutError("private-token"))

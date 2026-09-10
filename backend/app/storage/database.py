@@ -47,6 +47,37 @@ class Database:
             expire_on_commit=False,
         )
         self._ingestor_lease_connection: AsyncConnection | None = None
+        self._ingestion_schema_verified = False
+
+    async def require_ingestion_schema(self) -> None:
+        """Refuse room writes from a newer worker against an older deployment schema."""
+        if self._ingestion_schema_verified:
+            return
+        required = {
+            ("normalized_race_events", "event_origin"),
+            ("normalized_race_events", "primary_driver_number"),
+            ("normalized_race_events", "importance_level"),
+            ("session_location_samples", "sample_time"),
+            ("session_track_geometry", "path"),
+        }
+        async with self.session_factory() as session:
+            available = set(
+                (
+                    await session.execute(
+                        text(
+                            "SELECT table_name, column_name FROM information_schema.columns "
+                            "WHERE table_schema='public' AND table_name IN "
+                            "('normalized_race_events','session_location_samples','session_track_geometry')"
+                        )
+                    )
+                ).all()
+            )
+        if not required <= available:
+            raise RuntimeError(
+                "Database schema is behind this ingestor; "
+                "coordinate application and migration rollout before writes"
+            )
+        self._ingestion_schema_verified = True
 
     @property
     def ingestor_lease_owned(self) -> bool:
