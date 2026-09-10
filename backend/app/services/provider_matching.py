@@ -12,7 +12,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from app.domain.models import RaceMeeting
+from app.domain.models import MeetingLifecycleStatus, RaceMeeting
+from app.domain.rooms import RaceRoom
 from app.services.session_semantics import (
     CompetitiveSessionType,
     normalize_session_type,
@@ -102,7 +103,7 @@ def _date(value: object) -> datetime | None:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
         return None
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+    return (parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)).astimezone(UTC)
 
 
 class OpenF1SessionMatcher:
@@ -115,6 +116,37 @@ class OpenF1SessionMatcher:
 
     minimum_meeting_score = 0.55
     ambiguity_margin = 0.08
+
+    def match_room(self, room: RaceRoom, sessions: list[dict[str, Any]]) -> ProviderSessionMatch:
+        """Resolve a persisted room with the same identity policy as the calendar."""
+        start = room.scheduled_start
+        start = (start if start.tzinfo else start.replace(tzinfo=UTC)).astimezone(UTC)
+        meeting = RaceMeeting(
+            season_year=room.season,
+            round_number=room.round_number or 0,
+            race_name=room.official_name or room.race_name,
+            circuit_id="",
+            circuit_name=room.circuit_name,
+            locality="",
+            country=room.country,
+            race_date=start.date(),
+            race_start=start,
+            status=MeetingLifecycleStatus.UPCOMING,
+        )
+        candidates = [
+            row
+            for row in sessions
+            if normalize_session_type(row.get("session_name") or row.get("session_type"))
+            == room.session_type
+            and str(row.get("year") or room.season) == str(room.season)
+        ]
+        return self.match_session(
+            meeting,
+            candidates,
+            room.session_type,
+            scheduled_start=start,
+            meeting_key=room.meeting_key,
+        )
 
     def match_meeting(
         self,
@@ -217,6 +249,10 @@ class OpenF1SessionMatcher:
             )
 
         expected_start = scheduled_start or self._scheduled_start(meeting, expected_type)
+        if expected_start is not None:
+            expected_start = (
+                expected_start if expected_start.tzinfo else expected_start.replace(tzinfo=UTC)
+            ).astimezone(UTC)
         ranked: list[tuple[float, dict[str, Any]]] = []
         for session in typed:
             start = _date(session.get("date_start"))
