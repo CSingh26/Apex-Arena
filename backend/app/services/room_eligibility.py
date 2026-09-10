@@ -72,6 +72,21 @@ class RoomEligibilityService:
                 reason="This session has not started. Room opens when session data is available.",
             )
 
+        # A live room is a durable waiting surface even before provider publication.
+        # Availability remains separate and never claims telemetry from the calendar.
+        if status == RoomStatus.LIVE.value:
+            return RoomEligibilityResult(
+                status=(
+                    RoomEligibilityStatus.ALREADY_EXISTS
+                    if existing_room is not None
+                    else RoomEligibilityStatus.ELIGIBLE_LIVE
+                ),
+                can_create=existing_room is None,
+                can_open=True,
+                can_replay=False,
+                reason="The live room is available; provider ingestion retries independently.",
+            )
+
         if existing_room is not None:
             if (
                 existing_room.status in {RoomStatus.PENDING, RoomStatus.INGESTING}
@@ -97,20 +112,6 @@ class RoomEligibilityService:
                 can_replay=replay_ready,
                 reason="A room already exists for this session.",
             )
-
-        if status in {RoomStatus.LIVE.value, "live"}:
-            if (
-                provider_session_available
-                or data_availability is not SourceAvailability.UNAVAILABLE
-            ):
-                return RoomEligibilityResult(
-                    status=RoomEligibilityStatus.ELIGIBLE_LIVE,
-                    can_create=True,
-                    can_open=True,
-                    can_replay=False,
-                    reason="The session is live and provider data is available.",
-                )
-            return self._provider_pending()
 
         if status in {RoomStatus.COMPLETED.value, RoomStatus.READY.value, "completed", "finished"}:
             if (
