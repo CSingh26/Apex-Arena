@@ -264,3 +264,100 @@ def test_room_sse_payload_is_compact_parseable_and_optionally_identified() -> No
     assert chunk.startswith("id: 14\nevent: room_status\n")
     assert chunk.endswith("\n\n")
     assert event_data(chunk) == {"status": "replaying"}
+
+
+@pytest.mark.asyncio
+async def test_room_backlog_pages_the_complete_reconnect_history() -> None:
+    room_id = uuid4()
+    messages = [stream_message(room_id, n) for n in range(1, 5)]
+    services = stream_services(room_id)
+    services.settings.room_stream_backlog_limit = 2
+    services.room_repository.list_messages.side_effect = lambda _room, after_sequence, limit: [
+        item for item in messages if item.sequence > after_sequence
+    ][:limit]
+    stream = race_room_stream(ConnectedRequest(), services, room_id, 0)
+    try:
+        await anext(stream)
+        frames = [await anext(stream) for _ in range(4)]
+        assert [event_data(frame)["sequence"] for frame in frames] == [1, 2, 3, 4]
+        assert "id:" not in await anext(stream)
+    finally:
+        await stream.aclose()
+
+
+@pytest.mark.asyncio
+async def test_non_message_redis_frames_do_not_advance_the_message_cursor() -> None:
+    room_id = uuid4()
+    message = stream_message(room_id, 1)
+    bus = FakeRoomEventBus(
+        [
+            {
+                "stream_id": "5-0",
+                "kind": "room_status",
+                "sequence_number": 99,
+                "data": {"status": "replaying"},
+            },
+            {
+                "stream_id": "6-0",
+                "kind": "room_message",
+                "sequence_number": 1,
+                "data": message.model_dump(mode="json"),
+            },
+        ]
+    )
+    stream = race_room_stream(
+        ConnectedRequest(),
+        stream_services(room_id, event_bus=bus),
+        room_id,
+        0,
+    )
+    try:
+        await anext(stream)  # connection
+        await anext(stream)  # playback
+        room_status = await anext(stream)
+        room_message = await anext(stream)
+
+        assert "event: room_status" in room_status
+        assert "id:" not in room_status
+        assert room_message.startswith("id: 1\n")
+        assert event_data(room_message)["sequence"] == 1
+    finally:
+        await stream.aclose()
+
+
+@pytest.mark.asyncio
+async def test_live_room_catch_up_yields_after_one_bounded_page() -> None:
+    room_id = uuid4()
+    calls: list[int] = []
+    services = stream_services(room_id)
+    services.settings.room_stream_backlog_limit = 2
+
+    async def list_messages(
+        _room_id: UUID,
+        *,
+        after_sequence: int,
+        limit: int,
+    ) -> list[RoomMessage]:
+        calls.append(after_sequence)
+        if len(calls) == 1:
+            return []
+        return [
+            stream_message(room_id, sequence)
+            for sequence in range(after_sequence + 1, after_sequence + limit + 1)
+        ]
+
+    services.room_repository.list_messages.side_effect = list_messages
+    stream = race_room_stream(ConnectedRequest(), services, room_id, 0)
+    try:
+        await anext(stream)  # connection
+        await anext(stream)  # playback
+        recovered_one = await anext(stream)
+        recovered_two = await anext(stream)
+        yielded_frame = await anext(stream)
+
+        assert recovered_one.startswith("id: 1\n")
+        assert recovered_two.startswith("id: 2\n")
+        assert yielded_frame == ": heartbeat\n\n"
+        assert calls == [0, 0]
+    finally:
+        await stream.aclose()

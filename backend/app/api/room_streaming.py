@@ -22,20 +22,43 @@ async def race_room_stream(
     session_key: str | None = None,
 ) -> AsyncIterator[str]:
     cursor = after_sequence
+
+    async def catch_up(bound: int | None = None, *, max_messages: int | None = None):
+        nonlocal cursor
+        page_limit = max(1, services.settings.room_stream_backlog_limit)
+        remaining_messages = max_messages
+        while not await request.is_disconnected():
+            query_limit = (
+                page_limit if remaining_messages is None else min(page_limit, remaining_messages)
+            )
+            messages = await services.room_repository.list_messages(
+                room_id, after_sequence=cursor, limit=query_limit
+            )
+            previous = cursor
+            emitted = 0
+            for message in messages:
+                if message.sequence <= cursor or (bound is not None and message.sequence > bound):
+                    continue
+                cursor = message.sequence
+                emitted += 1
+                yield _sse("room_message", message.model_dump(mode="json"), str(cursor))
+            if remaining_messages is not None:
+                remaining_messages -= emitted
+                if remaining_messages <= 0:
+                    break
+            if cursor == previous or len(messages) < query_limit:
+                break
+            if bound is not None and cursor >= bound:
+                break
+
     try:
         redis_id = await services.event_bus.latest_room_stream_id(str(room_id))
     except Exception as exc:
         logger.error("Race room stream cursor unavailable error=%s", type(exc).__name__)
         redis_id = "$"
     yield _sse("connection_status", {"status": "connected"})
-    messages = await services.room_repository.list_messages(
-        room_id,
-        after_sequence=cursor,
-        limit=services.settings.room_stream_backlog_limit,
-    )
-    for message in messages:
-        cursor = max(cursor, message.sequence)
-        yield _sse("room_message", message.model_dump(mode="json"), str(message.sequence))
+    async for frame in catch_up():
+        yield frame
 
     # Enrich exactly as the replay coordinator does: this first frame otherwise
     # overwrites the clock the detail request already supplied, and the map
@@ -59,21 +82,34 @@ async def race_room_stream(
         except Exception as exc:
             logger.error("Race room stream degraded error=%s", type(exc).__name__)
             yield _sse("connection_status", {"status": "degraded"})
+            async for frame in catch_up(
+                max_messages=max(1, services.settings.room_stream_backlog_limit)
+            ):
+                yield frame
             await asyncio.sleep(1)
             continue
         if not records:
+            async for frame in catch_up(
+                max_messages=max(1, services.settings.room_stream_backlog_limit)
+            ):
+                yield frame
             yield ": heartbeat\n\n"
             continue
         for record in records:
             redis_id = str(record["stream_id"])
             sequence = int(record.get("sequence_number") or 0)
-            if record["kind"] == "room_message" and sequence <= cursor:
-                continue
-            cursor = max(cursor, sequence)
+            is_message = record["kind"] == "room_message"
+            if is_message:
+                if sequence <= cursor:
+                    continue
+                if sequence > cursor + 1:
+                    async for frame in catch_up(sequence - 1):
+                        yield frame
+                cursor = max(cursor, sequence)
             yield _sse(
                 str(record["kind"]),
                 record["data"],
-                str(sequence) if sequence else None,
+                str(sequence) if is_message and sequence else None,
             )
 
 
