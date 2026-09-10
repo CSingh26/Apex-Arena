@@ -261,26 +261,18 @@ async def health_ready(services: Services) -> JSONResponse:
 @router.get("/health/providers", response_model=None, include_in_schema=False)
 async def health_provider(services: Services) -> JSONResponse:
     """Report the latest OpenF1 ingestion state without exposing credentials or tokens."""
-    provider: dict[str, object] | None
-    source = "local_process"
-    if services.settings.app_process_role == "api":
-        source = "redis_status_stream"
-        try:
-            provider = await services.event_bus.latest_connection_status()
-        except Exception:
-            provider = None
-    else:
-        provider = services.openf1_live.status()
-
-    live_disabled = (
-        not services.settings.live_mode_enabled
-        or services.settings.openf1_ingestion_mode == "rest"
-        or not services.settings.openf1_live_auto_connect
+    source = (
+        "redis_status_stream"
+        if services.settings.app_process_role == "api"
+        else "local_process"
     )
+    provider = await services.provider_status()
+
+    live_disabled = not services.settings.live_worker_enabled
     state = str((provider or {}).get("connection_state") or "unknown").upper()
     if live_disabled and state in {"UNKNOWN", "DISCONNECTED"}:
         state = "DISABLED"
-    healthy = live_disabled or state in {"CONNECTED", "DISABLED"}
+    healthy = live_disabled or state in {"CONNECTED", "DISABLED", "LIVE", "SESSION_COMPLETE"}
     return JSONResponse(
         status_code=status.HTTP_200_OK if healthy else status.HTTP_503_SERVICE_UNAVAILABLE,
         content={
@@ -379,7 +371,7 @@ async def openf1_backfill_status(
 
 @router.get("/api/v1/live/status", response_model=LiveStatusResponse)
 async def live_status(services: Services) -> LiveStatusResponse:
-    return LiveStatusResponse(**services.openf1_live.status())
+    return LiveStatusResponse(**await services.provider_status())
 
 
 @router.get(
@@ -426,8 +418,9 @@ async def championship_summary(services: Services) -> ChampionshipSummaryRespons
 
 @router.get("/api/v1/engine/status", response_model=EngineStatusResponse)
 async def engine_status(services: Services) -> EngineStatusResponse:
+    provider_status = await services.provider_status()
     current_session_key = (
-        services.openf1_live.current_session_key
+        provider_status.get("current_session_key")
         or await services.normalized_event_repository.latest_session_key()
     )
     (
@@ -452,7 +445,7 @@ async def engine_status(services: Services) -> EngineStatusResponse:
     )
     database_ok, database_detail = database_result
     redis_ok, redis_detail = redis_result
-    live = LiveStatusResponse(**services.openf1_live.status())
+    live = LiveStatusResponse(**provider_status)
     return EngineStatusResponse(
         status="ready" if database_ok and redis_ok else "degraded",
         generated_at=datetime.now(UTC),

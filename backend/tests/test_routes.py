@@ -4,6 +4,7 @@ from __future__ import annotations
 from datetime import UTC, date, datetime
 from unittest.mock import AsyncMock
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.core.settings import Settings
@@ -62,6 +63,30 @@ def test_health_probes_separate_liveness_readiness_and_provider(settings: Settin
     assert provider_response.status_code == 200
     assert provider_response.json()["connection_state"] == "CONNECTED"
     assert "credentials" not in provider_response.text.lower()
+
+
+@pytest.mark.parametrize("connection_state", ["STALE", "PROVIDER_UNAVAILABLE"])
+def test_provider_health_rejects_unhealthy_rest_worker(
+    settings: Settings,
+    connection_state: str,
+) -> None:
+    configured = settings.model_copy(
+        update={"openf1_ingestion_mode": "rest", "openf1_live_auto_connect": False}
+    )
+    app = create_app(configured)
+    with TestClient(app) as client:
+        app.state.services.event_bus.latest_connection_status = AsyncMock(
+            return_value={
+                "connection_state": connection_state,
+                "current_session_key": "901",
+                "checked_at": datetime.now(UTC).isoformat(),
+            }
+        )
+        response = client.get("/health/provider")
+
+    assert response.status_code == 503
+    assert response.json()["status"] == "degraded"
+    assert response.json()["connection_state"] == connection_state
 
 
 def test_season_endpoint_returns_target_summary(settings: Settings) -> None:
@@ -465,3 +490,66 @@ def test_track_endpoint_reports_a_session_without_geometry(settings: Settings) -
     assert track["available"] is False
     assert track["bounds"] is None
     assert track["path"] == []
+
+
+def test_live_status_reports_shared_rest_worker_in_api_process(settings: Settings) -> None:
+    configured = settings.model_copy(
+        update={"openf1_ingestion_mode": "rest", "openf1_live_auto_connect": False}
+    )
+    app = create_app(configured)
+    with TestClient(app) as client:
+        app.state.services.event_bus.latest_connection_status = AsyncMock(
+            return_value={
+                "connection_state": "LIVE",
+                "current_session_key": "901",
+                "last_event_at": datetime.now(UTC).isoformat(),
+                "transport": "rest",
+                "provider_session_resolved": True,
+            }
+        )
+        response = client.get("/api/v1/live/status")
+    assert response.status_code == 200
+    assert response.json()["connection_state"] == "LIVE"
+    assert response.json()["current_session_key"] == "901"
+
+
+def test_engine_status_uses_shared_rest_worker_session(settings: Settings) -> None:
+    configured = settings.model_copy(
+        update={"openf1_ingestion_mode": "rest", "openf1_live_auto_connect": False}
+    )
+    app = create_app(configured)
+    with TestClient(app) as client:
+        services = app.state.services
+        services.event_bus.latest_connection_status = AsyncMock(
+            return_value={
+                "connection_state": "LIVE",
+                "current_session_key": "rest-session",
+                "last_event_at": datetime.now(UTC).isoformat(),
+                "transport": "rest",
+            }
+        )
+        services.database.health_check = AsyncMock(return_value=(True, "connected"))
+        services.redis.health_check = AsyncMock(return_value=(True, "connected"))
+        services.normalized_event_repository.latest_session_key = AsyncMock(
+            return_value="database-session"
+        )
+        services.raw_event_repository.count = AsyncMock(
+            side_effect=lambda key: 12 if key == "rest-session" else 0
+        )
+        services.normalized_event_repository.count = AsyncMock(
+            side_effect=lambda key: 10 if key == "rest-session" else 0
+        )
+        services.snapshot_repository.count = AsyncMock(
+            side_effect=lambda key: 2 if key == "rest-session" else 0
+        )
+        services.normalized_event_repository.max_sequence = AsyncMock(
+            side_effect=lambda key: 10 if key == "rest-session" else 0
+        )
+        services.ingestion_runs.latest = AsyncMock(return_value=None)
+
+        response = client.get("/api/v1/engine/status")
+
+    assert response.status_code == 200
+    assert response.json()["current_session_key"] == "rest-session"
+    assert response.json()["raw_event_count"] == 12
+    assert response.json()["live"]["connection_state"] == "LIVE"
