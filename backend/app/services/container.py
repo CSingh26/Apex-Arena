@@ -114,9 +114,6 @@ class AppServices:
         self.race_state = RaceStateEngine(
             self.snapshot_repository,
             settings.race_state_snapshot_every_n_events,
-            live_state_reader=self.event_bus.latest_state
-            if settings.app_process_role == "api"
-            else None,
         )
         intelligence_config = RaceIntelligenceConfig(
             overtake_confirmation_seconds=settings.overtake_confirmation_seconds,
