@@ -271,6 +271,7 @@ class SessionRoomSummary(BaseModel):
     room_eligible: bool = False
     eligibility: RoomEligibilityStatus
     data_availability: SourceAvailability = SourceAvailability.UNAVAILABLE
+    provider_status: str = "NOT_REQUESTED"
     replay_available: bool = False
     results_available: bool = False
 

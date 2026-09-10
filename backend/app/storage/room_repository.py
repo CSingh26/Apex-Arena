@@ -34,12 +34,25 @@ from app.storage.models import (
     RoomPlaybackStateRecord,
 )
 
+# The manual batch backfill repairs every completed weekend session, practice included,
+# so operators and bounded recent-session recovery can repair every weekend session.
+COMPLETED_BACKFILL_SESSION_TYPES: tuple[SessionType, ...] = (
+    SessionType.PRACTICE_1,
+    SessionType.PRACTICE_2,
+    SessionType.PRACTICE_3,
+    SessionType.SPRINT_QUALIFYING,
+    SessionType.SPRINT,
+    SessionType.QUALIFYING,
+    SessionType.RACE,
+)
+
 
 class SqlRaceRoomRepository:
     def __init__(self, database: Database) -> None:
         self.database = database
 
     async def seed_agents(self, agents: list[AgentProfile]) -> None:
+        await self.database.require_ingestion_schema()
         async with self.database.session_factory() as session:
             for agent in agents:
                 values = agent.model_dump()
@@ -52,6 +65,7 @@ class SqlRaceRoomRepository:
             await session.commit()
 
     async def upsert_room(self, room: RaceRoom, agent_ids: list[str]) -> RaceRoom:
+        await self.database.require_ingestion_schema()
         values = room.model_dump(exclude={"created_at", "updated_at"})
         values["event_slug"] = room.event_slug or room.slug.rsplit("-", 1)[0]
         values["session_type"] = room.session_type.value
@@ -192,7 +206,7 @@ class SqlRaceRoomRepository:
         grace_minutes: int,
         limit: int,
     ) -> list[RaceRoom]:
-        """Find completed competitive rooms that may improve after provider delay."""
+        """Find completed weekend rooms, including practice, after provider grace."""
 
         lower_bound = now - timedelta(days=lookback_days)
         upper_bound = now - timedelta(minutes=grace_minutes)
@@ -200,15 +214,19 @@ class SqlRaceRoomRepository:
             select(RaceRoomRecord)
             .where(
                 RaceRoomRecord.session_type.in_(
-                    [
-                        SessionType.QUALIFYING.value,
-                        SessionType.SPRINT_QUALIFYING.value,
-                        SessionType.SPRINT.value,
-                        SessionType.RACE.value,
-                    ]
+                    [item.value for item in COMPLETED_BACKFILL_SESSION_TYPES]
                 ),
                 RaceRoomRecord.scheduled_start >= lower_bound,
                 RaceRoomRecord.scheduled_start <= upper_bound,
+                or_(
+                    RaceRoomRecord.status == RoomStatus.COMPLETED.value,
+                    RaceRoomRecord.scheduled_start
+                    + case(
+                        (RaceRoomRecord.session_type == SessionType.RACE.value, timedelta(hours=4)),
+                        else_=timedelta(hours=2),
+                    )
+                    <= upper_bound,
+                ),
                 or_(
                     RaceRoomRecord.session_key.is_(None),
                     RaceRoomRecord.replay_available.is_(False),
@@ -326,7 +344,7 @@ class SqlRaceRoomRepository:
         room_slug: str | None = None,
         limit: int | None = None,
     ) -> list[RaceRoom]:
-        """Find completed competitive rooms that still need provider backfill repair."""
+        """Find completed rooms of any session type that still need provider backfill repair."""
 
         event_counts = (
             select(
@@ -339,12 +357,7 @@ class SqlRaceRoomRepository:
         filters = [
             RaceRoomRecord.season == season,
             RaceRoomRecord.session_type.in_(
-                [
-                    SessionType.QUALIFYING.value,
-                    SessionType.SPRINT_QUALIFYING.value,
-                    SessionType.SPRINT.value,
-                    SessionType.RACE.value,
-                ]
+                [session_type.value for session_type in COMPLETED_BACKFILL_SESSION_TYPES]
             ),
             RaceRoomRecord.scheduled_start <= datetime.now(UTC),
             or_(
@@ -407,12 +420,7 @@ class SqlRaceRoomRepository:
         filters = [
             RaceRoomRecord.season == season,
             RaceRoomRecord.session_type.in_(
-                [
-                    SessionType.QUALIFYING.value,
-                    SessionType.SPRINT_QUALIFYING.value,
-                    SessionType.SPRINT.value,
-                    SessionType.RACE.value,
-                ]
+                [session_type.value for session_type in COMPLETED_BACKFILL_SESSION_TYPES]
             ),
             RaceRoomRecord.scheduled_start <= datetime.now(UTC),
         ]
@@ -476,6 +484,7 @@ class SqlRaceRoomRepository:
         self, slug: str, *, meeting_key: str | None, session_key: str
     ) -> RaceRoom:
         """Persist only a confidently resolved provider identity."""
+        await self.database.require_ingestion_schema()
         async with self.database.session_factory() as session:
             conflict = (
                 await session.execute(

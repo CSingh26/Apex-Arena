@@ -68,13 +68,18 @@ class RaceRoomService:
         self._sync_lock = asyncio.Lock()
         self._meetings: list[RaceMeeting] = []
         self._provider_sessions: list[dict[str, Any]] = []
+        self._catalog_expires_at = 0.0
+        self.provider_error: str | None = None
+        self.provider_checked = False
 
     async def ensure_catalog(self) -> None:
         """Read provider metadata without creating rooms as a GET side effect."""
-        if self._catalog_ready or time.monotonic() < self._retry_after:
+        if (
+            self._catalog_ready and time.monotonic() < self._catalog_expires_at
+        ) or time.monotonic() < self._retry_after:
             return
         async with self._sync_lock:
-            if self._catalog_ready:
+            if self._catalog_ready and time.monotonic() < self._catalog_expires_at:
                 return
             try:
                 self._meetings = await self.season.calendar(self.season_year)
@@ -84,6 +89,7 @@ class RaceRoomService:
                 return
             self._provider_sessions = await self._historical_sessions()
             self._catalog_ready = True
+            self._catalog_expires_at = time.monotonic() + 60
 
     def invalidate_catalog(self) -> None:
         """Force the next public catalog read to observe fresh provider metadata."""
@@ -103,17 +109,39 @@ class RaceRoomService:
         self._provider_sessions = sessions or []
         await self._synchronize(meetings, self._provider_sessions, now=now)
         self._catalog_ready = True
+        self._catalog_expires_at = time.monotonic() + 60
 
-    async def force_sync(self) -> int:
+    async def force_sync(
+        self,
+        *,
+        now: datetime | None = None,
+        fresh_provider: bool = False,
+        live_window_only: bool = False,
+        lookback_days: int = 7,
+    ) -> int:
         """Internal authenticated lifecycle operation; safe to retry."""
         async with self._sync_lock:
             count = 0
             meetings = await self.season.calendar(self.season_year)
-            sessions = await self._historical_sessions()
+            sessions = await self._historical_sessions(fresh=fresh_provider)
             self._meetings = meetings
             self._provider_sessions = sessions
-            count += await self._synchronize(meetings, sessions)
+            selected = meetings
+            if live_window_only:
+                observed = now or datetime.now(UTC)
+                observed = (
+                    observed if observed.tzinfo else observed.replace(tzinfo=UTC)
+                ).astimezone(UTC)
+                selected = [
+                    meeting
+                    for meeting in meetings
+                    if observed.date() - timedelta(days=lookback_days)
+                    <= meeting.race_date
+                    <= observed.date() + timedelta(days=1)
+                ]
+            count += await self._synchronize(selected, sessions, now=now)
             self._catalog_ready = True
+            self._catalog_expires_at = time.monotonic() + 60
             self._retry_after = 0.0
             return count
 
@@ -258,7 +286,16 @@ class RaceRoomService:
                 )
                 # Future calendar entries remain read-only metadata. A stale future
                 # row is not refreshed or treated as navigable.
-                if not decision.can_create and not decision.can_open:
+                if (
+                    not decision.can_create
+                    and not decision.can_open
+                    and not (
+                        existing is not None
+                        and provider_session is not None
+                        and existing.session_key != str(provider_session.get("session_key"))
+                        and public_status is not PublicSessionStatus.UPCOMING
+                    )
+                ):
                     continue
                 room = self._from_session(
                     meeting=meeting,
@@ -270,6 +307,7 @@ class RaceRoomService:
                     eligibility=(
                         RoomEligibilityStatus.PROVIDER_PENDING
                         if availability is SourceAvailability.UNAVAILABLE
+                        and public_status is not PublicSessionStatus.LIVE
                         else decision.status
                     ),
                     weekend_start=weekend_start,
@@ -343,6 +381,7 @@ class RaceRoomService:
                     data_availability=(
                         existing.source_availability if existing is not None else availability
                     ),
+                    provider_status=self._provider_status(existing, provider_session),
                     replay_available=replay_available and decision.can_replay,
                     results_available=results_available,
                 )
@@ -470,7 +509,7 @@ class RaceRoomService:
     ) -> UUID:
         """Stable Apex identity; provider IDs remain explicit metadata, not identity."""
 
-        timestamp = scheduled_start.astimezone(UTC).isoformat()
+        timestamp = RaceRoomService._aware(scheduled_start).astimezone(UTC).isoformat()
         return uuid5(
             NAMESPACE_URL,
             f"apex-arena:session:{meeting.season_year}:{meeting.round_number}:{session_type}:{timestamp}",
@@ -478,7 +517,7 @@ class RaceRoomService:
 
     @staticmethod
     def _session_id_from_room(room: RaceRoom) -> UUID:
-        timestamp = room.scheduled_start.astimezone(UTC).isoformat()
+        timestamp = RaceRoomService._aware(room.scheduled_start).astimezone(UTC).isoformat()
         return uuid5(
             NAMESPACE_URL,
             f"apex-arena:session:{room.season}:{room.round_number}:{room.session_type}:{timestamp}",
@@ -606,14 +645,14 @@ class RaceRoomService:
             is_sprint_weekend=is_sprint_weekend,
             status=(
                 RoomStatus.LIVE
-                if live and availability is not SourceAvailability.UNAVAILABLE
+                if live
                 else RoomStatus.READY
                 if completed and availability is not SourceAvailability.UNAVAILABLE
                 else RoomStatus.PENDING
             ),
             mode=(
                 RoomMode.LIVE
-                if live and availability is not SourceAvailability.UNAVAILABLE
+                if live
                 else RoomMode.ARCHIVED
                 if completed and availability is not SourceAvailability.UNAVAILABLE
                 else RoomMode.REPLAY
@@ -630,14 +669,43 @@ class RaceRoomService:
             is_featured=meeting.is_target and session_type is SessionType.RACE,
         )
 
-    async def _historical_sessions(self) -> list[dict[str, Any]]:
+    async def _historical_sessions(self, *, fresh: bool = False) -> list[dict[str, Any]]:
         if self.openf1 is None:
             return []
         try:
-            return await self.openf1.sessions(year=self.season_year)
+            rows = (
+                await self.openf1.live_get("sessions", year=self.season_year)
+                if fresh
+                else await self.openf1.sessions(year=self.season_year)
+            )
+            self.provider_error = None
+            self.provider_checked = True
+            return rows
         except Exception as exc:
+            self.provider_error = type(exc).__name__
+            self.provider_checked = True
             logger.warning("OpenF1 session discovery unavailable error=%s", type(exc).__name__)
-            return []
+            return self._provider_sessions
+
+    def _provider_status(self, room: RaceRoom | None, provider: dict[str, Any] | None) -> str:
+        if room is not None:
+            if room.replay_available and room.status is not RoomStatus.LIVE:
+                return "ARCHIVED"
+            if room.source_availability is not SourceAvailability.UNAVAILABLE:
+                return (
+                    "AVAILABLE"
+                    if room.source_availability is SourceAvailability.TELEMETRY
+                    else "PARTIAL"
+                )
+            if room.ingestion_status is IngestionStatus.FAILED:
+                return "FETCH_FAILED"
+            if room.ingestion_status in {IngestionStatus.FETCHING, IngestionStatus.NORMALIZING}:
+                return "FETCHING"
+        if self.provider_error:
+            return "PROVIDER_UNAVAILABLE"
+        if provider is not None or (room is not None and room.session_key):
+            return "NOT_REQUESTED"
+        return "NOT_YET_PUBLISHED" if self.provider_checked else "NOT_REQUESTED"
 
     def _match_session(
         self,
@@ -699,7 +767,12 @@ class RaceRoomService:
         start = self._session_start(provider_session) or self._aware(scheduled_start)
         provider_end = self._session_end(provider_session)
         end = provider_end or start + SESSION_DURATION[session_type]
-        if meeting.status is MeetingLifecycleStatus.COMPLETED or now >= end:
+        provider_finished = str((provider_session or {}).get("status") or "").casefold() in {
+            "finished",
+            "completed",
+            "ended",
+        }
+        if provider_finished or meeting.status is MeetingLifecycleStatus.COMPLETED or now >= end:
             return PublicSessionStatus.COMPLETED
         if now < start:
             return PublicSessionStatus.UPCOMING

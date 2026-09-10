@@ -244,8 +244,8 @@ async def test_lifecycle_creates_live_room_but_keeps_upcoming_session_calendar_o
 
     live = repository.rooms["2026-live-grand-prix-race"]
     assert (live.status, live.mode, live.source_availability) == (
-        RoomStatus.PENDING,
-        RoomMode.REPLAY,
+        RoomStatus.LIVE,
+        RoomMode.LIVE,
         SourceAvailability.UNAVAILABLE,
     )
     assert "2026-future-grand-prix-race" not in repository.rooms
