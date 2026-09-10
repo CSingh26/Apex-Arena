@@ -5,6 +5,7 @@ import asyncio
 import json
 import logging
 import re
+from datetime import UTC, datetime
 from typing import Any
 
 from redis.asyncio import Redis
@@ -57,6 +58,30 @@ class EventBus:
 
     def __init__(self, redis: Redis) -> None:
         self.redis = redis
+        self._diagnostics: dict[str, dict[str, Any]] = {}
+        self._clients: dict[str, int] = {}
+
+    def diagnostics(self, session_key: str) -> dict[str, Any]:
+        key = self._safe_key(session_key)
+        return {
+            "last_successful_event_publish_at": None,
+            "last_successful_state_publish_at": None,
+            "last_error": None,
+            **self._diagnostics.get(key, {}),
+            "active_session_sse_clients": self._clients.get(key, 0),
+        }
+
+    def session_client_connected(self, session_key: str) -> None:
+        key = self._safe_key(session_key)
+        self._clients[key] = self._clients.get(key, 0) + 1
+
+    def session_client_disconnected(self, session_key: str) -> None:
+        key = self._safe_key(session_key)
+        count = self._clients.get(key, 0) - 1
+        if count > 0:
+            self._clients[key] = count
+        else:
+            self._clients.pop(key, None)
 
     async def latest_state(self, session_key: str) -> RaceState | None:
         records = await self.redis.xrevrange(self.state_stream(session_key), count=1)
@@ -191,9 +216,23 @@ class EventBus:
         return f"apex:rooms:{cls._safe_key(room_id)}"
 
     async def _publish(self, stream: str, values: dict[str, str], maxlen: int) -> str:
+        kind = values.get("kind")
+        key = stream.rsplit(":", 1)[-1]
         try:
-            return await self.redis.xadd(stream, values, maxlen=maxlen, approximate=True)
+            result = await self.redis.xadd(stream, values, maxlen=maxlen, approximate=True)
+            if kind in {"event", "state"}:
+                if len(self._diagnostics) > 256:
+                    self._diagnostics.pop(next(iter(self._diagnostics)))
+                details = self._diagnostics.setdefault(key, {})
+                details[f"last_successful_{kind}_publish_at"] = datetime.now(UTC).isoformat()
+                details["last_error"] = None
+            return result
         except Exception as exc:
+            if kind in {"event", "state"}:
+                self._diagnostics.setdefault(key, {})["last_error"] = {
+                    "type": type(exc).__name__,
+                    "at": datetime.now(UTC).isoformat(),
+                }
             logger.error("Redis publish failed stream=%s error=%s", stream, type(exc).__name__)
             raise RedisPublishError(f"Redis publish failed ({type(exc).__name__})") from exc
 

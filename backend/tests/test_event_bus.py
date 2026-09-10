@@ -100,3 +100,24 @@ async def test_latest_state_returns_the_latest_safe_snapshot() -> None:
 
     assert await bus.latest_state("spa/race") == state
     assert await EventBus(FakeRedis()).latest_state("missing") is None  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_bus_diagnostics_track_publish_health_and_session_clients() -> None:
+    redis = FakeRedis()
+    bus = EventBus(redis)  # type: ignore[arg-type]
+    await bus.publish_event(race_event())
+    bus.session_client_connected("spa/race")
+    bus.session_client_connected("spa/race")
+    bus.session_client_disconnected("spa/race")
+
+    diagnostics = bus.diagnostics("spa/race")
+    assert diagnostics["active_session_sse_clients"] == 1
+    assert diagnostics["last_successful_event_publish_at"] is not None
+    assert diagnostics["last_successful_state_publish_at"] is None
+    assert diagnostics["last_error"] is None
+
+    redis.fail = True
+    with pytest.raises(RedisPublishError):
+        await bus.publish_state(RaceState(session_key="spa/race"))
+    assert bus.diagnostics("spa/race")["last_error"]["type"] == "ConnectionError"

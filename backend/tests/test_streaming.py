@@ -23,6 +23,7 @@ class ConnectedRequest:
 class FakeEventBus:
     def __init__(self, records: list[dict[str, Any]] | None = None) -> None:
         self.records = records or []
+        self.connected = 0
 
     @staticmethod
     def event_stream(session_key: str) -> str:
@@ -35,6 +36,12 @@ class FakeEventBus:
     async def read_session_streams(self, *_: Any, **__: Any) -> list[dict[str, Any]]:
         records, self.records = self.records, []
         return records
+
+    def session_client_connected(self, _session_key: str) -> None:
+        self.connected += 1
+
+    def session_client_disconnected(self, _session_key: str) -> None:
+        self.connected -= 1
 
 
 @pytest.mark.asyncio
@@ -186,6 +193,108 @@ def test_sse_format_is_compact_and_parseable() -> None:
 
     assert message.endswith("\n\n")
     assert json.loads(data_line.removeprefix("data: ")) == {"status": "CONNECTED"}
+
+
+@pytest.mark.asyncio
+async def test_stream_pages_the_complete_persisted_backlog(settings: Settings) -> None:
+    events = [
+        NormalizedRaceEvent(
+            session_key="spa-race",
+            source="openf1_historical",
+            event_time=datetime(2026, 7, 19, 13, tzinfo=UTC),
+            received_at=datetime(2026, 7, 19, 13, tzinfo=UTC),
+            sequence_number=sequence,
+            event_type=RaceEventType.LAP_COMPLETED,
+            dedup_key=f"stream-page-{sequence}",
+            is_replay=True,
+        )
+        for sequence in range(1, 6)
+    ]
+    calls: list[int] = []
+
+    async def list_events(_session_key: str, *, after_sequence: int, limit: int, **_: Any):
+        calls.append(after_sequence)
+        return [event for event in events if event.sequence_number > after_sequence][:limit]
+
+    async def current_state(_: str) -> RaceState:
+        return RaceState(session_key="spa-race", sequence_number=5, is_replay=True)
+
+    runtime = SimpleNamespace(
+        settings=settings.model_copy(update={"engine_recent_events_limit": 2}),
+        normalized_event_repository=SimpleNamespace(list_for_session=list_events),
+        race_state=SimpleNamespace(get_state=current_state),
+        event_bus=FakeEventBus(),
+    )
+    stream = session_event_stream(ConnectedRequest(), runtime, "spa-race", 0)  # type: ignore[arg-type]
+
+    frames = [await anext(stream) for _ in range(6)]
+    await stream.aclose()
+
+    assert [frame.splitlines()[0] for frame in frames[:5]] == [f"id: {n}" for n in range(1, 6)]
+    assert "event: state" in frames[5]
+    assert calls == [0, 2, 4]
+
+
+@pytest.mark.asyncio
+async def test_stream_recovers_a_persisted_gap_before_a_later_redis_event(
+    settings: Settings,
+) -> None:
+    events = [
+        NormalizedRaceEvent(
+            session_key="spa-race",
+            source="openf1",
+            event_time=datetime(2026, 7, 19, 13, tzinfo=UTC),
+            received_at=datetime(2026, 7, 19, 13, tzinfo=UTC),
+            sequence_number=sequence,
+            event_type=RaceEventType.LAP_COMPLETED,
+            dedup_key=f"stream-gap-{sequence}",
+        )
+        for sequence in (2, 3)
+    ]
+    repository_calls: list[tuple[int, int | None]] = []
+
+    async def list_events(
+        _session_key: str, *, after_sequence: int, before_sequence: int | None = None, **_: Any
+    ):
+        repository_calls.append((after_sequence, before_sequence))
+        return [
+            event
+            for event in events
+            if event.sequence_number > after_sequence
+            and (before_sequence is None or event.sequence_number <= before_sequence)
+        ]
+
+    async def current_state(_: str) -> RaceState:
+        return RaceState(session_key="spa-race", sequence_number=1)
+
+    bus = FakeEventBus(
+        [
+            {
+                "stream": "events:spa-race",
+                "stream_id": "3-0",
+                "kind": "event",
+                "sequence_number": 3,
+                "data": events[1].model_dump(mode="json"),
+            }
+        ]
+    )
+    runtime = SimpleNamespace(
+        settings=settings,
+        normalized_event_repository=SimpleNamespace(list_for_session=list_events),
+        race_state=SimpleNamespace(get_state=current_state),
+        event_bus=bus,
+    )
+    stream = session_event_stream(ConnectedRequest(), runtime, "spa-race", 1)  # type: ignore[arg-type]
+
+    await anext(stream)
+    recovered = await anext(stream)
+    live = await anext(stream)
+    await stream.aclose()
+
+    assert recovered.startswith("id: 2\n")
+    assert live.startswith("id: 3\n")
+    assert repository_calls == [(1, 2)]
+    assert bus.connected == 0
 
 
 @pytest.mark.asyncio
