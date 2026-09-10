@@ -6,6 +6,7 @@ import hashlib
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
+import anyio
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import (
     AsyncConnection,
@@ -19,6 +20,14 @@ from sqlalchemy.orm import DeclarativeBase
 
 class Base(DeclarativeBase):
     pass
+
+
+class RequestSafeAsyncSession(AsyncSession):
+    async def __aexit__(self, *args):
+        # Starlette uses level cancellation: a disconnected SSE request must
+        # still return its SQL connection even while its cancel scope is active.
+        with anyio.CancelScope(shield=True):
+            return await super().__aexit__(*args)
 
 
 class Database:
@@ -43,7 +52,7 @@ class Database:
         )
         self.session_factory = async_sessionmaker(
             self.engine,
-            class_=AsyncSession,
+            class_=RequestSafeAsyncSession,
             expire_on_commit=False,
         )
         self._ingestor_lease_connection: AsyncConnection | None = None
