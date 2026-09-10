@@ -261,7 +261,6 @@ class RaceRoom(BaseModel):
 
 
 class SessionRoomSummary(BaseModel):
-    provider_status: str = "NOT_REQUESTED"
     session_id: UUID = Field(default_factory=uuid4)
     session_type: SessionType
     display_name: str
