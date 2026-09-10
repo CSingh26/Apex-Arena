@@ -342,7 +342,14 @@ class OpenF1HistoricalBackfillService:
             if start is not None
             else None
         )
-        return self._resolution(match.session, room, method, len(sessions), delta)
+        return self._resolution(
+            match.session,
+            room,
+            method,
+            len(sessions),
+            delta,
+            confidence=match.confidence.value,
+        )
 
     async def run(
         self,
@@ -483,6 +490,7 @@ class OpenF1HistoricalBackfillService:
         method: str,
         candidates: int,
         delta: float | None = None,
+        confidence: str | None = None,
     ) -> SessionResolution:
         key = row.get("session_key")
         if key is None:
@@ -493,7 +501,8 @@ class OpenF1HistoricalBackfillService:
             meeting_key=str(row["meeting_key"]) if row.get("meeting_key") is not None else None,
             room_slug=room.slug if room else None,
             match_method=method,
-            confidence="high" if method != "metadata_date_type" or (delta or 0) <= 12 else "medium",
+            confidence=confidence
+            or ("high" if method != "metadata_date_type" or (delta or 0) <= 12 else "medium"),
             candidate_count=candidates,
             date_delta_hours=delta,
             normalized_provider_session_name=(session_type.value if session_type else "unknown"),

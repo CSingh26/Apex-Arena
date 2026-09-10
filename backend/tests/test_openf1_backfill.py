@@ -272,6 +272,15 @@ async def test_resolution_uses_meeting_key_and_session_type(settings) -> None:  
 
 
 @pytest.mark.asyncio
+async def test_resolution_preserves_medium_canonical_match_confidence(settings) -> None:  # type: ignore[no-untyped-def]
+    backfill, *_ = service(settings, provider_rows=[provider_session(hour_delta=6)])
+
+    result = await backfill.resolve(season=2026, room_slug="2026-australian-grand-prix-qualifying")
+
+    assert result.confidence == "medium"
+
+
+@pytest.mark.asyncio
 async def test_resolution_rejects_ambiguous_metadata_match(settings) -> None:  # type: ignore[no-untyped-def]
     rows = [provider_session(key="1", meeting="1"), provider_session(key="2", meeting="2")]
     backfill, *_ = service(settings, provider_rows=rows, existing_room=room(meeting_key=None))
