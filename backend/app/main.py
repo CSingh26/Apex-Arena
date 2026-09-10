@@ -24,7 +24,7 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
         services = AppServices(settings)
         application.state.services = services
         worker_enabled = settings.app_process_role in {"combined", "all"} and (
-            settings.openf1_live_auto_connect or settings.recent_session_reconciliation_enabled
+            settings.live_worker_enabled or settings.recent_session_reconciliation_enabled
         )
         if worker_enabled:
             # Combined mode ingests as well as serves, so it must take the same
@@ -34,7 +34,7 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
             if not await services.database.acquire_ingestor_lease():
                 raise RuntimeError("Another Apex Arena ingestor owns the singleton lease")
         if settings.app_process_role in {"combined", "all"}:
-            if settings.openf1_live_auto_connect:
+            if settings.live_worker_enabled:
                 await services.start_live_services()
             await services.start_recent_reconciliation()
         try:

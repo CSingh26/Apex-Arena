@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from contextlib import suppress
+from datetime import UTC, datetime
 
 from app.core.settings import Settings
 from app.domain.intelligence import RaceIntelligenceConfig
@@ -23,6 +24,7 @@ from app.services.event_pipeline import (
     SequenceNumberService,
 )
 from app.services.historical import HistoricalOpenF1Adapter
+from app.services.live_ingestion import LiveSessionIngestionService
 from app.services.locations import (
     LiveLocationRecorder,
     LocationIngestionService,
@@ -78,7 +80,7 @@ class AppServices:
         self.openf1_auth = OpenF1AuthService(settings)
         self.openf1 = OpenF1RestClient(
             settings,
-            token_provider=lambda: self.openf1_auth.get_access_token(force_refresh=True),
+            token_provider=self.openf1_auth.get_access_token,
         )
         self.circuit_intelligence = CircuitIntelligenceService()
         self.circuit_weather = CircuitWeatherService(self.openf1)
@@ -112,6 +114,9 @@ class AppServices:
         self.race_state = RaceStateEngine(
             self.snapshot_repository,
             settings.race_state_snapshot_every_n_events,
+            live_state_reader=self.event_bus.latest_state
+            if settings.app_process_role == "api"
+            else None,
         )
         intelligence_config = RaceIntelligenceConfig(
             overtake_confirmation_seconds=settings.overtake_confirmation_seconds,
@@ -187,6 +192,19 @@ class AppServices:
             room_availability=self.room_repository,
         )
         self.room_finalizer = OpenF1RoomFinalizer(self.database)
+        self.live_ingestion = LiveSessionIngestionService(
+            settings=settings,
+            rooms=self.rooms,
+            client=self.openf1,
+            processor=self.processor,
+            repository=self.room_repository,
+            finalizer=self.room_finalizer,
+            event_bus=self.event_bus,
+            locations=self.session_locations,
+            location_ingestion=self.location_ingestion,
+            mqtt_client=self.openf1_live,
+            race_state=self.race_state,
+        )
         self.backfill = OpenF1HistoricalBackfillService(
             settings=settings,
             client=self.openf1,
@@ -211,12 +229,44 @@ class AppServices:
         """Connect live telemetry and reconcile provider sessions in the background."""
         ingestion_mode = getattr(self.settings, "openf1_ingestion_mode", "auto")
         auto_connect = getattr(self.settings, "openf1_live_auto_connect", True)
+        if hasattr(self, "openf1"):
+            self.openf1.min_request_interval_seconds = max(
+                1.1, self.openf1.min_request_interval_seconds
+            )
         if ingestion_mode != "rest" and auto_connect:
             await self.openf1_live.connect()
         if self._live_catalog_task is None or self._live_catalog_task.done():
             self._live_catalog_task = asyncio.create_task(
                 self._maintain_live_catalog(), name="openf1-live-catalog"
             )
+
+    async def provider_status(self) -> dict[str, object]:
+        """Expose the owning worker's state to API processes without provider calls."""
+        status = self.openf1_live.status()
+        if self.settings.app_process_role == "api":
+            try:
+                shared = await self.event_bus.latest_connection_status()
+                if shared is not None:
+                    status.update(shared)
+                    if shared.get("checked_at"):
+                        checked = datetime.fromisoformat(
+                            str(shared["checked_at"]).replace("Z", "+00:00")
+                        )
+                        if checked.tzinfo is None:
+                            checked = checked.replace(tzinfo=UTC)
+                        if (datetime.now(UTC) - checked).total_seconds() > 120:
+                            status.update(
+                                connection_state="STALE",
+                                ingestion_running=False,
+                                provider_connected=False,
+                            )
+            except Exception as exc:
+                status.update(
+                    connection_state="PROVIDER_UNAVAILABLE", degraded_reason=type(exc).__name__
+                )
+        elif self.settings.live_worker_enabled:
+            status.update(self.live_ingestion.status)
+        return status
 
     async def start_recent_reconciliation(self) -> None:
         if not self.settings.recent_session_reconciliation_enabled:
@@ -243,12 +293,12 @@ class AppServices:
     async def _maintain_live_catalog(self) -> None:
         while True:
             try:
-                await self.rooms.force_sync()
+                await self.live_ingestion.run_once()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 logger.warning("Live room catalog refresh failed error=%s", type(exc).__name__)
-            await asyncio.sleep(self.settings.openf1_live_catalog_sync_seconds)
+            await asyncio.sleep(self.settings.openf1_live_poll_seconds)
 
     async def close(self) -> None:
         if self._recent_reconciliation_task is not None:

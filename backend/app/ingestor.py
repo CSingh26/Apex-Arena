@@ -27,7 +27,7 @@ def create_ingestor_app(settings_override: Settings | None = None) -> FastAPI:
         try:
             if not await services.database.acquire_ingestor_lease():
                 raise RuntimeError("Another Apex Arena ingestor owns the singleton lease")
-            if settings.openf1_live_auto_connect:
+            if settings.live_worker_enabled:
                 await services.start_live_services()
             await services.start_recent_reconciliation()
             yield
@@ -53,7 +53,7 @@ def create_ingestor_app(settings_override: Settings | None = None) -> FastAPI:
     @application.get("/health/provider")
     async def provider_status() -> dict[str, object]:
         services: AppServices = application.state.services
-        live = services.openf1_live.status()
+        live = await services.provider_status()
         return {
             "status": str(live["connection_state"]).lower(),
             "role": settings.app_process_role,
