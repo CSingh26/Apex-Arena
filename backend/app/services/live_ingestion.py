@@ -248,6 +248,7 @@ class LiveSessionIngestionService:
                 event_time=start,
             )
         ]
+        completed_polls: list[tuple[EndpointProgress, datetime, int, int]] = []
         last_event = progress.last_event_at
         mqtt_active = bool(
             self.mqtt_client is not None
@@ -305,12 +306,7 @@ class LiveSessionIngestionService:
                     )
                     if endpoint not in {"drivers", "stints"} and timestamp <= now:
                         last_event = max(last_event or utc(timestamp), utc(timestamp))
-                state.cursor = window_end - timedelta(seconds=1)
-                state.failures = 0
-                state.next_at = now + timedelta(seconds=interval)
-                state.state = "LIVE" if rows else "WAITING_FOR_PROVIDER"
-                state.rows = len(rows)
-                state.error = None
+                completed_polls.append((state, window_end, interval, len(rows)))
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -347,6 +343,13 @@ class LiveSessionIngestionService:
             if len(progress.seen) > 50_000:
                 progress.seen.clear()
             progress.seen.update(fingerprints)
+        for state, window_end, interval, row_count in completed_polls:
+            state.cursor = window_end - timedelta(seconds=1)
+            state.failures = 0
+            state.next_at = now + timedelta(seconds=interval)
+            state.state = "LIVE" if row_count else "WAITING_FOR_PROVIDER"
+            state.rows = row_count
+            state.error = None
         if self.race_state is not None:
             state = await self.race_state.get_state(key)
             finished = finished or state.status.casefold() == "finished"
@@ -402,6 +405,7 @@ class LiveSessionIngestionService:
             calendar_state="COMPLETED" if finished else "LIVE",
             provider_session_resolved=True,
             provider_connected=provider_connected,
+            error=None if provider_connected else self.rooms.provider_error,
             last_event_at=last_event.isoformat() if last_event else None,
             last_event_age=age,
             endpoints={

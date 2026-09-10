@@ -128,6 +128,58 @@ async def test_temporary_endpoint_failure_keeps_room_and_retries_without_duplica
 
 
 @pytest.mark.asyncio
+async def test_processor_failure_keeps_entire_poll_window_retryable(settings):
+    r = await runtime(settings)
+    ingest_batch = r.service.processor.ingest_batch
+    failed = False
+
+    async def fail_once(rows):
+        nonlocal failed
+        if not failed:
+            failed = True
+            raise RuntimeError("durable processor unavailable")
+        await ingest_batch(rows)
+
+    r.service.processor.ingest_batch = fail_once
+    with pytest.raises(RuntimeError):
+        await r.service.run_once(now=START)
+    failed_window = [
+        (endpoint, filters)
+        for endpoint, filters in r.client.reads
+        if endpoint != "sessions"
+    ]
+    assert failed_window
+
+    r.client.reads.clear()
+    await r.service.run_once(now=START)
+    retry_window = [
+        (endpoint, filters)
+        for endpoint, filters in r.client.reads
+        if endpoint != "sessions"
+    ]
+
+    assert retry_window == failed_window
+    assert any(
+        event.event_type.value == "LOCATION_SAMPLE" for event in r.normalized.events.values()
+    )
+
+
+@pytest.mark.asyncio
+async def test_successful_poll_clears_stale_provider_error(settings):
+    r = await runtime(settings)
+    r.client.fail = {"sessions"}
+    await r.service.run_once(now=START)
+    assert r.service.status["connection_state"] == "PROVIDER_UNAVAILABLE"
+    assert r.service.status["error"] == "TimeoutError"
+
+    r.client.fail.clear()
+    await r.service.run_once(now=START + timedelta(seconds=5))
+
+    assert r.service.status["connection_state"] == "LIVE"
+    assert r.service.status["error"] is None
+
+
+@pytest.mark.asyncio
 async def test_provider_session_end_finalizes_without_deleting_events(settings):
     r = await runtime(settings)
     await r.service.run_once(now=START)
