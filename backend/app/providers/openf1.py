@@ -78,6 +78,7 @@ class OpenF1RestClient:
             headers={"Accept": "application/json", "User-Agent": "Apex-Arena/0.1"},
         )
         self.token_provider = token_provider
+        self._authentication_required = False
         self.retry_attempts = max(
             1,
             retry_attempts
@@ -150,7 +151,7 @@ class OpenF1RestClient:
                 oldest = min(self._cache, key=lambda key: self._cache[key][0])
                 self._cache.pop(oldest, None)
         cached = self._cache.get(cache_key)
-        if cached is not None and cached[0] > now:
+        if cache_ttl_seconds != 0 and cached is not None and cached[0] > now:
             return [dict(row) for row in cached[1]]
 
         response: httpx.Response | None = None
@@ -158,8 +159,12 @@ class OpenF1RestClient:
         for attempt in range(self.retry_attempts):
             await self._throttle()
             try:
-                response = await self.client.get(endpoint, params=params)
+                headers = {}
+                if self._authentication_required and self.token_provider is not None:
+                    headers["Authorization"] = f"Bearer {await self.token_provider()}"
+                response = await self.client.get(endpoint, params=params, headers=headers)
                 if response.status_code == 401 and self.token_provider is not None:
+                    self._authentication_required = True
                     token = await self.token_provider()
                     await self._throttle()
                     response = await self.client.get(
@@ -213,6 +218,10 @@ class OpenF1RestClient:
 
     async def meetings(self, **filters: Any) -> list[dict[str, Any]]:
         return await self._get("meetings", filters)
+
+    async def live_get(self, endpoint: str, **filters: Any) -> list[dict[str, Any]]:
+        """Fresh reads for the singleton live worker; share authentication and throttling."""
+        return await self._get(endpoint, filters, cache_ttl_seconds=0)
 
     async def sessions(self, **filters: Any) -> list[dict[str, Any]]:
         return await self._get("sessions", filters)
@@ -448,6 +457,8 @@ class OpenF1LiveClient:
         )
 
     async def disconnect(self) -> None:
+        if self._client is None and self._loop is None:
+            return
         self._shutting_down = True
         if self._connect_timeout_task is not None:
             self._connect_timeout_task.cancel()

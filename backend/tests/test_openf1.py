@@ -385,3 +385,58 @@ async def test_mqtt_connect_timeout_is_terminal_not_connecting(
     assert live.connection_state is LiveConnectionState.DEGRADED
     assert mqtt_client.started is False
     await auth.close()
+
+
+@pytest.mark.asyncio
+async def test_unstarted_mqtt_client_cannot_publish_disconnect_over_shared_worker_status(settings):
+    from unittest.mock import AsyncMock
+
+    bus = AsyncMock()
+    auth = OpenF1AuthService(settings)
+    live = OpenF1LiveClient(settings, auth, event_bus=bus)
+    await live.disconnect()
+    bus.publish_connection_status.assert_not_awaited()
+    await auth.close()
+
+
+@pytest.mark.asyncio
+async def test_live_query_bypasses_cached_empty_historical_response(settings):
+    rows = []
+
+    async def handler(request):
+        return httpx.Response(200, json=rows)
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="https://api.openf1.org/v1/"
+    ) as http:
+        client = OpenF1RestClient(
+            settings, client=http, cache_ttl_seconds=600, min_request_interval_seconds=0
+        )
+        assert await client.sessions(year=2026) == []
+        rows = [{"session_key": 901}]
+        assert await client.live_get("sessions", year=2026) == rows
+
+
+@pytest.mark.asyncio
+async def test_authenticated_live_reads_do_not_repeat_public_401(settings):
+    calls = []
+
+    async def handler(request):
+        calls.append(request.headers.get("authorization"))
+        return httpx.Response(200 if request.headers.get("authorization") else 401, json=[])
+
+    async def token():
+        return "test-token"
+
+    transport = httpx.AsyncClient(
+        base_url="https://api.openf1.org/v1/", transport=httpx.MockTransport(handler)
+    )
+    client = OpenF1RestClient(
+        settings, client=transport, token_provider=token, min_request_interval_seconds=0
+    )
+    try:
+        await client.live_get("drivers", session_key=901)
+        await client.live_get("position", session_key=901)
+        assert calls == [None, "Bearer test-token", "Bearer test-token"]
+    finally:
+        await transport.aclose()
