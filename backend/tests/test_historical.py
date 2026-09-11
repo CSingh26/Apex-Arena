@@ -162,3 +162,52 @@ async def test_high_frequency_ingestion_keeps_the_latest_sample_for_each_driver(
 
     assert result.fetched_records == 2
     assert [event.raw_payload["x"] for event in processor.events] == [2, 3]
+
+
+@pytest.mark.asyncio
+async def test_checkpointed_qualifying_result_keeps_resolved_session_type():
+    processor = FakeProcessor()
+    adapter = HistoricalOpenF1Adapter(
+        client=FakeOpenF1Client(
+            {
+                "session_result": [
+                    {
+                        "session_key": 901,
+                        "driver_number": 16,
+                        "position": 1,
+                        "duration": [82.612, 82.077, 81.786],
+                        "gap_to_leader": [0, 0.195, 0],
+                    }
+                ]
+            }
+        ),
+        processor=processor,
+        runs=FakeRuns(),
+        snapshots=FakeSnapshots(),
+        max_records_per_endpoint=500,
+    )
+    await adapter.ingest_session("901", ["session_result"], session_type_hint="QUALIFYING")
+    payload = processor.events[0].raw_payload
+    assert payload["normalized_session_type"] == "QUALIFYING"
+    assert len(payload["phase_results"]) == 3
+
+
+@pytest.mark.asyncio
+async def test_car_history_ignores_laps_without_a_timestamp():
+    adapter = HistoricalOpenF1Adapter(
+        client=FakeOpenF1Client(
+            {
+                "laps": [
+                    {"driver_number": 16, "date_start": "2026-09-05T14:59:00Z"},
+                    {"driver_number": 16, "date_start": None},
+                ]
+            }
+        ),
+        processor=FakeProcessor(),
+        runs=FakeRuns(),
+        snapshots=FakeSnapshots(),
+        max_records_per_endpoint=500,
+    )
+    assert await adapter._high_frequency_window_start("901", ["car_data"]) == datetime(
+        2026, 9, 5, 14, 54, tzinfo=UTC
+    )

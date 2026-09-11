@@ -118,10 +118,12 @@ class SqlOpenF1BackfillJobRepository:
                     .with_for_update()
                 )
             ).scalar_one()
-            completed = list(dict.fromkeys([*record.completed_endpoints, endpoint]))
+            completed = list(record.completed_endpoints)
+            if fetched > 0:
+                completed = list(dict.fromkeys([*completed, endpoint]))
             cursor = dict(record.cursor_state)
             cursor[endpoint] = {
-                "completed_at": datetime.now(UTC).isoformat(),
+                ("completed_at" if fetched > 0 else "last_empty_at"): datetime.now(UTC).isoformat(),
                 "rows_fetched": fetched,
             }
             cursor["current_endpoint"] = None

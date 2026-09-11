@@ -171,6 +171,7 @@ class HistoricalOpenF1Adapter:
         *,
         availability_baseline: dict[str, int] | None = None,
         update_room: bool = True,
+        session_type_hint: str | None = None,
     ) -> HistoricalIngestionResult:
         selected = self._validate_endpoints(endpoints)
         selected_stages = self._selected_stages(selected)
@@ -192,7 +193,7 @@ class HistoricalOpenF1Adapter:
         result = PipelineResult()
         all_records: list[RawEventInput] = []
         driver_registry: dict[int, DriverIdentity] = {}
-        normalized_session_type: str | None = None
+        normalized_session_type: str | None = session_type_hint
         high_frequency_from = await self._high_frequency_window_start(session_key, selected)
         try:
             for stage_name, stage_endpoints in selected_stages:
@@ -431,7 +432,10 @@ class HistoricalOpenF1Adapter:
                 type(exc).__name__,
             )
             return None
-        latest = max((self._payload_time(row) for row in laps), default=None)
+        latest = max(
+            (stamp for row in laps if (stamp := self._payload_time(row)) is not None),
+            default=None,
+        )
         return latest - timedelta(minutes=5) if latest is not None else None
 
     async def _fetch_endpoint(

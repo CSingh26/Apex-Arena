@@ -51,7 +51,10 @@ class CompletedRoomBackfillSummary(BaseModel):
 
 def parser() -> argparse.ArgumentParser:
     command = argparse.ArgumentParser(
-        description="Backfill all completed 2026 competitive rooms before chat generation."
+        description=(
+            "Backfill every completed 2026 weekend session room, practice included, "
+            "before chat generation."
+        )
     )
     command.add_argument("--season", type=int, default=2026)
     command.add_argument("--room-slug")
