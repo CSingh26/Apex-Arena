@@ -86,6 +86,7 @@ class RecentSessionReconciliationService:
         self.backfill = backfill
         self._last_summary: ReconciliationPassSummary | None = None
         self._running = False
+        self._attempted_at: dict[str, datetime] = {}
 
     @property
     def status(self) -> dict[str, Any]:
@@ -156,7 +157,11 @@ class RecentSessionReconciliationService:
                     summary.last_safe_error_category = "reconciliation_locked"
                     return summary
                 try:
-                    await self.rooms.force_sync()
+                    await self.rooms.force_sync(
+                        now=observed_at,
+                        live_window_only=True,
+                        lookback_days=self.settings.recent_session_reconciliation_lookback_days,
+                    )
                 except Exception as exc:
                     logger.warning(
                         "Recent session catalog refresh failed error=%s",
@@ -167,9 +172,15 @@ class RecentSessionReconciliationService:
                     now=observed_at,
                     lookback_days=self.settings.recent_session_reconciliation_lookback_days,
                     grace_minutes=self.settings.recent_session_provider_grace_minutes,
-                    limit=self.settings.recent_session_auto_backfill_max_sessions,
+                    limit=100,
                 )
-                for room in candidates:
+                candidates.sort(
+                    key=lambda room: self._attempted_at.get(
+                        room.slug, datetime.min.replace(tzinfo=UTC)
+                    )
+                )
+                for room in candidates[: self.settings.recent_session_auto_backfill_max_sessions]:
+                    self._attempted_at[room.slug] = observed_at
                     await self._reconcile_room(room, summary)
         finally:
             self._running = False
