@@ -141,6 +141,7 @@ async def test_completed_room_batch_backfill_aggregates_room_results(monkeypatch
     assert repository.candidate_kwargs == {"season": 2026, "room_slug": None, "limit": 2}
     assert FakeBackfill.current is not None
     assert FakeBackfill.current.calls[0]["endpoints"] is None
+    assert FakeBackfill.current.calls[0]["resume"] is True
 
 
 @pytest.mark.asyncio
@@ -170,6 +171,7 @@ async def test_completed_room_batch_can_limit_work_to_high_frequency_endpoints(m
     assert await backfill_completed_rooms.run(args) == 0
     assert FakeBackfill.current is not None
     assert FakeBackfill.current.calls[0]["endpoints"] == ["car_data", "location"]
+    assert FakeBackfill.current.calls[0]["resume"] is False
 
 
 @pytest.mark.asyncio

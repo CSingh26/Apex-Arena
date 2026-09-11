@@ -348,6 +348,7 @@ class SqlRaceRoomRepository:
     ) -> list[RaceRoom]:
         """Find completed rooms of any session type that still need provider backfill repair."""
 
+        now = datetime.now(UTC)
         event_counts = (
             select(
                 NormalizedRaceEventRecord.session_key.label("session_key"),
@@ -361,7 +362,26 @@ class SqlRaceRoomRepository:
             RaceRoomRecord.session_type.in_(
                 [session_type.value for session_type in COMPLETED_BACKFILL_SESSION_TYPES]
             ),
-            RaceRoomRecord.scheduled_start <= datetime.now(UTC),
+            RaceRoomRecord.status != RoomStatus.LIVE.value,
+            or_(
+                RaceRoomRecord.status.in_(
+                    [
+                        RoomStatus.READY.value,
+                        RoomStatus.REPLAYING.value,
+                        RoomStatus.COMPLETED.value,
+                    ]
+                ),
+                and_(
+                    RaceRoomRecord.session_type == SessionType.RACE.value,
+                    func.coalesce(RaceRoomRecord.actual_start, RaceRoomRecord.scheduled_start)
+                    <= now - timedelta(hours=4),
+                ),
+                and_(
+                    RaceRoomRecord.session_type != SessionType.RACE.value,
+                    func.coalesce(RaceRoomRecord.actual_start, RaceRoomRecord.scheduled_start)
+                    <= now - timedelta(hours=2),
+                ),
+            ),
             or_(
                 RaceRoomRecord.session_key.is_(None),
                 RaceRoomRecord.replay_available.is_(False),

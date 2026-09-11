@@ -58,6 +58,7 @@ def room_record(
     *,
     round_number: int,
     status: RoomStatus = RoomStatus.PENDING,
+    actual_start: datetime | None = None,
 ) -> RaceRoomRecord:
     return RaceRoomRecord(
         slug=slug,
@@ -70,6 +71,7 @@ def room_record(
         country="Italy",
         session_type=session_type.value,
         scheduled_start=scheduled_start,
+        actual_start=actual_start,
         status=status.value,
         mode="replay",
         source_availability="unavailable",
@@ -147,6 +149,61 @@ async def test_recent_candidates_include_practice_only_after_the_grace_and_durat
             "completed-practice",
             "eligible-practice",
             "eligible-race",
+        ]
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_completed_backfill_candidates_exclude_active_sessions():
+    now = datetime.now(UTC)
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    try:
+        with Session(engine) as session:
+            session.add_all(
+                [
+                    room_record(
+                        "elapsed-practice",
+                        SessionType.PRACTICE_1,
+                        now - timedelta(hours=3),
+                        round_number=17,
+                    ),
+                    room_record(
+                        "active-race",
+                        SessionType.RACE,
+                        now - timedelta(minutes=30),
+                        round_number=18,
+                        status=RoomStatus.LIVE,
+                    ),
+                    room_record(
+                        "recently-started-delayed-practice",
+                        SessionType.PRACTICE_2,
+                        now - timedelta(hours=3),
+                        actual_start=now - timedelta(minutes=30),
+                        round_number=20,
+                    ),
+                    room_record(
+                        "confirmed-completed-race",
+                        SessionType.RACE,
+                        now - timedelta(minutes=30),
+                        round_number=19,
+                        status=RoomStatus.COMPLETED,
+                    ),
+                ]
+            )
+            session.commit()
+
+        repository = SqlRaceRoomRepository(SQLiteDatabase(engine))  # type: ignore[arg-type]
+        candidates = await repository.list_completed_backfill_candidates(season=2026)
+
+        assert [room.slug for room in candidates] == [
+            "elapsed-practice",
+            "confirmed-completed-race",
         ]
     finally:
         engine.dispose()

@@ -413,7 +413,7 @@ class OpenF1HistoricalBackfillService:
             completed = set(job.completed_endpoints)
             skipped: list[str] = []
             for endpoint in ["sessions", *selected]:
-                if endpoint in completed:
+                if resume and endpoint in completed:
                     skipped.append(endpoint)
                     continue
                 try:

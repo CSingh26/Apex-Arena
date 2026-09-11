@@ -326,6 +326,19 @@ async def test_completed_endpoint_is_resumed_without_refetch(settings) -> None: 
 
 
 @pytest.mark.asyncio
+async def test_run_without_resume_refreshes_completed_endpoints(settings) -> None:  # type: ignore[no-untyped-def]
+    backfill, _, adapter, _, *_ = service(settings, completed=["sessions", "drivers"])
+
+    result = await backfill.run(
+        season=2026,
+        room_slug="2026-australian-grand-prix-qualifying",
+    )
+
+    assert adapter.endpoints[:2] == ["sessions", "drivers"]
+    assert result.skipped_completed_endpoints == []
+
+
+@pytest.mark.asyncio
 async def test_empty_successful_endpoint_is_retried_on_the_next_run(settings) -> None:  # type: ignore[no-untyped-def]
     backfill, _, adapter, jobs, *_ = service(settings, empty_endpoints={"laps"})
 
