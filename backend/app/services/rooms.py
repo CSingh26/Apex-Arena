@@ -122,7 +122,7 @@ class RaceRoomService:
         """Internal authenticated lifecycle operation; safe to retry."""
         async with self._sync_lock:
             count = 0
-            meetings = await self.season.calendar(self.season_year)
+            meetings = await self.season.calendar(self.season_year, now=now)
             sessions = await self._historical_sessions(fresh=fresh_provider)
             self._meetings = meetings
             self._provider_sessions = sessions

@@ -20,6 +20,7 @@ from app.domain.rooms import (
     WeekendStatus,
 )
 from app.services.rooms import RaceRoomService
+from app.services.season import SeasonService
 
 
 def meeting(
@@ -112,7 +113,7 @@ class FakeSeason:
         self.meetings = meetings
         self.calls = 0
 
-    async def calendar(self, year: int) -> list[RaceMeeting]:
+    async def calendar(self, year: int, now: datetime | None = None) -> list[RaceMeeting]:
         assert year == 2026
         self.calls += 1
         await asyncio.sleep(0)
@@ -135,6 +136,34 @@ class FakeOpenF1:
         if self.failure is not None:
             raise self.failure
         return self.session_rows
+
+
+class FakeJolpica:
+    def __init__(self, races: list[dict[str, object]]) -> None:
+        self.races = races
+
+    async def fetch_calendar(self, year: int) -> list[dict[str, object]]:
+        assert year == 2026
+        return self.races
+
+
+def same_weekend_calendar_row() -> dict[str, object]:
+    return {
+        "season": "2026",
+        "round": "13",
+        "raceName": "Belgian Grand Prix",
+        "Circuit": {
+            "circuitId": "spa",
+            "circuitName": "Circuit de Spa-Francorchamps",
+            "Location": {"locality": "Spa", "country": "Belgium"},
+        },
+        "date": "2026-07-19",
+        "time": "13:00:00Z",
+        "FirstPractice": {"date": "2026-07-17", "time": "11:30:00Z"},
+        "SecondPractice": {"date": "2026-07-17", "time": "15:00:00Z"},
+        "ThirdPractice": {"date": "2026-07-18", "time": "10:00:00Z"},
+        "Qualifying": {"date": "2026-07-18", "time": "14:00:00Z"},
+    }
 
 
 @pytest.mark.asyncio
@@ -313,6 +342,30 @@ async def test_force_sync_creates_only_provider_backed_rooms() -> None:
 
     assert count == 1
     assert set(repository.rooms) == {"2026-belgian-grand-prix-race"}
+
+
+@pytest.mark.asyncio
+async def test_historical_force_sync_keeps_same_weekend_future_session_upcoming(settings) -> None:  # type: ignore[no-untyped-def]
+    repository = FakeRoomRepository()
+    season = SeasonService(
+        settings,
+        FakeJolpica([same_weekend_calendar_row()]),  # type: ignore[arg-type]
+    )
+    service = RaceRoomService(
+        repository,  # type: ignore[arg-type]
+        season,
+        2026,
+        openf1=FakeOpenF1([openf1_session()]),  # type: ignore[arg-type]
+    )
+
+    synchronized = await service.force_sync(
+        now=datetime(2026, 7, 18, 12, tzinfo=UTC),
+        live_window_only=True,
+        lookback_days=14,
+    )
+
+    assert synchronized == 0
+    assert "2026-belgian-grand-prix-race" not in repository.rooms
 
 
 def sprint_weekend() -> RaceMeeting:

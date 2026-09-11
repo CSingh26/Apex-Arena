@@ -86,7 +86,6 @@ class RecentSessionReconciliationService:
         self.backfill = backfill
         self._last_summary: ReconciliationPassSummary | None = None
         self._running = False
-        self._attempted_at: dict[str, datetime] = {}
 
     @property
     def status(self) -> dict[str, Any]:
@@ -168,19 +167,42 @@ class RecentSessionReconciliationService:
                         type(exc).__name__,
                     )
 
+                candidate_count = await self.room_repository.count_recent_reconciliation_candidates(
+                    now=observed_at,
+                    lookback_days=self.settings.recent_session_reconciliation_lookback_days,
+                    grace_minutes=self.settings.recent_session_provider_grace_minutes,
+                )
+                budget = min(
+                    candidate_count,
+                    self.settings.recent_session_auto_backfill_max_sessions,
+                )
+                if budget == 0:
+                    return summary
+                pass_number = int(observed_at.timestamp()) // (
+                    self.settings.recent_session_reconciliation_interval_seconds
+                )
+                offset = (pass_number * budget) % candidate_count
                 candidates = await self.room_repository.list_recent_reconciliation_candidates(
                     now=observed_at,
                     lookback_days=self.settings.recent_session_reconciliation_lookback_days,
                     grace_minutes=self.settings.recent_session_provider_grace_minutes,
-                    limit=100,
+                    limit=budget,
+                    offset=offset,
                 )
-                candidates.sort(
-                    key=lambda room: self._attempted_at.get(
-                        room.slug, datetime.min.replace(tzinfo=UTC)
+                remaining = budget - len(candidates)
+                if remaining > 0:
+                    candidates.extend(
+                        await self.room_repository.list_recent_reconciliation_candidates(
+                            now=observed_at,
+                            lookback_days=(
+                                self.settings.recent_session_reconciliation_lookback_days
+                            ),
+                            grace_minutes=self.settings.recent_session_provider_grace_minutes,
+                            limit=remaining,
+                            offset=0,
+                        )
                     )
-                )
-                for room in candidates[: self.settings.recent_session_auto_backfill_max_sessions]:
-                    self._attempted_at[room.slug] = observed_at
+                for room in candidates:
                     await self._reconcile_room(room, summary)
         finally:
             self._running = False

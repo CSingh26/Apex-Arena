@@ -83,9 +83,19 @@ class FakeRoomRepository:
         self.rooms = rooms
         self.binds: list[tuple[str, str | None, str]] = []
         self.candidate_queries: list[dict[str, object]] = []
+        self.candidate_count_queries: list[dict[str, object]] = []
 
     async def list_recent_reconciliation_candidates(self, **kwargs: object) -> list[RaceRoom]:
         self.candidate_queries.append(kwargs)
+        candidates = self._candidates(**kwargs)
+        offset = int(kwargs.get("offset", 0))
+        return candidates[offset : offset + int(kwargs["limit"])]
+
+    async def count_recent_reconciliation_candidates(self, **kwargs: object) -> int:
+        self.candidate_count_queries.append(kwargs)
+        return len(self._candidates(**kwargs))
+
+    def _candidates(self, **kwargs: object) -> list[RaceRoom]:
         now = kwargs["now"]
         assert isinstance(now, datetime)
         lookback = timedelta(days=int(kwargs["lookback_days"]))
@@ -108,7 +118,7 @@ class FakeRoomRepository:
         ]
         candidates.sort(key=lambda room: room.slug)
         candidates.sort(key=lambda room: room.scheduled_start, reverse=True)
-        return candidates[: int(kwargs["limit"])]
+        return candidates
 
     async def bind_provider_session(
         self, slug: str, *, meeting_key: str | None, session_key: str
@@ -278,14 +288,14 @@ async def test_reconciliation_uses_observed_time_for_bounded_catalog_sync(settin
             "lookback_days": 14,
         }
     ]
-    assert repository.candidate_queries == [
+    assert repository.candidate_count_queries == [
         {
             "now": observed_at,
             "lookback_days": 14,
             "grace_minutes": 15,
-            "limit": 100,
         }
     ]
+    assert repository.candidate_queries == []
 
 
 @pytest.mark.asyncio
@@ -462,3 +472,35 @@ async def test_locked_backfill_job_consumes_budget_then_rotates(settings) -> Non
         "new-qualifying",
         "older-qualifying",
     ]
+
+
+@pytest.mark.asyncio
+async def test_restart_stable_pagination_reaches_candidate_beyond_first_hundred(settings) -> None:  # type: ignore[no-untyped-def]
+    targets = [
+        spa_room(
+            slug=f"candidate-{index:03}",
+            scheduled_start=datetime(2026, 7, 18, 10, tzinfo=UTC),
+        )
+        for index in range(101)
+    ]
+    first_pass = datetime(2026, 7, 20, 12, tzinfo=UTC)
+    attempted: list[str] = []
+
+    for pass_index in range(101):
+        reconciler, _, _, backfill = service(
+            settings,
+            rooms=targets,
+            endpoint_rows={},
+            auto_backfill=False,
+        )
+        await reconciler.run_once(
+            now=first_pass
+            + timedelta(
+                seconds=pass_index * settings.recent_session_reconciliation_interval_seconds
+            )
+        )
+        attempted.extend(backfill.resolutions)
+
+    assert len(attempted) == 101
+    assert set(attempted) == {f"candidate-{index:03}" for index in range(101)}
+    assert "candidate-100" in attempted

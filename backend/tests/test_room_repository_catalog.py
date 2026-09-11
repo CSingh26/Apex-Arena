@@ -144,12 +144,26 @@ async def test_recent_candidates_include_practice_only_after_the_grace_and_durat
             grace_minutes=15,
             limit=10,
         )
+        offset_candidates = await repository.list_recent_reconciliation_candidates(
+            now=now,
+            lookback_days=7,
+            grace_minutes=15,
+            limit=1,
+            offset=1,
+        )
+        candidate_count = await repository.count_recent_reconciliation_candidates(
+            now=now,
+            lookback_days=7,
+            grace_minutes=15,
+        )
 
         assert [room.slug for room in candidates] == [
             "completed-practice",
             "eligible-practice",
             "eligible-race",
         ]
+        assert [room.slug for room in offset_candidates] == ["eligible-practice"]
+        assert candidate_count == 3
     finally:
         engine.dispose()
 

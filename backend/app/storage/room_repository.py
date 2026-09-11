@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import and_, case, delete, func, or_, select, update
@@ -205,65 +206,88 @@ class SqlRaceRoomRepository:
         lookback_days: int,
         grace_minutes: int,
         limit: int,
+        offset: int = 0,
     ) -> list[RaceRoom]:
         """Find completed weekend rooms, including practice, after provider grace."""
 
-        lower_bound = now - timedelta(days=lookback_days)
-        upper_bound = now - timedelta(minutes=grace_minutes)
         statement = (
             select(RaceRoomRecord)
-            .where(
-                RaceRoomRecord.session_type.in_(
-                    [item.value for item in COMPLETED_BACKFILL_SESSION_TYPES]
-                ),
-                RaceRoomRecord.scheduled_start >= lower_bound,
-                RaceRoomRecord.scheduled_start <= upper_bound,
-                or_(
-                    RaceRoomRecord.status == RoomStatus.COMPLETED.value,
-                    and_(
-                        RaceRoomRecord.session_type == SessionType.RACE.value,
-                        RaceRoomRecord.scheduled_start <= upper_bound - timedelta(hours=4),
-                    ),
-                    and_(
-                        RaceRoomRecord.session_type != SessionType.RACE.value,
-                        RaceRoomRecord.scheduled_start <= upper_bound - timedelta(hours=2),
-                    ),
-                ),
-                or_(
-                    RaceRoomRecord.session_key.is_(None),
-                    RaceRoomRecord.replay_available.is_(False),
-                    RaceRoomRecord.status.in_(
-                        [
-                            RoomStatus.PENDING.value,
-                            RoomStatus.INGESTING.value,
-                            RoomStatus.UNAVAILABLE.value,
-                            RoomStatus.FAILED.value,
-                        ]
-                    ),
-                    RaceRoomRecord.ingestion_status.in_(
-                        [
-                            IngestionStatus.PENDING.value,
-                            IngestionStatus.MATCHING.value,
-                            IngestionStatus.PARTIAL.value,
-                            IngestionStatus.FAILED.value,
-                            IngestionStatus.UNAVAILABLE.value,
-                        ]
-                    ),
-                    RaceRoomRecord.source_availability.in_(
-                        [
-                            SourceAvailability.UNAVAILABLE.value,
-                            SourceAvailability.RESULTS_ONLY.value,
-                            SourceAvailability.TIMING_ONLY.value,
-                        ]
-                    ),
-                ),
-            )
+            .where(*self._recent_reconciliation_filters(now, lookback_days, grace_minutes))
             .order_by(RaceRoomRecord.scheduled_start.desc(), RaceRoomRecord.slug.asc())
+            .offset(offset)
             .limit(limit)
         )
         async with self.database.session_factory() as session:
             records = (await session.execute(statement)).scalars().all()
             return [RaceRoom.model_validate(record, from_attributes=True) for record in records]
+
+    async def count_recent_reconciliation_candidates(
+        self,
+        *,
+        now: datetime,
+        lookback_days: int,
+        grace_minutes: int,
+    ) -> int:
+        statement = select(func.count(RaceRoomRecord.id)).where(
+            *self._recent_reconciliation_filters(now, lookback_days, grace_minutes)
+        )
+        async with self.database.session_factory() as session:
+            return int((await session.execute(statement)).scalar_one())
+
+    @staticmethod
+    def _recent_reconciliation_filters(
+        now: datetime,
+        lookback_days: int,
+        grace_minutes: int,
+    ) -> tuple[Any, ...]:
+        lower_bound = now - timedelta(days=lookback_days)
+        upper_bound = now - timedelta(minutes=grace_minutes)
+        return (
+            RaceRoomRecord.session_type.in_(
+                [item.value for item in COMPLETED_BACKFILL_SESSION_TYPES]
+            ),
+            RaceRoomRecord.scheduled_start >= lower_bound,
+            RaceRoomRecord.scheduled_start <= upper_bound,
+            or_(
+                RaceRoomRecord.status == RoomStatus.COMPLETED.value,
+                and_(
+                    RaceRoomRecord.session_type == SessionType.RACE.value,
+                    RaceRoomRecord.scheduled_start <= upper_bound - timedelta(hours=4),
+                ),
+                and_(
+                    RaceRoomRecord.session_type != SessionType.RACE.value,
+                    RaceRoomRecord.scheduled_start <= upper_bound - timedelta(hours=2),
+                ),
+            ),
+            or_(
+                RaceRoomRecord.session_key.is_(None),
+                RaceRoomRecord.replay_available.is_(False),
+                RaceRoomRecord.status.in_(
+                    [
+                        RoomStatus.PENDING.value,
+                        RoomStatus.INGESTING.value,
+                        RoomStatus.UNAVAILABLE.value,
+                        RoomStatus.FAILED.value,
+                    ]
+                ),
+                RaceRoomRecord.ingestion_status.in_(
+                    [
+                        IngestionStatus.PENDING.value,
+                        IngestionStatus.MATCHING.value,
+                        IngestionStatus.PARTIAL.value,
+                        IngestionStatus.FAILED.value,
+                        IngestionStatus.UNAVAILABLE.value,
+                    ]
+                ),
+                RaceRoomRecord.source_availability.in_(
+                    [
+                        SourceAvailability.UNAVAILABLE.value,
+                        SourceAvailability.RESULTS_ONLY.value,
+                        SourceAvailability.TIMING_ONLY.value,
+                    ]
+                ),
+            ),
+        )
 
     async def get_room(self, slug: str) -> RaceRoom | None:
         async with self.database.session_factory() as session:
