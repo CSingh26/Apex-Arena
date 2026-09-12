@@ -8,6 +8,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.proxy import REPLAY_OPERATOR_HEADER, ProxyContextMiddleware, replay_operator_password
+from app.api.rate_limits import RateLimitMiddleware
 from app.api.room_routes import router as room_router
 from app.api.routes import router
 from app.core.logging import configure_logging
@@ -58,8 +59,9 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
         description="Unified live and replay Formula racing intelligence for the 2026 season.",
         lifespan=lifespan,
     )
-    # Registered before CORS so the outermost layer rejects direct-origin traffic
-    # before any other handler observes the request.
+    # Execution order is CORS -> authenticated proxy hop -> Redis admission ->
+    # routes. Rejections retain CORS; invalid proxy traffic never touches Redis.
+    application.add_middleware(RateLimitMiddleware, settings=settings)
     application.add_middleware(ProxyContextMiddleware, settings=settings)
     application.add_middleware(
         CORSMiddleware,

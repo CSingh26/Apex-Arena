@@ -23,7 +23,7 @@ Companion documents: [`low-cost-production-architecture.md`](./low-cost-producti
 | --- | --- | --- |
 | Railway API service | Compute time + memory, always on | Yes — replicas, resources |
 | Railway ingestor service | Compute time + memory, always on | Yes — replicas, run only when needed |
-| Neon | Storage + compute hours | Partly — pool size and autosuspend; storage only by manual cleanup |
+| Neon | Storage + compute hours | Partly — pool size, autosuspend and bounded ingestion scope; source history remains persistent |
 | Upstash | Commands + storage + connections | Yes — heartbeat, idle connections |
 | Vercel (two projects) | Function invocations + bandwidth | Partly — the two-hop design doubles invocations |
 | OpenAI | Per token | Already funded — **do not disable to save infra money** |
@@ -186,23 +186,18 @@ A repository-wide search finds **no reader** of `raw_event_retention_days`,
 `replay_archive_enabled` anywhere in `backend/app/` outside `settings.py` itself. Confirm
 that yourself before assuming otherwise; it is a one-line grep.
 
-**Practical consequence:** database storage grows monotonically. Until a pruning
-implementation exists, the only actual storage controls are manual — a periodic `DELETE`
-against the direct endpoint, run outside a live session and after taking a Neon branch, plus
-shortening Neon's history-retention window. Do not report "retention is configured" on the
-basis of these variables being set.
+**Practical consequence:** durable storage grows with recorded sessions. Completed replay
+facts are intentionally persistent. Do not report "retention is configured" on the basis
+of these variables, and do not use generic date-based SQL deletion to control cost.
+Raw and normalized events can be referenced by evidence, rebuilds, replay indexes and
+in-progress recovery. An old session date or an archived UI mode is not proof that its
+records are unreferenced or safely backed up.
 
-When a pruning implementation lands, sensible starting values for a low-cost deployment:
-
-```
-RAW_EVENT_RETENTION_DAYS=14
-NORMALIZED_EVENT_RETENTION_DAYS=90
-PROVIDER_PAYLOAD_RETENTION_DAYS=7
-REPLAY_ARCHIVE_ENABLED=false
-```
-
-Raw events and provider payloads are the bulky, low-value-after-the-fact datasets;
-normalized events are what replays are built from, so keep them longer.
+Monitor database size and constrain ingestion/backfill scope before capacity is exhausted.
+Any future pruning needs an exact-session policy, bounded batches, concurrent-writer fencing,
+reference checks, and a verified archive-and-restore contract. A backup receipt must include
+an actual restore/replay check; setting `REPLAY_ARCHIVE_ENABLED` is not such a receipt.
+No pruning or production data mutation is part of the five-checkpoint development sprint.
 
 ### Backup reality
 
@@ -242,8 +237,9 @@ Every avoidable command is money:
   reads. The SSE loops already detect and report connection failures. Set this to `0` unless
   you have a specific reason not to.
 - **Do not point an external uptime monitor at `/health/ready`.** That endpoint runs a
-  database health check *and* a Redis `PING` on every call. A one-minute monitor is 43,200
-  extra Redis commands a month, plus 43,200 Neon queries keeping the compute awake. Monitor
+  database health check and a Redis `PING`, preceded by admission `EVAL`. A one-minute
+  monitor costs at least 86,400 Redis commands per 30-day month when admission succeeds,
+  plus 43,200 database queries. Monitor
   `/health/live` instead — it is deliberately dependency-free and it is the path Railway's
   own probe uses.
 - **Do not add client-side polling** alongside SSE. The stream is the transport; a polling
@@ -349,8 +345,9 @@ Shape it would take, when and if it is needed:
 - `REPLAY_ARCHIVE_ENABLED` is the settings flag that anticipates this; it is currently
   declared and unused.
 
-Preconditions before considering it: the retention pruning described above must actually be
-implemented and running, and Neon storage must be the demonstrated constraint. Adding an
+Preconditions before considering it: database storage must be the demonstrated constraint.
+Implement and verify archive restoration, evidence-reference preservation and replay parity
+before any source pruning is enabled. Adding an
 object store to a deployment that is nowhere near its storage quota adds a failure mode, a
 credential, and a bill for no benefit.
 
@@ -381,7 +378,7 @@ Run this once a month, and again after every race weekend:
 | Neon connections | `DB_POOL_SIZE=3`, `DB_MAX_OVERFLOW=2` | 5 per process + 1 lease connection on the ingestor |
 | Upstash commands | `REDIS_HEALTH_CHECK_INTERVAL_SECONDS=0`, longer `SSE_HEARTBEAT_SECONDS`, close idle streams | See the formula in `upstash-setup.md` |
 | Uptime monitoring | probe `/health/live`, never `/health/ready` | Avoids a DB query and a Redis `PING` per probe |
-| Storage | manual `DELETE` + Neon history window | The retention vars are **reserved and unimplemented** — they change nothing |
+| Storage | Monitor size and constrain ingestion scope; preserve source/replay history | Retention vars are **reserved and unimplemented**; no generic date-based deletion |
 | Ingestor between races | stop the service | No ingestion, no compute charge, no lease churn |
 | AI | leave alone | Already funded; not an infra lever |
 | OpenF1 | leave alone | Already paid; keep live ingestion authenticated |

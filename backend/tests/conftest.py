@@ -30,6 +30,7 @@ def no_replay_startup_io(monkeypatch):
 def settings() -> Settings:
     return Settings(
         app_env="test",
+        rate_limit_enabled=False,
         database_url="postgresql://apex:test-password@localhost:5432/apex_arena",
         database_migration_url=None,
         postgres_password="test-password",

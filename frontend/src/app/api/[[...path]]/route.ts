@@ -68,6 +68,8 @@ async function proxy(request: NextRequest, context: RouteContext): Promise<Respo
     body,
     cache: "no-store",
     redirect: "manual",
+    // A disconnected browser must not retain an upstream SSE lease/workload.
+    signal: request.signal,
   });
 
   const responseHeaders = new Headers(response.headers);

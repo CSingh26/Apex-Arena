@@ -94,14 +94,14 @@ The lead agent owns architecture, sequencing, integration, and final release jud
 ## Git and Push Protocol
 
 - Work remains on `sprints` and targets `origin/sprints`.
-- Produce at least 150 substantive, atomic commits on 2026-09-10 in the configured America/Phoenix timezone.
+- Superseded September 12: the user replaced the 150 target with exactly five more substantive, stable checkpoint commits and separate pushes after `975380967a5321900761f3002dd4b78061c69ef8`. Follow `../plans/2026-09-12-five-checkpoint-completion.md`.
 - Perform one distinct successful `git push origin sprints` after every commit; failed attempts do not count.
 - Do not create empty commits, filler edits, reversals made only to increase counts, merge bubbles for counting, or artificial file churn.
 - Do not rewrite history or force push.
-- Each commit contains one independently explainable change and its focused verification evidence.
+- Each commit contains one coherent release checkpoint and its verification evidence; reviewed work units within a checkpoint do not create additional commits.
 - Maintain an ignored execution ledger recording ordinal, commit SHA, subject, tests, push result, and phase.
 - Before each commit, verify the relevant focused tests. Before each phase closes, run its complete gate.
-- If 150 legitimate atomic changes cannot be justified without harming the product, stop and report the shortfall rather than corrupting history.
+- The five-push count does not waive master acceptance requirements or justify artificial churn.
 
 ## Completion Standard
 

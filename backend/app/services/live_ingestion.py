@@ -176,22 +176,7 @@ class LiveSessionIngestionService:
         by_key = {str(row.get("session_key")): row for row in self.rooms._provider_sessions}
         for room in active:
             if room.session_key is not None and room.session_key not in self.sessions:
-                if self.race_state is not None:
-                    state = await self.race_state.get_state(room.session_key)
-                    cursor = state.sequence_number
-                    while True:
-                        tail = await self.processor.normalized_repository.list_for_session(
-                            room.session_key,
-                            after_sequence=cursor,
-                            limit=1000,
-                        )
-                        if not tail:
-                            break
-                        for event in tail:
-                            await self.race_state.apply(event)
-                            cursor = event.sequence_number
-                        if len(tail) < 1000:
-                            break
+                await self.processor.initialize_session(room.session_key)
                 self.sessions[room.session_key] = LiveSessionProgress(room=room)
         # Keep recently finished diagnostics, but bound in-memory weekend history.
         self.sessions = {

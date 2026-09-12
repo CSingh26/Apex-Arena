@@ -134,6 +134,9 @@ class RaceMeeting(BaseModel):
     status: MeetingLifecycleStatus
     is_target: bool = False
     source_url: str | None = None
+    source_checked_at: datetime | None = None
+    source_age_seconds: float = Field(default=0, ge=0)
+    source_stale: bool = False
     sessions: list[RaceWeekendSession] = Field(default_factory=list)
 
 

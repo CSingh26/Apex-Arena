@@ -10,6 +10,7 @@ import { RaceRoomModeToggle, useRaceRoomMode } from "@/components/race-rooms/rac
 import { SelectedDriverContext } from "@/components/race-rooms/selected-driver-context";
 import { getSessionEvents, getSessionState, sessionStreamUrl } from "@/lib/api";
 import { formatGap, formatLapTime } from "@/lib/timing";
+import { reconnectDelay } from "@/lib/retry-delay";
 import { useDriverLocations, type LocationDataMode } from "@/lib/use-driver-locations";
 import type {
   BattleState,
@@ -436,7 +437,7 @@ export function LiveCommandCenter({
         nextSource.close();
         retry += 1;
         setConnection(retry > 3 ? "delayed" : "reconnecting");
-        timer = window.setTimeout(connect, Math.min(8_000, 500 * 2 ** retry));
+        timer = window.setTimeout(connect, reconnectDelay(retry, 500));
       });
     };
     connect();

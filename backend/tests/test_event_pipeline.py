@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
@@ -314,3 +315,84 @@ async def test_derived_events_follow_source_with_monotonic_sequence_without_recu
         EventOrigin.DERIVED,
     ]
     assert producer.consume_count == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("first_entry", ["ingest", "batch", "flush"])
+@pytest.mark.parametrize("blocked_origin", [EventOrigin.SOURCE_FACT, EventOrigin.DERIVED])
+async def test_session_intake_keeps_source_and_derived_application_order(
+    first_entry: str, blocked_origin: EventOrigin
+) -> None:
+    from app.services.race_state import RaceStateEngine
+    from tests.test_race_intelligence import Snapshots
+
+    class DelayedRepository(NormalizedRepository):
+        def __init__(self):
+            super().__init__()
+            self.blocked = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def insert(self, event):
+            if (
+                event.session_key == "race"
+                and event.driver_numbers == [1]
+                and event.event_origin == blocked_origin
+            ):
+                self.blocked.set()
+                await self.release.wait()
+            return await super().insert(event)
+
+    repository = DelayedRepository()
+    state = RaceStateEngine(Snapshots(), snapshot_every_n_events=100)
+    recorder = Consumer()
+    pipeline = RaceEventProcessor(
+        raw_events=RawProviderEventService(RawRepository()),
+        normalizer=OpenF1EventNormalizer(),
+        normalized_repository=repository,
+        deduplicator=EventDeduplicator(),
+        ordering_buffer=EventOrderingBuffer(1500 if first_entry == "flush" else 0),
+        sequence_numbers=SequenceNumberService(repository),
+        consumers=[state, DerivedProducer(), recorder],
+    )
+
+    def raw(driver, session="race"):
+        return RawEventInput(
+            provider_endpoint="position",
+            session_key=session,
+            event_time=datetime(2026, 7, 19, 13, tzinfo=UTC),
+            raw_payload={"driver_number": driver, "position": driver},
+        )
+
+    if first_entry == "flush":
+        await pipeline.ingest(raw(1))
+        first = asyncio.create_task(pipeline.flush_session("race"))
+    elif first_entry == "batch":
+        first = asyncio.create_task(pipeline.ingest_batch([raw(1)]))
+    else:
+        first = asyncio.create_task(pipeline.ingest(raw(1)))
+    await asyncio.wait_for(repository.blocked.wait(), 1)
+    competing = asyncio.create_task(pipeline.ingest_batch([raw(2)]))
+    flushing = asyncio.create_task(pipeline.flush_session("race"))
+    try:
+        # A blocked session must not stall another session on this shared processor.
+        await asyncio.wait_for(pipeline.ingest_batch([raw(3, "other")]), 1)
+        await asyncio.sleep(0)
+    finally:
+        repository.release.set()
+        await asyncio.gather(first, competing, flushing)
+
+    events = await repository.list_for_session("race")
+    assert [(event.driver_numbers, event.event_origin) for event in events] == [
+        ([1], EventOrigin.SOURCE_FACT),
+        ([1], EventOrigin.DERIVED),
+        ([2], EventOrigin.SOURCE_FACT),
+        ([2], EventOrigin.DERIVED),
+    ]
+    assert [event.sequence_number for event in recorder.events if event.session_key == "race"] == [
+        1,
+        2,
+        3,
+        4,
+    ]
+    assert sorted((await state.get_state("race")).drivers) == ["1", "2"]
+    assert sorted((await state.get_state("other")).drivers) == ["3"]

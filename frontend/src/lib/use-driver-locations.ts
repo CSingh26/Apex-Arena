@@ -103,7 +103,7 @@ function nowPerf(): number {
 }
 
 function pruneLoadedWindows(cache: SessionCache, targetMs: number): void {
-  const firstRetained = windowIndex(targetMs - SERIES_RETENTION_MS) - 1;
+  const firstRetained = windowIndex(targetMs - SERIES_RETENTION_MS);
   const lastRetained = windowIndex(targetMs + WINDOW_LOOKAHEAD_MS);
   for (const key of cache.loadedKeys) {
     const index = Number(key.slice(key.lastIndexOf(":") + 1));
@@ -329,11 +329,15 @@ export function useDriverLocations({
         }
         if (isStale() || !loadedAny) return;
         const latestTarget = cache.clock?.target ?? targetMs;
+        // A cached window promises complete coverage. Retain its whole sample
+        // range, including boundary windows, until its cache key is evicted.
+        const retainedFrom = windowIndex(latestTarget - SERIES_RETENTION_MS) * WINDOW_MS;
+        const retainedUntil = (windowIndex(latestTarget + WINDOW_LOOKAHEAD_MS) + 1) * WINDOW_MS;
         cache.series = pruneSeries(
           cache.series,
           latestTarget,
-          SERIES_RETENTION_MS,
-          WINDOW_LOOKAHEAD_MS,
+          latestTarget - retainedFrom,
+          retainedUntil - latestTarget,
         );
         pruneLoadedWindows(cache, latestTarget);
         const numbers = [...cache.series.keys()].sort((left, right) => left - right);

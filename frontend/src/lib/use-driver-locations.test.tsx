@@ -72,6 +72,33 @@ describe("useDriverLocations", () => {
     );
   });
 
+  it("retains dense immutable samples across non-aligned ticks and backward seeks", async () => {
+    const epoch = Date.parse("2026-09-06T13:00:00Z");
+    api.getSessionLocationSamples.mockImplementation((sessionKey: string, window: { since: string }) => {
+      const start = Date.parse(window.since);
+      return Promise.resolve(locations(Array.from({ length: 30 }, (_, index) => ({
+        driver_number: 63,
+        x: (start - epoch) / 1000 + index,
+        y: 0,
+        z: 0,
+        sample_time: new Date(start + index * 1000).toISOString(),
+      })), sessionKey));
+    });
+    const view = renderHook(({ second }) => useDriverLocations({
+      sessionKey: "race-1",
+      dataMode: "immutable",
+      clockIso: new Date(epoch + second * 1000).toISOString(),
+    }), { initialProps: { second: 1 } });
+
+    for (const second of [1, 9, 17, 25, 33, 41, 241, 9, 17, 25, 33, 41]) {
+      await act(async () => view.rerender({ second }));
+      await waitFor(() => expect(view.result.current.sampleAt(epoch + second * 1000)[0]?.x).toBe(second));
+    }
+    expect(view.result.current.debug.loadedSamples).toBeLessThanOrEqual(300);
+    // Whole immutable windows are reused, not fetched on each replay tick.
+    expect(api.getSessionLocationSamples.mock.calls.length).toBeLessThan(15);
+  });
+
   it("refreshes missing track geometry after live location fixes begin", async () => {
     api.getSessionTrack
       .mockResolvedValueOnce({ track: unavailableTrack })

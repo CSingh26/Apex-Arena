@@ -290,7 +290,7 @@ async def health_live(services: Services) -> dict[str, object]:
 
 
 @router.get("/health/ready", response_model=None)
-async def health_ready(services: Services) -> JSONResponse:
+async def health_ready(services: Services, request: Request = None) -> JSONResponse:
     """Dependency-aware readiness probe suitable for traffic admission."""
     database_result, redis_result = await asyncio.gather(
         services.database.health_check(),
@@ -298,7 +298,10 @@ async def health_ready(services: Services) -> JSONResponse:
     )
     database_ok, _ = database_result
     redis_ok, _ = redis_result
-    ready = database_ok and redis_ok
+    admission_unavailable = request is not None and getattr(
+        request.state, "admission_unavailable", False
+    )
+    ready = database_ok and redis_ok and not admission_unavailable
     return JSONResponse(
         status_code=status.HTTP_200_OK if ready else status.HTTP_503_SERVICE_UNAVAILABLE,
         content={
@@ -307,6 +310,7 @@ async def health_ready(services: Services) -> JSONResponse:
             "dependencies": {
                 "database": "ready" if database_ok else "unavailable",
                 "redis": "ready" if redis_ok else "unavailable",
+                **({"admission": "unavailable"} if admission_unavailable else {}),
             },
             "checked_at": datetime.now(UTC).isoformat(),
         },
@@ -783,7 +787,14 @@ async def season_calendar(year: int, services: Services) -> SeasonCalendarSummar
 
     try:
         races = await services.season.calendar(year)
-    except (httpx.HTTPError, JolpicaPayloadError, KeyError, TypeError, ValueError) as exc:
+    except (
+        httpx.HTTPError,
+        JolpicaPayloadError,
+        KeyError,
+        TypeError,
+        ValueError,
+        TimeoutError,
+    ) as exc:
         logger.warning("Jolpica calendar unavailable: %s", type(exc).__name__)
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,

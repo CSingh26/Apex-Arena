@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -110,3 +111,127 @@ async def test_weather_times_out_without_blocking_room_data() -> None:
 
     assert weather.available is False
     assert "temporarily unavailable" in weather.notice
+
+
+async def test_weather_cache_coalesces_and_labels_bounded_stale_data(monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr(
+        "app.services.circuit_intelligence.time",
+        SimpleNamespace(monotonic=lambda: clock[0]),
+        raising=False,
+    )
+    provider = AsyncMock()
+    provider.weather.return_value = [{"date": "2026-07-18T13:00:00Z", "air_temperature": 21.2}]
+    service = CircuitWeatherService(provider)
+    first, second = await asyncio.gather(service.for_session("9876"), service.for_session("9876"))
+    assert provider.weather.await_count == 1
+    first.air_temperature_c = 99
+    assert second.air_temperature_c == 21.2
+    clock[0] += 31
+    provider.weather.side_effect = RuntimeError("synthetic unavailable")
+    stale = await service.for_session("9876")
+    assert stale.available and stale.source_stale
+    assert stale.source_age_seconds == 31
+    assert stale.air_temperature_c == 21.2
+    await service.for_session("9876")
+    assert provider.weather.await_count == 2
+    clock[0] += 300
+    assert not (await service.for_session("9876")).available
+
+
+@pytest.mark.parametrize("value", [float("inf"), float("-inf"), "Infinity", "NaN", 10**400])
+async def test_weather_rejects_nonfinite_measurements(value):
+    provider = AsyncMock()
+    provider.weather.return_value = [{"date": "2026-07-18T13:00:00Z", "air_temperature": value}]
+    assert not (await CircuitWeatherService(provider).for_session("9876")).available
+
+
+async def test_weather_cache_bounds_keys_and_coalesces_negative_results():
+    provider = AsyncMock()
+    provider.weather.return_value = []
+    service = CircuitWeatherService(provider)
+    results = await asyncio.gather(service.for_session("empty"), service.for_session("empty"))
+    assert all(not result.available for result in results)
+    assert provider.weather.await_count == 1
+    for number in range(65):
+        await service.for_session(str(number))
+    await service.for_session("empty")
+    assert provider.weather.await_count == 67
+
+
+async def test_weather_cancellation_releases_fetch_lock_without_caching():
+    provider = AsyncMock()
+    entered = asyncio.Event()
+
+    async def blocked(**filters):
+        entered.set()
+        await asyncio.Event().wait()
+
+    provider.weather.side_effect = blocked
+    service = CircuitWeatherService(provider)
+    task = asyncio.create_task(service.for_session("9876"))
+    await entered.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    provider.weather.side_effect = None
+    provider.weather.return_value = []
+    await asyncio.wait_for(service.for_session("9876"), timeout=1)
+    assert provider.weather.await_count == 2
+
+
+async def test_weather_cache_hit_does_not_wait_for_another_session_fetch():
+    provider = AsyncMock()
+    provider.weather.return_value = [{"air_temperature": 21.2}]
+    service = CircuitWeatherService(provider, timeout_seconds=1)
+    await service.for_session("cached")
+    entered = asyncio.Event()
+
+    async def blocked(**filters):
+        entered.set()
+        await asyncio.Event().wait()
+
+    provider.weather.side_effect = blocked
+    task = asyncio.create_task(service.for_session("cold"))
+    await entered.wait()
+    try:
+        result = await asyncio.wait_for(service.for_session("cached"), timeout=0.05)
+        assert result.available
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+
+async def test_weather_deadline_includes_waiting_for_cache_lock():
+    provider = AsyncMock()
+    service = CircuitWeatherService(provider, timeout_seconds=0.005)
+    async with service._lock:
+        result = await asyncio.wait_for(service.for_session("queued"), timeout=0.1)
+    assert not result.available
+    assert "temporarily unavailable" in result.notice
+    provider.weather.assert_not_awaited()
+
+
+@pytest.mark.parametrize("warm", [False, True])
+async def test_weather_total_deadline_retains_retry_cooldown(monkeypatch, warm):
+    clock = [1000.0]
+    monkeypatch.setattr(
+        "app.services.circuit_intelligence.time", SimpleNamespace(monotonic=lambda: clock[0])
+    )
+    provider = AsyncMock()
+    provider.weather.return_value = [{"air_temperature": 21.2}]
+    service = CircuitWeatherService(provider, timeout_seconds=0.005)
+    if warm:
+        await service.for_session("9876")
+        clock[0] += 31
+
+    async def blocked(**filters):
+        await asyncio.Event().wait()
+
+    provider.weather.side_effect = blocked
+    attempts = provider.weather.await_count
+    first = await service.for_session("9876")
+    second = await service.for_session("9876")
+    assert first.available is warm and second.available is warm
+    assert provider.weather.await_count == attempts + 1

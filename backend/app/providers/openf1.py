@@ -18,6 +18,7 @@ import httpx
 import paho.mqtt.client as mqtt
 
 from app.core.settings import Settings
+from app.providers.retry import bounded_retry_delay
 from app.services.event_pipeline import RaceEventProcessor
 from app.services.raw_events import RawEventInput
 from app.storage.redis import EventBus
@@ -182,12 +183,9 @@ class OpenF1RestClient:
                 break
             if attempt + 1 >= self.retry_attempts:
                 break
-            retry_after = response.headers.get("Retry-After")
-            try:
-                server_delay = float(retry_after) if retry_after is not None else 0.0
-            except ValueError:
-                server_delay = 0.0
-            await asyncio.sleep(max(server_delay, self._retry_delay(attempt)))
+            await asyncio.sleep(
+                bounded_retry_delay(response.headers.get("Retry-After"), self._retry_delay(attempt))
+            )
 
         if response is None:
             assert last_request_error is not None

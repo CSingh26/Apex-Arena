@@ -138,6 +138,7 @@ class EventBus:
             {
                 "kind": "room_message",
                 "sequence_number": str(message.sequence),
+                "discussion_generation": str(message.discussion_generation),
                 "data": message.model_dump_json(),
             },
             maxlen=5000,
@@ -149,6 +150,7 @@ class EventBus:
             {
                 "kind": "playback_state",
                 "sequence_number": str(state.get("current_message_sequence") or 0),
+                "discussion_generation": str(state.get("discussion_generation") or 1),
                 "data": json.dumps(state, default=str),
             },
             maxlen=5000,
@@ -158,6 +160,22 @@ class EventBus:
         return await self._publish(
             self.room_stream(room_id),
             {"kind": "room_status", "data": json.dumps(status, default=str)},
+            maxlen=5000,
+        )
+
+    async def publish_room_generation(self, room_id: str, discussion_generation: int) -> str:
+        return await self._publish(
+            self.room_stream(room_id),
+            {
+                "kind": "discussion_generation",
+                "discussion_generation": str(discussion_generation),
+                "data": json.dumps(
+                    {
+                        "room_id": room_id,
+                        "discussion_generation": discussion_generation,
+                    }
+                ),
+            },
             maxlen=5000,
         )
 
@@ -252,6 +270,11 @@ class EventBus:
                         "stream_id": stream_id,
                         "kind": values.get("kind", "event"),
                         "sequence_number": int(values.get("sequence_number", 0)),
+                        "discussion_generation": (
+                            int(values["discussion_generation"])
+                            if values.get("discussion_generation") is not None
+                            else None
+                        ),
                         "data": json.loads(values["data"]),
                     }
                 )

@@ -555,6 +555,7 @@ export type RaceRoom = {
   replay_available?: boolean; results_available?: boolean;
   telemetry_quality: string;
   message_count: number; agent_count: number; last_event_at: string | null; created_at: string; updated_at: string;
+  discussion_generation: number;
   is_featured: boolean;
   current_phase?: string | null;
   phase_boundaries_available?: boolean;
@@ -569,6 +570,7 @@ export type AgentProfile = {
 
 export type RoomMessage = {
   id: string; room_id: string; agent_id: string; sequence: number; lap_number: number | null;
+  discussion_generation: number;
   session_time: number | null; wall_time: string | null; topic: MessageTopic; message_type: MessageType;
   content: string; confidence: "low" | "medium" | "high"; evidence_status: "grounded" | "partial" | "unavailable";
   reply_to_message_id: string | null; trigger_event_id: string | null; trigger_snapshot_id: string | null;
@@ -586,6 +588,7 @@ export type RoomPlayback = {
   room_id: string;
   current_event_sequence: number;
   current_message_sequence: number;
+  discussion_generation: number;
   current_lap: number | null;
   playback_speed: number;
   is_paused: boolean;
@@ -625,7 +628,12 @@ export type RaceRoomDetailResponse = {
   data_notice: string;
   diagnostics_available: boolean;
 };
-export type RoomMessagesResponse = { messages: RoomMessage[]; next_cursor: number | null };
+export type RoomMessagesResponse = {
+  discussion_generation: number;
+  reset_required: boolean;
+  messages: RoomMessage[];
+  next_cursor: number | null;
+};
 export type MessageEvidenceResponse = {
   message_id: string;
   evidence: MessageEvidence[];

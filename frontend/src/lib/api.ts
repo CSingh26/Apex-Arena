@@ -42,7 +42,7 @@ async function request<T>(path: string, signal?: AbortSignal): Promise<T> {
 }
 
 export class ApiError extends Error {
-  constructor(message: string, readonly status: number) {
+  constructor(message: string, readonly status: number, readonly retryAfterSeconds?: number) {
     super(message);
     this.name = "ApiError";
   }
@@ -73,12 +73,32 @@ async function mutate<T>(path: string, body?: object, operatorPassword?: string)
 
 async function responseError(response: Response): Promise<Error> {
   const fallback = `API request failed with HTTP ${response.status}`;
+  const retryAfterSeconds = retryAfter(response);
+  const guidance = retryAfterSeconds ? ` Retry in ${retryAfterSeconds} seconds.` : "";
   try {
     const body = await response.json() as { detail?: string };
-    return new ApiError(body.detail || fallback, response.status);
+    // This existing server contract requires operator configuration, not time.
+    // Never attach a synthesized retry deadline to a permanent disabled state.
+    if (response.status === 503 && body.detail === "Replay operator access is not configured") {
+      return new ApiError(body.detail, response.status);
+    }
+    return new ApiError(
+      (typeof body.detail === "string" && body.detail ? body.detail : fallback) + guidance,
+      response.status, retryAfterSeconds,
+    );
   } catch {
-    return new ApiError(fallback, response.status);
+    return new ApiError(fallback + guidance, response.status, retryAfterSeconds);
   }
+}
+
+function retryAfter(response: Response): number | undefined {
+  if (response.status !== 429 && response.status !== 503) return undefined;
+  const raw = response.headers.get("Retry-After")?.trim() ?? "";
+  // Parse only delta-seconds or an HTTP date, not JS numeric conveniences.
+  const seconds = /^\d+$/.test(raw)
+    ? Number(raw)
+    : /^[A-Za-z]{3}, /.test(raw) ? (Date.parse(raw) - Date.now()) / 1000 : NaN;
+  return Number.isFinite(seconds) && seconds > 0 ? Math.min(300, Math.ceil(seconds)) : 5;
 }
 
 export function getHealth(signal?: AbortSignal): Promise<HealthResponse> {
@@ -251,6 +271,10 @@ export function getRoomDiagnostics(slug: string, signal?: AbortSignal): Promise<
   return request<RoomDiagnostics>(`/rooms/${encodeURIComponent(slug)}/diagnostics`, signal);
 }
 
-export function roomStreamUrl(slug: string, afterSequence = 0): string {
-  return apiPath(`/rooms/${encodeURIComponent(slug)}/stream?after_sequence=${afterSequence}`);
+export function roomStreamUrl(slug: string, afterSequence = 0, discussionGeneration?: number): string {
+  const params = new URLSearchParams({ after_sequence: String(afterSequence) });
+  if (discussionGeneration !== undefined) {
+    params.set("discussion_generation", String(discussionGeneration));
+  }
+  return apiPath(`/rooms/${encodeURIComponent(slug)}/stream?${params.toString()}`);
 }

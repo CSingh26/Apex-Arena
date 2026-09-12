@@ -123,6 +123,14 @@ def test_other_seasons_are_rejected(settings: Settings) -> None:
     assert response.status_code == 404
 
 
+def test_calendar_deadline_returns_actionable_unavailability(settings: Settings) -> None:
+    with TestClient(create_app(settings), raise_server_exceptions=False) as client:
+        client.app.state.services.season.calendar = AsyncMock(side_effect=TimeoutError)
+        response = client.get("/api/v1/season/2026")
+    assert response.status_code == 503
+    assert response.json()["detail"] == "The season calendar provider is temporarily unavailable"
+
+
 def test_engine_status_reports_current_session_counts(settings: Settings) -> None:
     app = create_app(settings)
     with TestClient(app) as client:

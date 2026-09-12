@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
@@ -60,6 +61,18 @@ class ReplayWriteBusyError(RuntimeError):
     """A transaction was rolled back so its worker's heartbeat can keep renewing."""
 
 
+class DiscussionGenerationChangedError(RuntimeError):
+    """A discussion writer observed an obsolete room generation."""
+
+
+@dataclass(frozen=True)
+class DiscussionPage:
+    discussion_generation: int
+    messages: list[RoomMessage]
+    next_cursor: int | None
+    reset_required: bool = False
+
+
 class SqlRaceRoomRepository:
     def __init__(self, database: Database) -> None:
         self.database = database
@@ -91,6 +104,7 @@ class SqlRaceRoomRepository:
         values["agent_count"] = len(agent_ids)
         dynamic_fields = {
             "id",
+            "discussion_generation",
             "message_count",
             "generated_message_count",
             "last_generated_sequence",
@@ -632,14 +646,26 @@ class SqlRaceRoomRepository:
             return int((await session.execute(statement)).scalar_one_or_none() or 0) + 1
 
     async def insert_message(
-        self, message: RoomMessage, evidence: list[MessageEvidence]
+        self,
+        message: RoomMessage,
+        evidence: list[MessageEvidence],
+        *,
+        expected_generation: int,
     ) -> tuple[RoomMessage, bool]:
         async with self.database.session_factory() as session:
-            await session.execute(
-                select(RaceRoomRecord.id)
-                .where(RaceRoomRecord.id == message.room_id)
-                .with_for_update()
-            )
+            generation = (
+                await session.execute(
+                    select(RaceRoomRecord.discussion_generation)
+                    .where(RaceRoomRecord.id == message.room_id)
+                    .with_for_update()
+                )
+            ).scalar_one_or_none()
+            if generation is None:
+                raise DiscussionGenerationChangedError("Race room no longer exists")
+            if generation != expected_generation:
+                raise DiscussionGenerationChangedError(
+                    "Discussion generation changed; discard stale generated output"
+                )
             sequence = (
                 int(
                     (
@@ -653,8 +679,13 @@ class SqlRaceRoomRepository:
                 )
                 + 1
             )
-            stored_message = message.model_copy(update={"sequence": sequence})
-            values = stored_message.model_dump()
+            stored_message = message.model_copy(
+                update={
+                    "sequence": sequence,
+                    "discussion_generation": expected_generation,
+                }
+            )
+            values = stored_message.model_dump(exclude={"discussion_generation"})
             for key in ("topic", "message_type", "confidence", "evidence_status"):
                 values[key] = getattr(stored_message, key).value
             statement = (
@@ -700,34 +731,86 @@ class SqlRaceRoomRepository:
         sequence_to: int | None = None,
         limit: int = 100,
     ) -> list[RoomMessage]:
-        filters = [
-            RoomMessageRecord.room_id == room_id,
-            RoomMessageRecord.sequence > after_sequence,
-            RoomMessageRecord.archived_at.is_(None),
-        ]
-        if agent_id:
-            filters.append(RoomMessageRecord.agent_id == agent_id)
-        if topic:
-            filters.append(RoomMessageRecord.topic == topic.value)
-        if message_type:
-            filters.append(RoomMessageRecord.message_type == message_type.value)
-        if lap_from is not None:
-            filters.append(RoomMessageRecord.lap_number >= lap_from)
-        if lap_to is not None:
-            filters.append(RoomMessageRecord.lap_number <= lap_to)
-        if sequence_from is not None:
-            filters.append(RoomMessageRecord.sequence >= sequence_from)
-        if sequence_to is not None:
-            filters.append(RoomMessageRecord.sequence <= sequence_to)
-        statement = (
-            select(RoomMessageRecord)
-            .where(and_(*filters))
-            .order_by(RoomMessageRecord.sequence)
-            .limit(limit)
+        page = await self.list_message_page(
+            room_id,
+            after_sequence=after_sequence,
+            agent_id=agent_id,
+            topic=topic,
+            message_type=message_type,
+            lap_from=lap_from,
+            lap_to=lap_to,
+            sequence_from=sequence_from,
+            sequence_to=sequence_to,
+            limit=limit,
         )
+        return page.messages
+
+    async def list_message_page(
+        self,
+        room_id: UUID,
+        *,
+        expected_generation: int | None = None,
+        after_sequence: int = 0,
+        agent_id: str | None = None,
+        topic: MessageTopic | None = None,
+        message_type: MessageType | None = None,
+        lap_from: int | None = None,
+        lap_to: int | None = None,
+        sequence_from: int | None = None,
+        sequence_to: int | None = None,
+        limit: int = 100,
+    ) -> DiscussionPage:
         async with self.database.session_factory() as session:
+            generation = (
+                await session.execute(
+                    select(RaceRoomRecord.discussion_generation)
+                    .where(RaceRoomRecord.id == room_id)
+                    .with_for_update(read=True)
+                )
+            ).scalar_one_or_none()
+            if generation is None:
+                raise DiscussionGenerationChangedError("Race room no longer exists")
+            generation = int(generation)
+            reset_required = expected_generation is not None and expected_generation != generation
+            effective_after = 0 if reset_required else after_sequence
+            filters = [
+                RoomMessageRecord.room_id == room_id,
+                RoomMessageRecord.sequence > effective_after,
+                RoomMessageRecord.archived_at.is_(None),
+            ]
+            if agent_id:
+                filters.append(RoomMessageRecord.agent_id == agent_id)
+            if topic:
+                filters.append(RoomMessageRecord.topic == topic.value)
+            if message_type:
+                filters.append(RoomMessageRecord.message_type == message_type.value)
+            if lap_from is not None:
+                filters.append(RoomMessageRecord.lap_number >= lap_from)
+            if lap_to is not None:
+                filters.append(RoomMessageRecord.lap_number <= lap_to)
+            if sequence_from is not None:
+                filters.append(RoomMessageRecord.sequence >= sequence_from)
+            if sequence_to is not None:
+                filters.append(RoomMessageRecord.sequence <= sequence_to)
+            statement = (
+                select(RoomMessageRecord)
+                .where(and_(*filters))
+                .order_by(RoomMessageRecord.sequence)
+                .limit(limit)
+            )
             records = (await session.execute(statement)).scalars().all()
-            return [RoomMessage.model_validate(record, from_attributes=True) for record in records]
+            messages = [
+                RoomMessage.model_validate(record, from_attributes=True).model_copy(
+                    update={"discussion_generation": generation}
+                )
+                for record in records
+            ]
+            return DiscussionPage(
+                discussion_generation=generation,
+                messages=messages,
+                next_cursor=messages[-1].sequence if len(messages) == limit else None,
+                reset_required=reset_required,
+            )
 
     async def message_evidence(self, message_id: UUID) -> list[MessageEvidence]:
         statement = (
@@ -953,13 +1036,25 @@ class SqlRaceRoomRepository:
 
     async def get_playback(self, room_id: UUID) -> RoomPlaybackState:
         async with self.database.session_factory() as session:
-            record = await session.get(RoomPlaybackStateRecord, room_id)
-            if record is None:
-                record = RoomPlaybackStateRecord(room_id=room_id)
-                session.add(record)
+            projection = (
+                select(RoomPlaybackStateRecord, RaceRoomRecord.discussion_generation)
+                .join(RaceRoomRecord, RaceRoomRecord.id == RoomPlaybackStateRecord.room_id)
+                .where(RoomPlaybackStateRecord.room_id == room_id)
+            )
+            row = (await session.execute(projection)).one_or_none()
+            if row is None:
+                await session.execute(
+                    insert(RoomPlaybackStateRecord)
+                    .values(room_id=room_id)
+                    .on_conflict_do_nothing(index_elements=["room_id"])
+                )
                 await session.commit()
-                await session.refresh(record)
-            return RoomPlaybackState.model_validate(record, from_attributes=True)
+                row = (await session.execute(projection)).one()
+            # Both fields belong to one READ COMMITTED statement snapshot.
+            record, generation = row
+            return RoomPlaybackState.model_validate(record, from_attributes=True).model_copy(
+                update={"discussion_generation": int(generation)}
+            )
 
     async def update_playback(
         self,
@@ -1008,7 +1103,12 @@ class SqlRaceRoomRepository:
                     update(RaceRoomRecord).where(RaceRoomRecord.id == room_id).values(**room_values)
                 )
             record = await session.get(RoomPlaybackStateRecord, room_id)
-            result = RoomPlaybackState.model_validate(record, from_attributes=True)
+            generation = await session.scalar(
+                select(RaceRoomRecord.discussion_generation).where(RaceRoomRecord.id == room_id)
+            )
+            result = RoomPlaybackState.model_validate(record, from_attributes=True).model_copy(
+                update={"discussion_generation": int(generation or 1)}
+            )
             return result
 
     async def max_message_sequence(self, room_id: UUID) -> int:
@@ -1064,9 +1164,10 @@ class SqlRaceRoomRepository:
         room_id: UUID,
         status: ChatGenerationStatus,
         *,
+        expected_generation: int,
         generation_version: str,
         error: str | None = None,
-    ) -> None:
+    ) -> bool:
         now = datetime.now(UTC)
         values: dict[str, object | None] = {
             "chat_generation_status": status.value,
@@ -1085,15 +1186,38 @@ class SqlRaceRoomRepository:
         }:
             values["generation_completed_at"] = now
         async with self.database.session_factory() as session:
-            await session.execute(
-                update(RaceRoomRecord).where(RaceRoomRecord.id == room_id).values(**values)
+            result = await session.execute(
+                update(RaceRoomRecord)
+                .where(
+                    RaceRoomRecord.id == room_id,
+                    RaceRoomRecord.discussion_generation == expected_generation,
+                )
+                .values(**values)
             )
             await session.commit()
+            return bool(result.rowcount)
 
-    async def archive_generated_messages(self, room_id: UUID, generation_version: str) -> int:
+    async def archive_generated_messages(
+        self,
+        room_id: UUID,
+        generation_version: str,
+        *,
+        expected_generation: int,
+    ) -> int:
         """Soft-hide one generated version without deleting evidence or user content."""
         now = datetime.now(UTC)
         async with self.database.session_factory() as session:
+            generation = (
+                await session.execute(
+                    select(RaceRoomRecord.discussion_generation)
+                    .where(RaceRoomRecord.id == room_id)
+                    .with_for_update()
+                )
+            ).scalar_one_or_none()
+            if generation != expected_generation:
+                raise DiscussionGenerationChangedError(
+                    "Discussion generation changed; do not archive current messages"
+                )
             result = await session.execute(
                 update(RoomMessageRecord)
                 .where(
@@ -1149,7 +1273,14 @@ class SqlRaceRoomRepository:
             await session.commit()
             return int(result.rowcount or 0)
 
-    async def reset_discussion(self, room_id: UUID, *, owner_token: UUID | None = None) -> None:
+    async def begin_discussion_restart(
+        self,
+        room_id: UUID,
+        *,
+        owner_token: UUID,
+        started_at: datetime,
+    ) -> RoomPlaybackState:
+        """Atomically start a new empty discussion generation in a safe paused state."""
         message_ids = select(RoomMessageRecord.id).where(RoomMessageRecord.room_id == room_id)
         async with self._replay_mutation(room_id, owner_token, lock_room=True) as session:
             await session.execute(
@@ -1163,5 +1294,34 @@ class SqlRaceRoomRepository:
             await session.execute(
                 update(RaceRoomRecord)
                 .where(RaceRoomRecord.id == room_id)
-                .values(message_count=0, current_lap=None, last_event_at=None)
+                .values(
+                    discussion_generation=RaceRoomRecord.discussion_generation + 1,
+                    message_count=0,
+                    generated_message_count=0,
+                    last_generated_sequence=0,
+                    current_lap=None,
+                    last_event_at=None,
+                    status=RoomStatus.PAUSED.value,
+                    updated_at=started_at,
+                )
+            )
+            await session.execute(
+                update(RoomPlaybackStateRecord)
+                .where(RoomPlaybackStateRecord.room_id == room_id)
+                .values(
+                    current_event_sequence=0,
+                    current_message_sequence=0,
+                    current_lap=0,
+                    playback_speed=1,
+                    is_paused=True,
+                    started_at=started_at,
+                    updated_at=started_at,
+                )
+            )
+            playback = await session.get(RoomPlaybackStateRecord, room_id)
+            generation = await session.scalar(
+                select(RaceRoomRecord.discussion_generation).where(RaceRoomRecord.id == room_id)
+            )
+            return RoomPlaybackState.model_validate(playback, from_attributes=True).model_copy(
+                update={"discussion_generation": int(generation)}
             )

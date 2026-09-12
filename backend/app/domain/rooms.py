@@ -8,6 +8,8 @@ from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field
 
+MAX_DISCUSSION_GENERATION = 9_007_199_254_740_991
+
 
 class RoomStatus(StrEnum):
     PENDING = "pending"
@@ -250,6 +252,7 @@ class RaceRoom(BaseModel):
     chat_generation_status: ChatGenerationStatus = ChatGenerationStatus.PENDING
     generated_message_count: int = 0
     last_generated_sequence: int = 0
+    discussion_generation: int = Field(default=1, ge=1, le=MAX_DISCUSSION_GENERATION)
     generation_version: str = "rooms-v1"
     generation_error: str | None = None
     generation_started_at: datetime | None = None
@@ -316,6 +319,7 @@ class RoomMessage(BaseModel):
     room_id: UUID
     agent_id: str
     sequence: int
+    discussion_generation: int = Field(default=1, ge=1, le=MAX_DISCUSSION_GENERATION)
     lap_number: int | None = None
     session_time: float | None = None
     wall_time: datetime | None = None
@@ -357,6 +361,7 @@ class RoomPlaybackState(BaseModel):
     room_id: UUID
     current_event_sequence: int = 0
     current_message_sequence: int = 0
+    discussion_generation: int = Field(default=1, ge=1, le=MAX_DISCUSSION_GENERATION)
     current_lap: int | None = None
     playback_speed: float = Field(default=1.0, ge=0.5, le=8)
     is_paused: bool = True

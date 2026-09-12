@@ -5,17 +5,37 @@ from __future__ import annotations
 
 import asyncio
 import os
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from app.domain.rooms import RoomMode, RoomStatus
+from app.domain.rooms import (
+    Confidence,
+    EvidenceStatus,
+    MessageEvidence,
+    MessageTopic,
+    MessageType,
+    RoomMessage,
+    RoomMode,
+    RoomStatus,
+)
 from app.storage.database import Base, Database
-from app.storage.models import RaceRoomRecord, RoomPlaybackStateRecord
-from app.storage.room_repository import SqlRaceRoomRepository
+from app.storage.models import (
+    AgentProfileRecord,
+    MessageEvidenceRecord,
+    RaceRoomRecord,
+    RoomMessageRecord,
+    RoomPlaybackStateRecord,
+)
+from app.storage.room_repository import (
+    DiscussionGenerationChangedError,
+    SqlRaceRoomRepository,
+)
 from tests.test_room_replay import replay_room
 
 
@@ -45,6 +65,22 @@ async def sql_replay():
     values = room.model_dump(exclude={"created_at", "updated_at"})
     values["event_slug"] = "belgian-grand-prix"
     async with database.session_factory() as session:
+        session.add(
+            AgentProfileRecord(
+                id="nova",
+                display_name="Nova",
+                role="Host",
+                short_description="Fixture host",
+                avatar_key="N",
+                specialties=[],
+                personality_rules=[],
+                speaking_style="Concise",
+                supported_topics=["session"],
+                active=True,
+                sort_order=1,
+                ui_accent_key="gold",
+            )
+        )
         session.add(RaceRoomRecord(**values))
         await session.commit()
         session.add(
@@ -76,6 +112,81 @@ async def records(repository, room):
         ).scalar_one_or_none()
         stored_room = await session.get(RaceRoomRecord, room.id)
         return playback, stored_room
+
+
+async def test_playback_projection_remains_coherent_when_restart_overlaps_read(sql_replay):
+    repository, room = sql_replay
+    token = uuid4()
+    assert await repository.claim_replay(room.id, token, lease_seconds=30)
+    original_factory = repository.database.session_factory
+
+    class ReadBoundary:
+        def __init__(self, session):
+            self.session = session
+            self.reset = False
+
+        async def after_read(self):
+            if not self.reset:
+                self.reset = True
+                await repository.begin_discussion_restart(
+                    room.id, owner_token=token, started_at=datetime.now(UTC)
+                )
+
+        async def get(self, model, key):
+            record = await self.session.get(model, key)
+            await self.after_read()
+            return record
+
+        async def execute(self, statement):
+            result = await self.session.execute(statement)
+            await self.after_read()
+            return result
+
+        async def scalar(self, statement):
+            return await self.session.scalar(statement)
+
+    @asynccontextmanager
+    async def read_factory():
+        async with original_factory() as session:
+            yield ReadBoundary(session)
+
+    reader = SqlRaceRoomRepository(SimpleNamespace(session_factory=read_factory))
+    observed = await reader.get_playback(room.id)
+    assert (
+        observed.discussion_generation,
+        observed.current_event_sequence,
+        observed.current_message_sequence,
+    ) in {(1, 17, 9), (2, 0, 0)}
+    current = await repository.get_playback(room.id)
+    assert current.discussion_generation == 2
+    assert current.current_event_sequence == 0
+
+
+def discussion_message(room_id, *, generation: int) -> RoomMessage:
+    return RoomMessage(
+        room_id=room_id,
+        agent_id="nova",
+        sequence=0,
+        discussion_generation=generation,
+        topic=MessageTopic.SESSION,
+        message_type=MessageType.OBSERVATION,
+        content="The session state is grounded in fixture timing.",
+        confidence=Confidence.HIGH,
+        evidence_status=EvidenceStatus.GROUNDED,
+        generated_by="deterministic",
+        generation_key="restart-contract",
+        generation_version="fixture-v1",
+    )
+
+
+def discussion_evidence() -> MessageEvidence:
+    return MessageEvidence(
+        message_id=uuid4(),
+        evidence_key="fixture-state",
+        evidence_type="normalized_event",
+        source_provider="fixture",
+        source_reference="event-1",
+    )
 
 
 async def test_recovery_preserves_cursors_and_is_idempotent(sql_replay):
@@ -154,13 +265,80 @@ async def test_healthy_peer_and_expired_token_fencing(sql_replay):
     with pytest.raises(ReplayOwnershipLostError):
         await repository.update_room_status(room.id, RoomStatus.FAILED, owner_token=first)
     with pytest.raises(ReplayOwnershipLostError):
-        await repository.reset_discussion(room.id, owner_token=first)
+        await repository.begin_discussion_restart(
+            room.id, owner_token=first, started_at=datetime.now(UTC)
+        )
     playback, stored_room = await records(repository, room)
     assert playback.current_event_sequence == 17
     assert stored_room.status == "replaying"
+    assert stored_room.discussion_generation == 1
     assert playback.replay_owner_token == second
     assert await repository.release_replay(room.id, second)
     assert await repository.pause_orphaned_running_rows() == 1
+
+
+async def test_restart_atomically_advances_generation_and_fences_stale_writers(sql_replay):
+    repository, room = sql_replay
+    token = uuid4()
+    stored, inserted = await repository.insert_message(
+        discussion_message(room.id, generation=1),
+        [discussion_evidence()],
+        expected_generation=1,
+    )
+    assert inserted and stored.sequence == 1
+    assert await repository.claim_replay(room.id, token, lease_seconds=30)
+
+    restarted = await repository.begin_discussion_restart(
+        room.id,
+        owner_token=token,
+        started_at=datetime(2026, 7, 17, 13, tzinfo=UTC),
+    )
+
+    assert restarted.discussion_generation == 2
+    assert restarted.current_event_sequence == 0
+    assert restarted.current_message_sequence == 0
+    assert restarted.current_lap == 0
+    assert restarted.playback_speed == 1
+    assert restarted.is_paused is True
+    playback, stored_room = await records(repository, room)
+    assert stored_room.discussion_generation == 2
+    assert stored_room.status == "paused"
+    assert stored_room.message_count == 0
+    assert stored_room.generated_message_count == 0
+    assert stored_room.last_generated_sequence == 0
+    assert stored_room.current_lap is None
+    assert stored_room.last_event_at is None
+    assert playback.current_event_sequence == 0
+    async with repository.database.session_factory() as session:
+        assert await session.scalar(select(text("count(*)")).select_from(RoomMessageRecord)) == 0
+        evidence_count = await session.scalar(
+            select(text("count(*)")).select_from(MessageEvidenceRecord)
+        )
+        assert evidence_count == 0
+
+    with pytest.raises(DiscussionGenerationChangedError):
+        await repository.insert_message(
+            discussion_message(room.id, generation=1),
+            [discussion_evidence()],
+            expected_generation=1,
+        )
+    current, inserted = await repository.insert_message(
+        discussion_message(room.id, generation=2),
+        [discussion_evidence()],
+        expected_generation=2,
+    )
+    assert inserted and current.sequence == 1
+    assert current.discussion_generation == 2
+
+    page = await repository.list_message_page(
+        room.id,
+        expected_generation=1,
+        after_sequence=99,
+        limit=10,
+    )
+    assert page.discussion_generation == 2
+    assert page.reset_required is True
+    assert [item.sequence for item in page.messages] == [1]
 
 
 @pytest.mark.parametrize("contender", ["claim", "renew", "reconcile", "release", "write"])
@@ -356,7 +534,9 @@ async def replay_mutation(repository, room, token, operation):
             current_lap=99,
             owner_token=token,
         )
-    return await repository.reset_discussion(room.id, owner_token=token)
+    return await repository.begin_discussion_restart(
+        room.id, owner_token=token, started_at=datetime.now(UTC)
+    )
 
 
 async def assert_original_replay(repository, room):
@@ -366,6 +546,7 @@ async def assert_original_replay(repository, room):
     assert playback.current_lap == 4
     assert playback.is_paused is False
     assert stored_room.status == "replaying"
+    assert stored_room.discussion_generation == 1
     assert stored_room.current_lap == 4
     assert stored_room.last_event_at == datetime(2026, 7, 17, 12, 4, tzinfo=UTC)
 
@@ -430,7 +611,12 @@ async def test_reset_later_message_lock_is_bounded_and_rolls_back(sql_replay):
         schema = holder.bind.get_execution_options()["schema_translate_map"][None]
         await holder.execute(text(f'LOCK TABLE "{schema}".room_messages IN ACCESS EXCLUSIVE MODE'))
         with pytest.raises(ReplayWriteBusyError, match="retry"):
-            await asyncio.wait_for(repository.reset_discussion(room.id, owner_token=token), 0.3)
+            await asyncio.wait_for(
+                repository.begin_discussion_restart(
+                    room.id, owner_token=token, started_at=datetime.now(UTC)
+                ),
+                0.3,
+            )
         assert await repository.renew_replay(room.id, token, lease_seconds=0.5)
         await holder.rollback()
     await assert_original_replay(repository, room)

@@ -178,13 +178,31 @@ class FakeRoomRepository:
         if status in {RoomStatus.COMPLETED, RoomStatus.FAILED}:
             self.terminal_status.set()
 
-    async def reset_discussion(self, room_id: UUID, *, owner_token=None) -> None:
+    async def begin_discussion_restart(
+        self,
+        room_id: UUID,
+        *,
+        owner_token: UUID,
+        started_at: datetime,
+    ) -> RoomPlaybackState:
         assert room_id == self.room.id
-        if owner_token is not None:
-            self.require_owner(owner_token)
+        self.require_owner(owner_token)
         self.reset_count += 1
         self.message_sequence = 0
         self.event_message_sequences.clear()
+        generation = self.room.discussion_generation + 1
+        self.room = self.room.model_copy(
+            update={"discussion_generation": generation, "status": RoomStatus.PAUSED}
+        )
+        self.playback = RoomPlaybackState(
+            room_id=room_id,
+            discussion_generation=generation,
+            current_lap=0,
+            playback_speed=1,
+            is_paused=True,
+            started_at=started_at,
+        )
+        return self.playback
 
     async def max_message_sequence(self, room_id: UUID) -> int:
         assert room_id == self.room.id
@@ -322,6 +340,7 @@ class FakeEventBus:
         self.statuses: list[dict[str, object]] = []
         self.session_events: list[NormalizedRaceEvent] = []
         self.session_states: list[RaceState] = []
+        self.generations: list[int] = []
         self.fail = False
 
     async def publish_event(self, event: NormalizedRaceEvent) -> str:
@@ -346,6 +365,12 @@ class FakeEventBus:
         if self.fail:
             raise ConnectionError("redis://user:secret@private-host")
         self.statuses.append({"room_id": room_id, **status})
+        return "1-0"
+
+    async def publish_room_generation(self, room_id: str, discussion_generation: int) -> str:
+        if self.fail:
+            raise ConnectionError("redis://user:secret@private-host")
+        self.generations.append(discussion_generation)
         return "1-0"
 
 
@@ -689,7 +714,34 @@ async def test_restart_resets_discussion_state_and_replays_from_sequence_zero() 
         ("belgian-race-session", 0, 1),
         ("belgian-race-session", 1, 1),
     ]
-    assert any(status["status"] == "discussion_reset" for status in bus.statuses)
+    assert bus.generations == [2]
+    await replay.close()
+
+
+@pytest.mark.asyncio
+async def test_restart_failure_after_durable_reset_leaves_resumable_paused_generation() -> None:
+    room = replay_room()
+    replay, rooms, _, discussion, race_state, bus = coordinator(room, [replay_event(1, 1)])
+
+    async def fail_prime(
+        _session_key: str,
+        _profiles: list[NormalizedRaceEvent],
+    ) -> RaceState:
+        raise RuntimeError("synthetic profile priming failure")
+
+    race_state.prime_driver_profiles = fail_prime  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="synthetic profile priming failure"):
+        await replay.start(room, restart=True)
+
+    assert rooms.room.discussion_generation == 2
+    assert rooms.room.status is RoomStatus.PAUSED
+    assert rooms.playback.discussion_generation == 2
+    assert rooms.playback.is_paused is True
+    assert rooms.playback.current_event_sequence == 0
+    assert rooms.playback.current_message_sequence == 0
+    assert discussion.resets == [("belgian-race-session", str(room.id))]
+    assert bus.generations == [2]
+    assert room.id not in replay._tasks
     await replay.close()
 
 

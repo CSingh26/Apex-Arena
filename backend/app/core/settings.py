@@ -186,6 +186,19 @@ class Settings(BaseSettings):
 
     log_level: str = "info"
     log_format: Literal["pretty", "json"] = "pretty"
+    rate_limit_enabled: bool = True
+    rate_limit_namespace: str = Field(default="", pattern=r"^[A-Za-z0-9:_-]{0,80}$")
+    rate_limit_timeout_seconds: float = Field(default=0.2, gt=0, le=2, allow_inf_nan=False)
+    rate_limit_read_per_minute: int = Field(default=600, ge=1, le=1_000_000)
+    rate_limit_read_burst: int = Field(default=120, ge=1, le=100_000)
+    rate_limit_auth_per_minute: int = Field(default=20, ge=1, le=1000)
+    rate_limit_auth_burst: int = Field(default=5, ge=1, le=100)
+    rate_limit_mutation_per_minute: int = Field(default=30, ge=1, le=10000)
+    rate_limit_mutation_burst: int = Field(default=5, ge=1, le=1000)
+    rate_limit_sse_per_minute: int = Field(default=60, ge=1, le=10000)
+    rate_limit_sse_burst: int = Field(default=20, ge=1, le=1000)
+    rate_limit_stream_capacity: int = Field(default=200, ge=1, le=10000)
+    rate_limit_stream_ttl_seconds: int = Field(default=30, ge=3, le=120)
     sentry_dsn: SecretStr | None = None
     next_public_sentry_dsn: str | None = None
 
@@ -291,6 +304,8 @@ class Settings(BaseSettings):
 
         if self.openf1_reconnect_base_delay_ms > self.openf1_reconnect_max_delay_ms:
             raise ValueError("OpenF1 reconnect base delay cannot exceed maximum delay")
+        if self.rate_limit_timeout_seconds >= self.rate_limit_stream_ttl_seconds / 3:
+            raise ValueError("Rate-limit Redis deadline must leave stream renewal margin (TTL / 3)")
         worker_role = self.app_process_role in {"ingestor", "combined", "all"}
         api_serving_role = self.app_process_role in {"api", "combined", "all"}
         proxy_token = (

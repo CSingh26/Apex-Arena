@@ -46,11 +46,30 @@ from app.services.circuit_intelligence import CircuitIntelligenceService
 from app.services.discussion import DiscussionMetrics
 from app.services.race_state import RaceState
 from app.services.room_replay import ReplayUnavailableError
+from app.storage.room_repository import DiscussionPage
 
 pytestmark = pytest.mark.usefixtures("no_replay_startup_io")
 
 REPLAY_OPERATOR_HEADER = "X-Apex-Replay-Password"
 REPLAY_OPERATOR_PASSWORD = "operator-test-password"
+
+
+@pytest.mark.parametrize("endpoint", ["detail", "restart", "control"])
+async def test_room_responses_reject_mixed_playback_generation(endpoint):
+    room = api_room().model_copy(update={"discussion_generation": 2})
+    services = route_services(room)
+    old = RoomPlaybackState(room_id=room.id, discussion_generation=1)
+    services.room_repository.get_playback.return_value = old
+    services.room_replay.start.return_value = old
+    services.room_replay.pause.return_value = old
+    with pytest.raises(HTTPException) as error:
+        if endpoint == "detail":
+            await race_room_detail(room.slug, services)
+        elif endpoint == "restart":
+            await start_replay(room.slug, services, ReplayRequest(action="restart"))
+        else:
+            await change_playback(room.slug, PlaybackRequest(action="pause"), services)
+    assert error.value.status_code == 409
 
 
 @pytest.mark.parametrize(
@@ -139,6 +158,13 @@ def route_services(room: RaceRoom) -> SimpleNamespace:
         get_playback=AsyncMock(return_value=playback),
         list_rooms=AsyncMock(return_value=([room], 1)),
         list_messages=AsyncMock(return_value=[]),
+        list_message_page=AsyncMock(
+            return_value=DiscussionPage(
+                discussion_generation=room.discussion_generation,
+                messages=[],
+                next_cursor=None,
+            )
+        ),
         get_message=AsyncMock(return_value=None),
         message_evidence=AsyncMock(return_value=[]),
     )
@@ -386,15 +412,17 @@ async def test_room_detail_bootstraps_bounded_session_intelligence() -> None:
 async def test_messages_forward_all_filters_and_return_next_cursor_at_page_boundary() -> None:
     room = api_room()
     services = route_services(room)
-    services.room_repository.list_messages.return_value = [
-        api_message(room.id, 8),
-        api_message(room.id, 9),
-    ]
+    services.room_repository.list_message_page.return_value = DiscussionPage(
+        discussion_generation=1,
+        messages=[api_message(room.id, 8), api_message(room.id, 9)],
+        next_cursor=9,
+    )
 
     response = await room_messages(
         room.slug,
         services,
         after_sequence=7,
+        discussion_generation=1,
         agent_id="mira-vale",
         topic=MessageTopic.STRATEGY,
         message_type=MessageType.ANALYSIS,
@@ -407,8 +435,11 @@ async def test_messages_forward_all_filters_and_return_next_cursor_at_page_bound
 
     assert [message.sequence for message in response.messages] == [8, 9]
     assert response.next_cursor == 9
-    services.room_repository.list_messages.assert_awaited_once_with(
+    assert response.discussion_generation == 1
+    assert response.reset_required is False
+    services.room_repository.list_message_page.assert_awaited_once_with(
         room.id,
+        expected_generation=1,
         after_sequence=7,
         agent_id="mira-vale",
         topic=MessageTopic.STRATEGY,
@@ -418,6 +449,51 @@ async def test_messages_forward_all_filters_and_return_next_cursor_at_page_bound
         sequence_from=8,
         sequence_to=12,
         limit=2,
+    )
+
+
+@pytest.mark.asyncio
+async def test_messages_exposes_generation_reset_without_reusing_the_stale_cursor() -> None:
+    room = api_room()
+    current = api_message(room.id, 1).model_copy(update={"discussion_generation": 2})
+    services = route_services(room)
+    services.room_repository.list_message_page.return_value = DiscussionPage(
+        discussion_generation=2,
+        messages=[current],
+        next_cursor=None,
+        reset_required=True,
+    )
+
+    response = await room_messages(
+        room.slug,
+        services,
+        after_sequence=99,
+        discussion_generation=1,
+        agent_id=None,
+        topic=None,
+        message_type=None,
+        lap_from=None,
+        lap_to=None,
+        sequence_from=None,
+        sequence_to=None,
+        limit=100,
+    )
+
+    assert response.discussion_generation == 2
+    assert response.reset_required is True
+    assert [item.sequence for item in response.messages] == [1]
+    services.room_repository.list_message_page.assert_awaited_once_with(
+        room.id,
+        expected_generation=1,
+        after_sequence=99,
+        agent_id=None,
+        topic=None,
+        message_type=None,
+        lap_from=None,
+        lap_to=None,
+        sequence_from=None,
+        sequence_to=None,
+        limit=100,
     )
 
 

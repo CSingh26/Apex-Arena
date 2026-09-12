@@ -7,6 +7,7 @@ LIVE_REPAIR_INTEGRATION=1 uses disposable test services on ports 55433/16379.
 import os
 from datetime import timedelta
 from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
 
@@ -25,6 +26,89 @@ pytestmark = [
         os.getenv("LIVE_REPAIR_INTEGRATION") != "1", reason="requires isolated SQL and Redis"
     ),
 ]
+
+
+async def test_real_storage_recreates_complete_intelligence_worker_without_historical_effects():
+    from app.services.raw_events import RawEventInput
+
+    settings = Settings(
+        _env_file=None,
+        app_env="test",
+        app_process_role="combined",
+        database_url="postgresql://apex_test:repair_test_only@127.0.0.1:55433/apex_live_repair",
+        postgres_password="repair_test_only",
+        redis_url="redis://127.0.0.1:16379/0",
+        openf1_ingestion_mode="rest",
+        openf1_mqtt_autoconnect=False,
+        event_ordering_buffer_ms=0,
+        battle_start_samples=3,
+    )
+    # Keep provider-style identity short enough for the existing derived-key column.
+    key = f"cp1-test-{uuid4().hex[:12]}"
+    original = AppServices(settings)
+    restarted = None
+    try:
+        async with original.database.engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+        original.processor.consumers.remove(original.championship)
+        rows = [
+            ("position", {"driver_number": 16, "position": 4}),
+            ("position", {"driver_number": 4, "position": 5}),
+            *[("intervals", {"driver_number": 4, "interval": gap}) for gap in (1.8, 1.7, 1.6)],
+        ]
+        await original.processor.ingest_batch(
+            [
+                RawEventInput(
+                    provider_endpoint=endpoint,
+                    session_key=key,
+                    event_time=START + timedelta(seconds=index),
+                    raw_payload={**payload, "normalized_session_type": "RACE"},
+                )
+                for index, (endpoint, payload) in enumerate(rows)
+            ]
+        )
+        expected = await original.race_state.get_state(key)
+        assert len(expected.current_battles) == 1
+        expected_diagnostics = original.race_intelligence.diagnostics_for_session(key)
+        stored_count = await original.normalized_event_repository.count(key)
+        snapshot_count = await original.snapshot_repository.count(key)
+        stream_count = await original.redis.client.xlen(original.event_bus.event_stream(key))
+        await original.close()
+
+        restarted = AppServices(settings)
+        restarted.processor.consumers.remove(restarted.championship)
+        await restarted.processor.initialize_session(key)
+        assert (await restarted.race_state.get_state(key)).model_dump() == expected.model_dump()
+        assert restarted.race_intelligence.diagnostics_for_session(key) == expected_diagnostics
+        assert await restarted.normalized_event_repository.count(key) == stored_count
+        assert await restarted.snapshot_repository.count(key) == snapshot_count
+        assert (
+            await restarted.redis.client.xlen(restarted.event_bus.event_stream(key)) == stream_count
+        )
+        assert restarted.race_intelligence.drain_derived(key) == []
+        await restarted.processor.ingest(
+            RawEventInput(
+                provider_endpoint="intervals",
+                session_key=key,
+                event_time=START + timedelta(seconds=6),
+                raw_payload={
+                    "driver_number": 4,
+                    "interval": 1.5,
+                    "normalized_session_type": "RACE",
+                },
+            )
+        )
+        current = await restarted.race_state.get_state(key)
+        assert len(current.current_battles) == 1
+        assert current.current_battles[0].id == expected.current_battles[0].id
+        assert current.current_battles[0].interval_history[-1] == 1.5
+        persisted = await restarted.normalized_event_repository.list_for_session(key, limit=100)
+        assert sum(event.event_type.value == "BATTLE_STARTED" for event in persisted) == 1
+    finally:
+        if restarted is not None:
+            await restarted.close()
+        else:
+            await original.close()
 
 
 async def test_real_storage_live_fanout_restart_and_completion():

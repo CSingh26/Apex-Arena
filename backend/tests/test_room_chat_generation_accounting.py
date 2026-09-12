@@ -21,12 +21,19 @@ from tests.fixtures.race_room_events import race_room_event
 
 
 class FakeRooms:
-    def __init__(self, rooms: list[RaceRoom], outcomes: list[bool]) -> None:
+    def __init__(
+        self,
+        rooms: list[RaceRoom],
+        outcomes: list[bool],
+        *,
+        status_allowed: bool = True,
+    ) -> None:
         self.rooms = rooms
         self.outcomes = outcomes
         self.active_count = 0
         self.statuses: list[tuple[str, ChatGenerationStatus]] = []
         self.archived = 0
+        self.status_allowed = status_allowed
 
     async def list_chat_generation_candidates(self, **_: object) -> list[RaceRoom]:
         return self.rooms
@@ -36,17 +43,22 @@ class FakeRooms:
         room_id,
         status: ChatGenerationStatus,
         *,
+        expected_generation: int,
         generation_version: str,
         error: str | None = None,
-    ) -> None:
+    ) -> bool:
         self.statuses.append((str(room_id), status))
+        return self.status_allowed
 
-    async def archive_generated_messages(self, room_id, generation_version: str) -> int:
+    async def archive_generated_messages(
+        self, room_id, generation_version: str, *, expected_generation: int
+    ) -> int:
         self.archived += self.active_count
         self.active_count = 0
         return self.archived
 
-    async def insert_message(self, message, evidence):
+    async def insert_message(self, message, evidence, *, expected_generation: int):
+        assert expected_generation == 1
         inserted = self.outcomes.pop(0)
         if not inserted:
             return message, False
@@ -202,4 +214,20 @@ async def test_force_regeneration_archives_before_counting_new_rows() -> None:
     result = summary.results[0]
     assert result.archived_messages == 3
     assert result.messages_inserted == 3
+    assert rooms.active_count == 3
+
+
+@pytest.mark.asyncio
+async def test_stale_candidate_stops_before_archive_or_message_generation() -> None:
+    rooms = FakeRooms([room()], [True], status_allowed=False)
+    rooms.active_count = 3
+    events = FakeEvents({"test-race-room": [critical_event()]})
+
+    summary = await run_generator(rooms, events, force_regenerate=True)
+
+    result = summary.results[0]
+    assert result.status == ChatGenerationStatus.FAILED.value
+    assert result.error == "discussion generation changed"
+    assert result.messages_inserted == 0
+    assert rooms.archived == 0
     assert rooms.active_count == 3

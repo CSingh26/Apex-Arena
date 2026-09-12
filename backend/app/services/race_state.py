@@ -121,7 +121,9 @@ class RaceStateEngine:
     async def consume(self, event: NormalizedRaceEvent) -> None:
         await self.apply(event)
 
-    async def apply(self, event: NormalizedRaceEvent) -> RaceState:
+    async def apply(
+        self, event: NormalizedRaceEvent, *, persist_snapshot: bool = True
+    ) -> RaceState:
         async with self._locks[event.session_key]:
             state = await self._load_state(event.session_key)
             if (
@@ -140,12 +142,18 @@ class RaceStateEngine:
             )
             state.is_replay = event.is_replay
 
-            if (
+            if persist_snapshot and (
                 event.sequence_number % self.snapshot_every_n_events == 0
                 or event.event_type == RaceEventType.SESSION_FINISH
             ):
                 await self._persist_snapshot(state, event)
             return state.model_copy(deep=True)
+
+    async def install_state(self, state: RaceState) -> None:
+        """Install an internally rebuilt prefix without deleting durable snapshots."""
+        async with self._locks[state.session_key]:
+            self._states[state.session_key] = state.model_copy(deep=True)
+            self._applied_dedup_keys.pop(state.session_key, None)
 
     async def get_state(self, session_key: str) -> RaceState:
         async with self._locks[session_key]:

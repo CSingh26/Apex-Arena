@@ -7,6 +7,7 @@ from typing import Any
 
 from sqlalchemy import (
     JSON,
+    BigInteger,
     Boolean,
     Date,
     DateTime,
@@ -338,6 +339,7 @@ class RaceRoomRecord(Base, TimestampMixin):
     chat_generation_status: Mapped[str] = mapped_column(String(30), default="pending")
     generated_message_count: Mapped[int] = mapped_column(Integer, default=0)
     last_generated_sequence: Mapped[int] = mapped_column(Integer, default=0)
+    discussion_generation: Mapped[int] = mapped_column(BigInteger, default=1)
     generation_version: Mapped[str] = mapped_column(String(80), default="rooms-v1")
     generation_error: Mapped[str | None] = mapped_column(String(500), nullable=True)
     generation_started_at: Mapped[datetime | None] = mapped_column(

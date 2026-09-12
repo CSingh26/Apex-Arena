@@ -47,10 +47,10 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-          cache-dependency-path: backend/pyproject.toml
+          cache-dependency-path: backend/requirements-dev.lock
       - name: Install backend and test tools
         working-directory: backend
-        run: python -m pip install --upgrade pip && python -m pip install -e '.[dev]'
+        run: python -m pip install --require-hashes -r requirements-dev.lock
       - name: Verify formatting
         working-directory: backend
         run: ruff format --check app tests
@@ -59,7 +59,7 @@ jobs:
         run: ruff check app tests
       - name: Run backend tests
         working-directory: backend
-        run: pytest -q
+        run: python -m pytest -q
 
   frontend:
     name: Frontend quality gate
@@ -180,10 +180,10 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-          cache-dependency-path: backend/pyproject.toml
+          cache-dependency-path: backend/requirements-dev.lock
       - name: Install backend
         working-directory: backend
-        run: python -m pip install --upgrade pip && python -m pip install -e '.[dev]'
+        run: python -m pip install --require-hashes -r requirements-dev.lock
 
       - name: Validate release workflow invariants
         run: scripts/test-release-workflow.sh .github/workflows/release.yml

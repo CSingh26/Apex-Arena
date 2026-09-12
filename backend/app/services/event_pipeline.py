@@ -167,8 +167,33 @@ class RaceEventProcessor:
         self.ordering_buffer = ordering_buffer
         self.sequence_numbers = sequence_numbers
         self.consumers = consumers or []
+        # One intake owner per session through reduction and derived publication,
+        # not merely through sequence allocation. This is process-local ownership.
+        self._session_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+        self._initialized_sessions: set[str] = set()
+
+    async def initialize_session(self, session_key: str) -> None:
+        """Warm internal consumers before either live transport can admit facts."""
+        async with self._session_locks[session_key]:
+            await self._initialize_session(session_key)
+
+    async def _initialize_session(self, session_key: str) -> None:
+        if session_key in self._initialized_sessions:
+            return
+        for consumer in self.consumers:
+            restore = getattr(consumer, "restore_session", None)
+            if restore is not None:
+                await restore(session_key, self.normalized_repository)
+        # Failed/cancelled reconstruction is retryable; no new source was admitted.
+        self._initialized_sessions.add(session_key)
 
     async def ingest(self, raw: RawEventInput) -> PipelineResult:
+        session_key = str(raw.session_key or raw.raw_payload.get("session_key") or "unknown")
+        async with self._session_locks[session_key]:
+            await self._initialize_session(session_key)
+            return await self._ingest(raw)
+
+    async def _ingest(self, raw: RawEventInput) -> PipelineResult:
         raw_result = await self.raw_events.persist(raw)
         if not raw_result.is_new and not raw_result.needs_normalization:
             return PipelineResult(raw_duplicates=1)
@@ -198,6 +223,11 @@ class RaceEventProcessor:
         return result
 
     async def flush_session(self, session_key: str) -> PipelineResult:
+        async with self._session_locks[session_key]:
+            await self._initialize_session(session_key)
+            return await self._flush_session(session_key)
+
+    async def _flush_session(self, session_key: str) -> PipelineResult:
         result = PipelineResult()
         for event in self.ordering_buffer.flush(session_key):
             result.add(await self._persist_ordered(event))

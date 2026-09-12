@@ -732,7 +732,13 @@ class RaceRoomDiscussionEngine:
             state = await self.state_reader(event.session_key) if self.state_reader else None
             context = self.context_builder.build(event, state)
             async with self._locks[room.slug]:
-                await self._generate_chain(room.id, event, trigger, context)
+                await self._generate_chain(
+                    room.id,
+                    event,
+                    trigger,
+                    context,
+                    discussion_generation=room.discussion_generation,
+                )
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -753,10 +759,17 @@ class RaceRoomDiscussionEngine:
         event: NormalizedRaceEvent,
         trigger: DiscussionTrigger,
         context: GroundingContext,
+        *,
+        discussion_generation: int,
     ) -> MessageChainResult:
         result = MessageChainResult()
         primary = await self._build_message(
-            room_id, event, trigger, trigger.agent_candidates[0], context
+            room_id,
+            event,
+            trigger,
+            trigger.agent_candidates[0],
+            context,
+            discussion_generation=discussion_generation,
         )
         if primary is None:
             return result
@@ -772,6 +785,7 @@ class RaceRoomDiscussionEngine:
                 trigger,
                 trigger.agent_candidates[1],
                 context,
+                discussion_generation=discussion_generation,
                 reply_to=primary,
             )
             if reply is not None:
@@ -783,6 +797,7 @@ class RaceRoomDiscussionEngine:
                 trigger,
                 "nova",
                 context,
+                discussion_generation=discussion_generation,
                 reply_to=primary,
                 host_summary=True,
             )
@@ -798,6 +813,7 @@ class RaceRoomDiscussionEngine:
         agent_id: str,
         context: GroundingContext,
         *,
+        discussion_generation: int,
         reply_to: RoomMessage | None = None,
         host_summary: bool = False,
     ) -> RoomMessage | None:
@@ -830,6 +846,7 @@ class RaceRoomDiscussionEngine:
             room_id=room_id,
             agent_id=agent_id,
             sequence=0,
+            discussion_generation=discussion_generation,
             lap_number=event.lap_number,
             wall_time=event.event_time,
             topic=(
@@ -871,7 +888,6 @@ class RaceRoomDiscussionEngine:
                 "recent_message_count": len(recent_content),
             },
         )
-        recent_content.append(fingerprint)
         logger.debug(
             "Room message generated event_type=%s agent=%s role=%s priority=%s",
             event.event_type.value,
@@ -911,7 +927,9 @@ class RaceRoomDiscussionEngine:
         context: GroundingContext,
     ) -> MessageStoreResult:
         stored, inserted = await self.repository.insert_message(
-            message, self._evidence(event, message, context)
+            message,
+            self._evidence(event, message, context),
+            expected_generation=message.discussion_generation,
         )
         if not inserted:
             return MessageStoreResult(
@@ -920,6 +938,7 @@ class RaceRoomDiscussionEngine:
                 inserted_count=0,
                 skipped_count=1,
             )
+        self._recent_content[str(message.room_id)].append(" ".join(stored.content.lower().split()))
         self.metrics.generated_message_count += 1
         self.metrics.deterministic_fallback_count += 1
         if self.publisher is not None:

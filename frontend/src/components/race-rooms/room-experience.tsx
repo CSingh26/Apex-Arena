@@ -12,9 +12,10 @@ import { LiveCommandCenter } from "@/components/race-rooms/live-command-center";
 import { MessageTimeline } from "@/components/race-rooms/message-timeline";
 import { PlaybackControls } from "@/components/race-rooms/playback-controls";
 import { RoomContext } from "@/components/race-rooms/room-context";
-import { getRaceRoom, getRoomMessages, roomStreamUrl, startRoomReplay, updateRoomPlayback, verifyReplayOperator } from "@/lib/api";
+import { ApiError, getRaceRoom, getRoomMessages, roomStreamUrl, startRoomReplay, updateRoomPlayback, verifyReplayOperator } from "@/lib/api";
 import { appRoutes } from "@/lib/app-paths";
 import { mergeRoomMessages } from "@/lib/room-state";
+import { reconnectDelay } from "@/lib/retry-delay";
 import type { MessageTopic, MessageType, PlaybackAction, RaceRoomDetailResponse, ReplayAction, RoomMessage, RoomMode, RoomPlayback, RoomStatus } from "@/lib/types";
 
 import styles from "./race-rooms-revamp.module.css";
@@ -37,6 +38,7 @@ type RoomStatusPayload = {
 };
 
 function friendlyRoomError(reason: unknown): string {
+  if (reason instanceof ApiError && (reason.status === 429 || reason.status === 503)) return reason.message;
   if (reason instanceof TypeError) return "We couldn’t reach the race service. Check your connection and try again.";
   const message = reason instanceof Error ? reason.message.toLowerCase() : "";
   if (message.includes("404") || message.includes("not found")) return "This session room is not available yet.";
@@ -56,7 +58,7 @@ function streamRecord(event: Event): StreamRecord | null {
 }
 
 function isFiniteInteger(value: unknown, minimum = 0): value is number {
-  return typeof value === "number" && Number.isFinite(value) && Number.isInteger(value) && value >= minimum;
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= minimum;
 }
 
 function isNullableString(value: unknown): value is string | null {
@@ -76,39 +78,46 @@ function hasMatchingOptionalIdentity(payload: StreamRecord, roomId: string, sess
   return true;
 }
 
-function roomMessagePayload(event: Event, roomId: string, sessionKey: string | null): RoomMessage | null {
-  const payload = streamRecord(event);
-  if (!payload || !hasMatchingOptionalIdentity(payload, roomId, sessionKey)) return null;
+function roomMessageRecord(payload: unknown, roomId: string, sessionKey: string | null, discussionGeneration: number): RoomMessage | null {
+  if (payload === null || typeof payload !== "object" || Array.isArray(payload)) return null;
+  const record = payload as StreamRecord;
+  if (!hasMatchingOptionalIdentity(record, roomId, sessionKey)) return null;
   if (
-    typeof payload.id !== "string"
-    || payload.room_id !== roomId
-    || typeof payload.agent_id !== "string"
-    || !isFiniteInteger(payload.sequence, 1)
-    || !(payload.lap_number === null || isFiniteInteger(payload.lap_number))
-    || !(payload.session_time === null || (typeof payload.session_time === "number" && Number.isFinite(payload.session_time)))
-    || !isNullableString(payload.wall_time)
-    || !MESSAGE_TOPICS.has(payload.topic as MessageTopic)
-    || !MESSAGE_TYPES.has(payload.message_type as MessageType)
-    || typeof payload.content !== "string"
-    || !MESSAGE_CONFIDENCE.has(payload.confidence as string)
-    || !EVIDENCE_STATUSES.has(payload.evidence_status as string)
-    || !isNullableString(payload.reply_to_message_id)
-    || !isNullableString(payload.trigger_event_id)
-    || !isNullableString(payload.trigger_snapshot_id)
-    || typeof payload.generated_by !== "string"
-    || !isNullableString(payload.model_name)
-    || typeof payload.prompt_version !== "string"
-    || typeof payload.created_at !== "string"
-    || !(payload.session_phase === undefined || isNullableString(payload.session_phase))
+    typeof record.id !== "string"
+    || record.room_id !== roomId
+    || record.discussion_generation !== discussionGeneration
+    || typeof record.agent_id !== "string"
+    || !isFiniteInteger(record.sequence, 1)
+    || !(record.lap_number === null || isFiniteInteger(record.lap_number))
+    || !(record.session_time === null || (typeof record.session_time === "number" && Number.isFinite(record.session_time)))
+    || !isNullableString(record.wall_time)
+    || !MESSAGE_TOPICS.has(record.topic as MessageTopic)
+    || !MESSAGE_TYPES.has(record.message_type as MessageType)
+    || typeof record.content !== "string"
+    || !MESSAGE_CONFIDENCE.has(record.confidence as string)
+    || !EVIDENCE_STATUSES.has(record.evidence_status as string)
+    || !isNullableString(record.reply_to_message_id)
+    || !isNullableString(record.trigger_event_id)
+    || !isNullableString(record.trigger_snapshot_id)
+    || typeof record.generated_by !== "string"
+    || !isNullableString(record.model_name)
+    || typeof record.prompt_version !== "string"
+    || typeof record.created_at !== "string"
+    || !(record.session_phase === undefined || isNullableString(record.session_phase))
   ) return null;
-  return payload as RoomMessage;
+  return record as RoomMessage;
 }
 
-function playbackPayload(event: Event, roomId: string, sessionKey: string | null): RoomPlayback | null {
+function roomMessagePayload(event: Event, roomId: string, sessionKey: string | null, discussionGeneration: number): RoomMessage | null {
+  return roomMessageRecord(streamRecord(event), roomId, sessionKey, discussionGeneration);
+}
+
+function playbackPayload(event: Event, roomId: string, sessionKey: string | null, discussionGeneration: number): RoomPlayback | null {
   const payload = streamRecord(event);
   if (!payload || !hasMatchingOptionalIdentity(payload, roomId, sessionKey)) return null;
   if (
     payload.room_id !== roomId
+    || payload.discussion_generation !== discussionGeneration
     || !isFiniteInteger(payload.current_event_sequence)
     || !isFiniteInteger(payload.current_message_sequence)
     || !(payload.current_lap === null || isFiniteInteger(payload.current_lap))
@@ -119,6 +128,16 @@ function playbackPayload(event: Event, roomId: string, sessionKey: string | null
     || !isNullableString(payload.session_clock)
   ) return null;
   return payload as RoomPlayback;
+}
+
+function discussionGenerationPayload(event: Event, roomId: string): number | null {
+  const payload = streamRecord(event);
+  if (
+    !payload
+    || payload.room_id !== roomId
+    || !isFiniteInteger(payload.discussion_generation, 1)
+  ) return null;
+  return payload.discussion_generation;
 }
 
 function roomStatusPayload(event: Event, roomId: string, sessionKey: string | null): RoomStatusPayload | null {
@@ -157,11 +176,15 @@ export function RoomExperience({ slug }: { slug: string }) {
   const [operatorError, setOperatorError] = useState<{ slug: string; message: string } | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
   const [streamGeneration, setStreamGeneration] = useState(0);
+  const [discussionGeneration, setDiscussionGeneration] = useState(1);
   const [terminalReconciliation, setTerminalReconciliation] = useState(false);
   const lastSequenceRef = useRef(0);
   const roomUpdateRef = useRef(0);
   const sessionKeyRef = useRef<string | null>(null);
   const currentSlugRef = useRef(slug);
+  const discussionGenerationRef = useRef(1);
+  const paginationControllerRef = useRef<AbortController | null>(null);
+  const paginationRequestRef = useRef(0);
   const operatorCredentialRef = useRef<{ slug: string; password: string } | null>(null);
 
   const lockOperatorControls = useCallback(() => {
@@ -173,6 +196,14 @@ export function RoomExperience({ slug }: { slug: string }) {
   useEffect(() => {
     currentSlugRef.current = slug;
     operatorCredentialRef.current = null;
+    paginationControllerRef.current?.abort();
+    paginationControllerRef.current = null;
+    paginationRequestRef.current += 1;
+    return () => {
+      paginationControllerRef.current?.abort();
+      paginationControllerRef.current = null;
+      paginationRequestRef.current += 1;
+    };
   }, [slug]);
 
   useEffect(() => {
@@ -184,24 +215,81 @@ export function RoomExperience({ slug }: { slug: string }) {
     setMessages((current) => mergeRoomMessages(current, incoming));
   }, []);
 
+  const adoptDiscussionGeneration = useCallback((nextGeneration: number) => {
+    if (nextGeneration <= discussionGenerationRef.current) return;
+    discussionGenerationRef.current = nextGeneration;
+    paginationControllerRef.current?.abort();
+    paginationControllerRef.current = null;
+    paginationRequestRef.current += 1;
+    setDiscussionGeneration(nextGeneration);
+    setDetail((current) => current ? {
+      ...current,
+      room: { ...current.room, discussion_generation: nextGeneration },
+    } : current);
+    setMessages([]);
+    setSelectedMessage(null);
+    setNextCursor(null);
+    setLoadingMore(false);
+    lastSequenceRef.current = 0;
+    setStreamGeneration((value) => value + 1);
+  }, []);
+
   useEffect(() => {
     const controller = new AbortController();
     let active = true;
-    Promise.all([
-      getRaceRoom(slug, controller.signal),
-      getRoomMessages(slug, "after_sequence=0&limit=100", controller.signal),
-    ]).then(([room, feed]) => {
-      if (!active) return;
-      setDetail(room);
-      setPlayback(room.playback);
-      setTerminalReconciliation(false);
-      setMessages([]);
-      lastSequenceRef.current = 0;
-      mergeMessages(feed.messages);
-      setNextCursor(feed.next_cursor);
-    }).catch((reason: Error) => {
-      if (active && reason.name !== "AbortError") setError(friendlyRoomError(reason));
-    }).finally(() => { if (active) setLoading(false); });
+    void (async () => {
+      try {
+        let room = await getRaceRoom(slug, controller.signal);
+        let requestedGeneration = room.room.discussion_generation ?? 1;
+        let feed = await getRoomMessages(
+          slug,
+          `discussion_generation=${requestedGeneration}&after_sequence=0&limit=100`,
+          controller.signal,
+        );
+        if (!active) return;
+        let responseGeneration = feed.discussion_generation ?? requestedGeneration;
+        if (feed.reset_required || responseGeneration !== requestedGeneration
+          || (room.playback.discussion_generation ?? 1) !== requestedGeneration) {
+          room = await getRaceRoom(slug, controller.signal);
+          requestedGeneration = room.room.discussion_generation ?? 1;
+          feed = await getRoomMessages(
+            slug,
+            `discussion_generation=${requestedGeneration}&after_sequence=0&limit=100`,
+            controller.signal,
+          );
+          if (!active) return;
+          responseGeneration = feed.discussion_generation ?? requestedGeneration;
+          if (feed.reset_required || responseGeneration !== requestedGeneration
+            || (room.playback.discussion_generation ?? 1) !== requestedGeneration) {
+            throw new Error("Discussion restarted repeatedly during room bootstrap");
+          }
+        }
+        const validMessages = feed.messages
+          .map((item) => roomMessageRecord(item, room.room.id, room.room.session_key, responseGeneration))
+          .filter((item): item is RoomMessage => item !== null);
+        discussionGenerationRef.current = responseGeneration;
+        setDiscussionGeneration(responseGeneration);
+        setDetail({
+          ...room,
+          room: { ...room.room, discussion_generation: responseGeneration },
+          playback: room.playback,
+        });
+        setPlayback(room.playback);
+        setTerminalReconciliation(false);
+        setMessages([]);
+        setSelectedMessage(null);
+        lastSequenceRef.current = 0;
+        mergeMessages(validMessages);
+        setNextCursor(feed.next_cursor);
+        setLoadingMore(false);
+      } catch (reason) {
+        if (active && reason instanceof Error && reason.name !== "AbortError") {
+          setError(friendlyRoomError(reason));
+        }
+      } finally {
+        if (active) setLoading(false);
+      }
+    })();
     return () => { active = false; controller.abort(); };
   }, [mergeMessages, reloadKey, slug]);
 
@@ -215,9 +303,19 @@ export function RoomExperience({ slug }: { slug: string }) {
     const refresh = async () => {
       const requestRoomUpdate = roomUpdateRef.current;
       let reconciledTerminal = false;
+      let nextPollDelay = 15_000;
       try {
         const latest = await getRaceRoom(slug, controller.signal);
         if (!disposed && latest.room.id === roomId) {
+          const latestGeneration = latest.room.discussion_generation ?? 1;
+          if ((latest.playback.discussion_generation ?? 1) !== latestGeneration) return;
+          if (latestGeneration > discussionGenerationRef.current) {
+            adoptDiscussionGeneration(latestGeneration);
+            setDetail(latest);
+            setPlayback(latest.playback);
+            return;
+          }
+          if (latestGeneration < discussionGenerationRef.current) return;
           const authoritativeTerminal = terminalReconciliation
             && latest.room.status === "completed"
             && latest.room.mode === "archived";
@@ -245,10 +343,13 @@ export function RoomExperience({ slug }: { slug: string }) {
             });
           }
         }
-      } catch {
+      } catch (reason) {
         // Keep last known data while the shared backend ingestion reconnects.
+        if (reason instanceof ApiError && reason.retryAfterSeconds) {
+          nextPollDelay = Math.max(nextPollDelay, reason.retryAfterSeconds * 1000);
+        }
       } finally {
-        if (!disposed && !reconciledTerminal) timer = window.setTimeout(refresh, 15_000);
+        if (!disposed && !reconciledTerminal) timer = window.setTimeout(refresh, nextPollDelay);
       }
     };
     timer = window.setTimeout(refresh, terminalReconciliation ? 0 : 15_000);
@@ -257,7 +358,7 @@ export function RoomExperience({ slug }: { slug: string }) {
       controller.abort();
       if (timer !== null) window.clearTimeout(timer);
     };
-  }, [liveRoom, roomId, slug, terminalReconciliation]);
+  }, [adoptDiscussionGeneration, liveRoom, roomId, slug, terminalReconciliation]);
 
   useEffect(() => {
     if (!roomId) return;
@@ -270,7 +371,9 @@ export function RoomExperience({ slug }: { slug: string }) {
       if (disposed) return;
       retryTimer = null;
       setConnection(retryAttempt ? "reconnecting" : "connecting");
-      const nextSource = new EventSource(roomStreamUrl(slug, lastSequenceRef.current));
+      const nextSource = new EventSource(
+        roomStreamUrl(slug, lastSequenceRef.current, discussionGenerationRef.current),
+      );
       source = nextSource;
       const isCurrent = () => !disposed && source === nextSource;
       nextSource.addEventListener("open", () => {
@@ -280,13 +383,29 @@ export function RoomExperience({ slug }: { slug: string }) {
       });
       nextSource.addEventListener("room_message", (event) => {
         if (!isCurrent()) return;
-        const message = roomMessagePayload(event, roomId, sessionKeyRef.current);
+        const message = roomMessagePayload(
+          event,
+          roomId,
+          sessionKeyRef.current,
+          discussionGenerationRef.current,
+        );
         if (!message) return;
         mergeMessages([message]);
       });
+      nextSource.addEventListener("discussion_generation", (event) => {
+        if (!isCurrent()) return;
+        const nextGeneration = discussionGenerationPayload(event, roomId);
+        if (nextGeneration === null) return;
+        adoptDiscussionGeneration(nextGeneration);
+      });
       nextSource.addEventListener("playback_state", (event) => {
         if (!isCurrent()) return;
-        const nextPlayback = playbackPayload(event, roomId, sessionKeyRef.current);
+        const nextPlayback = playbackPayload(
+          event,
+          roomId,
+          sessionKeyRef.current,
+          discussionGenerationRef.current,
+        );
         if (nextPlayback) setPlayback(nextPlayback);
       });
       nextSource.addEventListener("room_status", (event) => {
@@ -317,12 +436,12 @@ export function RoomExperience({ slug }: { slug: string }) {
         source = null;
         retryAttempt += 1;
         setConnection(retryAttempt > 3 ? "degraded" : "reconnecting");
-        retryTimer = window.setTimeout(connect, Math.min(8000, 750 * 2 ** Math.min(retryAttempt, 4)));
+        retryTimer = window.setTimeout(connect, reconnectDelay(retryAttempt, 750));
       });
     };
     connect();
     return () => { disposed = true; source?.close(); if (retryTimer != null) window.clearTimeout(retryTimer); };
-  }, [mergeMessages, roomId, slug, streamGeneration]);
+  }, [adoptDiscussionGeneration, discussionGeneration, mergeMessages, roomId, slug, streamGeneration]);
 
   const runControl = useCallback(async (action: PlaybackAction) => {
     const credential = operatorCredentialRef.current;
@@ -331,16 +450,24 @@ export function RoomExperience({ slug }: { slug: string }) {
     try {
       const response = await updateRoomPlayback(slug, action, credential.password);
       if (currentSlugRef.current !== slug) return;
+      const responseGeneration = response.room.discussion_generation ?? response.playback.discussion_generation;
+      if (response.playback.discussion_generation !== responseGeneration) {
+        throw new Error("Replay changed while applying control");
+      }
+      if (responseGeneration < discussionGenerationRef.current) return;
+      adoptDiscussionGeneration(responseGeneration);
       setPlayback(response.playback);
       setDetail((current) => current ? { ...current, room: response.room } : current);
     } catch (reason) {
       if (currentSlugRef.current !== slug) return;
       if (httpStatus(reason) === 401) lockOperatorControls();
-      setControlError("That replay control didn’t respond. Your current position has been preserved.");
+      setControlError(reason instanceof ApiError && [429, 503].includes(reason.status)
+        ? friendlyRoomError(reason)
+        : "That replay control didn’t respond. Your current position has been preserved.");
     } finally {
       if (currentSlugRef.current === slug) setControlBusySlug(null);
     }
-  }, [lockOperatorControls, slug]);
+  }, [adoptDiscussionGeneration, lockOperatorControls, slug]);
 
   const runReplay = useCallback(async (action: ReplayAction) => {
     const credential = operatorCredentialRef.current;
@@ -349,22 +476,24 @@ export function RoomExperience({ slug }: { slug: string }) {
     try {
       const response = await startRoomReplay(slug, action, credential.password);
       if (currentSlugRef.current !== slug) return;
-      if (action === "restart") {
-        setMessages([]);
-        setNextCursor(null);
-        lastSequenceRef.current = 0;
-        setStreamGeneration((value) => value + 1);
+      const responseGeneration = response.room.discussion_generation ?? response.playback.discussion_generation;
+      if (response.playback.discussion_generation !== responseGeneration) {
+        throw new Error("Replay changed while starting playback");
       }
+      if (responseGeneration < discussionGenerationRef.current) return;
+      adoptDiscussionGeneration(responseGeneration);
       setPlayback(response.playback);
       setDetail((current) => current ? { ...current, room: response.room } : current);
     } catch (reason) {
       if (currentSlugRef.current !== slug) return;
       if (httpStatus(reason) === 401) lockOperatorControls();
-      setControlError("The replay couldn’t start yet. Wait a moment and try again.");
+      setControlError(reason instanceof ApiError && [429, 503].includes(reason.status)
+        ? friendlyRoomError(reason)
+        : "The replay couldn’t start yet. Wait a moment and try again.");
     } finally {
       if (currentSlugRef.current === slug) setControlBusySlug(null);
     }
-  }, [lockOperatorControls, slug]);
+  }, [adoptDiscussionGeneration, lockOperatorControls, slug]);
 
   const unlockOperatorControls = useCallback(async (password: string) => {
     setOperatorUnlockingSlug(slug);
@@ -380,9 +509,11 @@ export function RoomExperience({ slug }: { slug: string }) {
       setOperatorSlug(null);
       setOperatorError({
         slug,
-        message: httpStatus(reason) === 503
-          ? "Replay operator access is not configured for this deployment."
-          : "That operator password wasn’t accepted.",
+        message: reason instanceof ApiError && [429, 503].includes(reason.status)
+          ? friendlyRoomError(reason)
+          : httpStatus(reason) === 401
+            ? "That operator password wasn’t accepted."
+            : "Operator access is temporarily unavailable. Try again shortly.",
       });
     } finally {
       if (currentSlugRef.current === slug) setOperatorUnlockingSlug(null);
@@ -390,16 +521,62 @@ export function RoomExperience({ slug }: { slug: string }) {
   }, [slug]);
 
   const loadMore = useCallback(async () => {
-    if (nextCursor == null || loadingMore) return;
+    if (nextCursor == null || loadingMore || !roomId) return;
+    const requestId = paginationRequestRef.current + 1;
+    paginationRequestRef.current = requestId;
+    paginationControllerRef.current?.abort();
+    const controller = new AbortController();
+    paginationControllerRef.current = controller;
+    const requestSlug = slug;
+    const requestRoomId = roomId;
+    const requestGeneration = discussionGenerationRef.current;
+    const requestCursor = nextCursor;
     setLoadingMore(true);
     try {
-      const feed = await getRoomMessages(slug, `after_sequence=${nextCursor}&limit=100`);
-      mergeMessages(feed.messages);
+      const feed = await getRoomMessages(
+        requestSlug,
+        `discussion_generation=${requestGeneration}&after_sequence=${requestCursor}&limit=100`,
+        controller.signal,
+      );
+      if (
+        paginationRequestRef.current !== requestId
+        || currentSlugRef.current !== requestSlug
+        || requestRoomId !== roomId
+        || discussionGenerationRef.current !== requestGeneration
+      ) return;
+      const responseGeneration = feed.discussion_generation ?? requestGeneration;
+      if (feed.reset_required || responseGeneration !== requestGeneration) {
+        adoptDiscussionGeneration(responseGeneration);
+        return;
+      }
+      const validMessages = feed.messages
+        .map((item) => roomMessageRecord(
+          item,
+          requestRoomId,
+          sessionKeyRef.current,
+          requestGeneration,
+        ))
+        .filter((item): item is RoomMessage => item !== null);
+      mergeMessages(validMessages);
       setNextCursor(feed.next_cursor);
-    } catch {
-      setControlError("More conversation couldn’t be loaded. Try again when your connection is stable.");
-    } finally { setLoadingMore(false); }
-  }, [loadingMore, mergeMessages, nextCursor, slug]);
+    } catch (reason) {
+      if (
+        controller.signal.aborted
+        || paginationRequestRef.current !== requestId
+        || currentSlugRef.current !== requestSlug
+        || requestRoomId !== roomId
+        || discussionGenerationRef.current !== requestGeneration
+      ) return;
+      setControlError(reason instanceof ApiError
+        ? friendlyRoomError(reason)
+        : "More conversation couldn’t be loaded. Try again when your connection is stable.");
+    } finally {
+      if (paginationRequestRef.current === requestId) {
+        paginationControllerRef.current = null;
+        setLoadingMore(false);
+      }
+    }
+  }, [adoptDiscussionGeneration, loadingMore, mergeMessages, nextCursor, roomId, slug]);
 
   const closeEvidence = useCallback(() => setSelectedMessage(null), []);
 

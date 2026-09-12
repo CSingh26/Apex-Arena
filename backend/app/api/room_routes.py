@@ -24,12 +24,15 @@ from app.api.room_schemas import (
     RoomGenerationStatusResponse,
     RoomMessagesResponse,
 )
-from app.api.room_streaming import race_room_stream
+from app.api.room_streaming import parse_discussion_event_id, race_room_stream
 from app.api.schemas import SessionIntelligenceResponse
 from app.domain.rooms import (
+    MAX_DISCUSSION_GENERATION,
     MessageTopic,
     MessageType,
+    RaceRoom,
     RoomMode,
+    RoomPlaybackState,
     RoomStatus,
     SessionType,
     SourceAvailability,
@@ -52,6 +55,15 @@ def get_services(request: Request) -> AppServices:
 
 
 Services = Annotated[AppServices, Depends(get_services)]
+
+
+def _require_matching_generation(room: RaceRoom, playback: RoomPlaybackState) -> None:
+    if room.discussion_generation != playback.discussion_generation:
+        # Do not repeat a mutation: it may already have committed successfully.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Discussion restarted while reading playback; refresh the room",
+        )
 
 
 async def require_room(slug: str, services: AppServices):
@@ -183,6 +195,7 @@ async def race_room_detail(room_slug: str, services: Services) -> RaceRoomDetail
         if getattr(services, "race_state", None) is not None and room.session_key
         else asyncio.sleep(0, result=RaceState(session_key=room.session_key or "")),
     )
+    _require_matching_generation(room, playback)
     notices = {
         SourceAvailability.TELEMETRY: "Detailed normalized telemetry is available.",
         SourceAvailability.LIMITED: "Some telemetry is incomplete; conclusions are qualified.",
@@ -236,6 +249,7 @@ async def room_messages(
     room_slug: str,
     services: Services,
     after_sequence: int = Query(default=0, ge=0),
+    discussion_generation: int | None = Query(default=None, ge=1, le=MAX_DISCUSSION_GENERATION),
     agent_id: str | None = Query(default=None, max_length=80),
     topic: Annotated[MessageTopic | None, Query()] = None,
     message_type: Annotated[MessageType | None, Query()] = None,
@@ -246,8 +260,9 @@ async def room_messages(
     limit: int = Query(default=100, ge=1, le=250),
 ) -> RoomMessagesResponse:
     room = await require_room(room_slug, services)
-    messages = await services.room_repository.list_messages(
+    page = await services.room_repository.list_message_page(
         room.id,
+        expected_generation=discussion_generation,
         after_sequence=after_sequence,
         agent_id=agent_id,
         topic=topic,
@@ -259,8 +274,10 @@ async def room_messages(
         limit=limit,
     )
     return RoomMessagesResponse(
-        messages=messages,
-        next_cursor=messages[-1].sequence if len(messages) == limit else None,
+        discussion_generation=page.discussion_generation,
+        reset_required=page.reset_required,
+        messages=page.messages,
+        next_cursor=page.next_cursor,
     )
 
 
@@ -335,6 +352,7 @@ async def start_replay(
     except ReplayUnavailableError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     refreshed = await services.room_repository.get_room(room_slug)
+    _require_matching_generation(refreshed or room, playback)
     return ReplayResponse(room=refreshed or room, playback=playback)
 
 
@@ -374,6 +392,7 @@ async def change_playback(
     except ReplayUnavailableError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     refreshed = await services.room_repository.get_room(room_slug)
+    _require_matching_generation(refreshed or room, playback)
     return ReplayResponse(room=refreshed or room, playback=playback)
 
 
@@ -443,14 +462,26 @@ async def stream_race_room(
     request: Request,
     services: Services,
     after_sequence: int = Query(default=0, ge=0),
+    discussion_generation: int | None = Query(default=None, ge=1, le=MAX_DISCUSSION_GENERATION),
     last_event_id: Annotated[str | None, Header(alias="Last-Event-ID")] = None,
 ) -> StreamingResponse:
     room = await require_room(room_slug, services)
     recovered_sequence = after_sequence
-    if last_event_id is not None and last_event_id.isdigit():
+    recovered_generation = discussion_generation
+    composite_cursor = parse_discussion_event_id(last_event_id)
+    if composite_cursor is not None:
+        recovered_generation, recovered_sequence = composite_cursor
+    elif last_event_id is not None and last_event_id.isdigit():
         recovered_sequence = max(recovered_sequence, int(last_event_id))
     return StreamingResponse(
-        race_room_stream(request, services, room.id, recovered_sequence, room.session_key),
+        race_room_stream(
+            request,
+            services,
+            room.id,
+            recovered_sequence,
+            room.session_key,
+            recovered_generation,
+        ),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache, no-transform",

@@ -34,6 +34,7 @@ from app.services.normalization import OpenF1EventNormalizer
 from app.services.openf1_backfill import OpenF1HistoricalBackfillService, OpenF1RoomFinalizer
 from app.services.race_intelligence import RaceIntelligenceCoordinator
 from app.services.race_state import RaceStateEngine
+from app.services.rate_limits import RedisRateLimiter
 from app.services.raw_events import RawProviderEventService
 from app.services.recent_sessions import RecentSessionReconciliationService
 from app.services.room_eligibility import RoomEligibilityService
@@ -77,6 +78,7 @@ class AppServices:
             health_check_interval=settings.redis_health_check_interval_seconds,
         )
         self.event_bus = EventBus(self.redis.client)
+        self.rate_limiter = RedisRateLimiter(self.redis.client, settings)
         self.jolpica = JolpicaClient(settings.jolpica_base_url)
         self.openf1_auth = OpenF1AuthService(settings)
         self.openf1 = OpenF1RestClient(

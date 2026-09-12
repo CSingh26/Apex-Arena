@@ -2,6 +2,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  getRoomMessages,
+  roomStreamUrl,
   startRoomReplay,
   updateRoomPlayback,
   verifyReplayOperator,
@@ -68,6 +70,35 @@ describe("replay operator client", () => {
     await getRaceRoom("spa-race");
 
     expect(new Headers(fetchMock.mock.calls[0][1].headers).has("X-Apex-Replay-Password")).toBe(false);
+  });
+
+  it("encodes the discussion generation with HTTP and SSE sequence cursors", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      discussion_generation: 3,
+      reset_required: false,
+      messages: [],
+      next_cursor: null,
+    }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await getRoomMessages(
+      "spa race",
+      "discussion_generation=3&after_sequence=17&limit=100",
+    );
+
+    expect(fetchMock.mock.calls[0][0]).toContain(
+      "/rooms/spa%20race/messages?discussion_generation=3&after_sequence=17&limit=100",
+    );
+    expect(roomStreamUrl("spa race", 17, 3)).toContain(
+      "/rooms/spa%20race/stream?after_sequence=17&discussion_generation=3",
+    );
+    expect(roomStreamUrl("spa race", 17)).toContain(
+      "/rooms/spa%20race/stream?after_sequence=17",
+    );
+    expect(roomStreamUrl("spa race", 17)).not.toContain("discussion_generation");
   });
 
   it("returns an error with HTTP status without reflecting a rejected secret", async () => {

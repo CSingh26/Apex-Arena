@@ -276,20 +276,21 @@ class RoomReplayCoordinator:
             raise ReplayUnavailableError("No normalized events are available for replay")
         async with self._operation(room, replace_worker=True):
             if restart:
-                await self.rooms.reset_discussion(room.id, owner_token=self._owner.get())
+                reset_at = datetime.now(UTC)
+                playback = await self.rooms.begin_discussion_restart(
+                    room.id,
+                    owner_token=self._owner.get(),
+                    started_at=reset_at,
+                )
+                await self._publish_generation(room.id, playback.discussion_generation)
                 self.discussion.reset_session(room.session_key, str(room.id))
                 await self.race_state.reset_session(room.session_key, is_replay=True)
+                await self._prime_driver_profiles(room.session_key)
                 playback = await self._update_playback(
                     room.id,
-                    current_event_sequence=0,
-                    current_message_sequence=0,
-                    current_lap=0,
-                    playback_speed=1,
                     is_paused=False,
-                    started_at=datetime.now(UTC),
                     room_status=RoomStatus.REPLAYING,
                 )
-                await self._publish_status(str(room.id), {"status": "discussion_reset"})
             else:
                 current = await self.rooms.get_playback(room.id)
                 await self._rebuild_to_sequence(room, current.current_event_sequence)
@@ -299,7 +300,6 @@ class RoomReplayCoordinator:
                     started_at=datetime.now(UTC),
                     room_status=RoomStatus.REPLAYING,
                 )
-            await self._prime_driver_profiles(room.session_key)
             published = await self._publish(room, playback, RoomStatus.REPLAYING)
             self._start_worker(room)
             return published
@@ -656,6 +656,14 @@ class RoomReplayCoordinator:
             await self.event_bus.publish_room_status(room_id, status)
         except Exception as exc:
             logger.error("Room status publication failed error=%s", type(exc).__name__)
+
+    async def _publish_generation(self, room_id: UUID, discussion_generation: int) -> None:
+        try:
+            await self.event_bus.publish_room_generation(str(room_id), discussion_generation)
+        except Exception as exc:
+            # PostgreSQL is authoritative; streams reconcile the generation on
+            # their next durable catch-up even if this low-latency hint is lost.
+            logger.error("Discussion generation publication failed error=%s", type(exc).__name__)
 
     async def _cancel(self, room_id: UUID) -> None:
         task = self._tasks.pop(room_id, None)

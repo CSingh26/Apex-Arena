@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-only
+import asyncio
 from datetime import timedelta
 from types import SimpleNamespace
 
@@ -81,6 +82,63 @@ async def runtime(settings):
         consumer=consumer,
         finalizer=finalizer,
         bus=bus,
+    )
+
+
+@pytest.mark.asyncio
+async def test_mqtt_message_and_rest_poll_share_ordered_session_processor(settings):
+    from app.providers.openf1 import OpenF1AuthService, OpenF1LiveClient
+    from app.services.event_pipeline import EventOrderingBuffer
+    from app.services.race_intelligence import RaceIntelligenceCoordinator
+    from app.services.race_state import RaceStateEngine
+    from tests.test_race_intelligence import Snapshots
+
+    r = await runtime(settings)
+    state = RaceStateEngine(Snapshots(), snapshot_every_n_events=100)
+    r.service.race_state = state
+    r.service.processor.consumers = [state, RaceIntelligenceCoordinator(state), r.consumer]
+    r.service.processor.ordering_buffer = EventOrderingBuffer(0)
+    entered, release = asyncio.Event(), asyncio.Event()
+    original_insert = r.normalized.insert
+
+    async def delayed_insert(event):
+        if event.sequence_number == 1:
+            entered.set()
+            await release.wait()
+        return await original_insert(event)
+
+    r.normalized.insert = delayed_insert
+    auth = OpenF1AuthService(settings)
+    mqtt = OpenF1LiveClient(
+        settings.model_copy(update={"event_ordering_buffer_ms": 0}),
+        auth,
+        processor=r.service.processor,
+    )
+    first = asyncio.create_task(
+        mqtt._handle_message(
+            "v1/position",
+            {
+                "session_key": 901,
+                "driver_number": 4,
+                "position": 2,
+                "date": START.isoformat(),
+            },
+        )
+    )
+    await asyncio.wait_for(entered.wait(), 1)
+    rest = asyncio.create_task(r.service.run_once(now=START))
+    try:
+        await asyncio.sleep(0)
+    finally:
+        release.set()
+        await asyncio.wait_for(asyncio.gather(first, rest), 2)
+        await auth.close()
+    reduced = await state.get_state("901")
+    assert sorted(reduced.drivers) == ["16", "4"]
+    assert reduced.drivers["4"].position == 2
+    assert reduced.drivers["16"].position == 1
+    assert [event.sequence_number for event in r.consumer.events] == list(
+        range(1, len(r.consumer.events) + 1)
     )
 
 

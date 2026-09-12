@@ -16,10 +16,11 @@ export const room: RaceRoom = {
   race_name: "Belgian Grand Prix", official_name: "Belgian Grand Prix", circuit_name: "Circuit de Spa-Francorchamps", country: "Belgium", country_code: "BE", session_type: "Race",
   scheduled_start: createdAt, actual_start: createdAt, status: "ready", mode: "archived", current_lap: 0, total_laps: 12,
   source_availability: "telemetry", telemetry_quality: "fixture_complete", message_count: 2, agent_count: 5, last_event_at: createdAt,
+  discussion_generation: 1,
   created_at: createdAt, updated_at: createdAt, is_featured: true,
 };
 
-export const playback: RoomPlayback = { room_id: room.id, current_event_sequence: 0, current_message_sequence: 0, current_lap: 0, playback_speed: 1, is_paused: true, started_at: null, updated_at: createdAt, session_clock: null };
+export const playback: RoomPlayback = { room_id: room.id, current_event_sequence: 0, current_message_sequence: 0, discussion_generation: 1, current_lap: 0, playback_speed: 1, is_paused: true, started_at: null, updated_at: createdAt, session_clock: null };
 
 export const detail: RaceRoomDetailResponse = {
   room,
@@ -68,6 +69,7 @@ export function message(overrides: Partial<RoomMessage> = {}): RoomMessage {
     room_id: room.id,
     agent_id: "mira-vale",
     sequence: 1,
+    discussion_generation: 1,
     lap_number: 6,
     session_time: 360,
     wall_time: createdAt,

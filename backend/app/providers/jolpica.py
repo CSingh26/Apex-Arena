@@ -7,6 +7,8 @@ from typing import Any
 
 import httpx
 
+from app.providers.retry import bounded_retry_delay
+
 
 class JolpicaPayloadError(RuntimeError):
     pass
@@ -142,9 +144,18 @@ class JolpicaClient:
         try:
             metadata = first["MRData"]
             total = int(metadata.get("total", 0))
-            page_limit = max(1, int(metadata.get("limit", requested_limit)))
-        except (AttributeError, KeyError, TypeError, ValueError) as exc:
+            page_limit = int(metadata.get("limit", requested_limit))
+        except (AttributeError, KeyError, TypeError, ValueError, OverflowError) as exc:
             raise JolpicaPayloadError("Jolpica returned invalid pagination metadata") from exc
+        # A single season query must not fan out based on an arbitrary upstream
+        # total. This ceiling is a resource guard, not an assumed race count.
+        if (
+            total < 0
+            or total > 10_000
+            or page_limit < 1
+            or (total + page_limit - 1) // page_limit > 100
+        ):
+            raise JolpicaPayloadError("Jolpica pagination exceeds the supported request budget")
         payloads = [first]
         for offset in range(page_limit, total, page_limit):
             payloads.append(
@@ -168,16 +179,21 @@ class JolpicaClient:
                 if delay > 0:
                     await asyncio.sleep(delay)
                 self._next_request_at = time.monotonic() + self.min_request_interval_seconds
-                response = await self.client.get(path, params=params)
+                try:
+                    response = await self.client.get(path, params=params)
+                except httpx.RequestError:
+                    if attempt + 1 >= self.retry_attempts:
+                        raise
+                    await asyncio.sleep(bounded_retry_delay(None, 0.25 * (2**attempt)))
+                    continue
                 if response.status_code not in {429, 500, 502, 503, 504}:
                     break
                 if attempt + 1 < self.retry_attempts:
-                    retry_after = response.headers.get("Retry-After")
-                    try:
-                        server_delay = float(retry_after) if retry_after is not None else 0.0
-                    except ValueError:
-                        server_delay = 0.0
-                    await asyncio.sleep(max(server_delay, 0.25 * (2**attempt)))
+                    await asyncio.sleep(
+                        bounded_retry_delay(
+                            response.headers.get("Retry-After"), 0.25 * (2**attempt)
+                        )
+                    )
             assert response is not None
             response.raise_for_status()
             payload = response.json()
