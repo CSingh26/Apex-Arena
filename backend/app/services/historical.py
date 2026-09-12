@@ -213,6 +213,30 @@ class HistoricalOpenF1Adapter:
             ownership_lost.set()
             owner.cancel()
 
+    async def _record_cancelled_run(
+        self,
+        run_id: UUID,
+        *,
+        result: PipelineResult,
+        last_event_at: datetime | None,
+        last_error: str,
+    ) -> None:
+        """Best-effort terminal persistence without replacing caller cancellation."""
+        try:
+            await self.runs.finish(
+                run_id,
+                status="failed",
+                result=result,
+                last_event_at=last_event_at,
+                last_error=last_error,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Historical run cancellation persistence failed run=%s error=%s",
+                run_id,
+                type(exc).__name__,
+            )
+
     async def ingest_session(
         self,
         session_key: str,
@@ -383,34 +407,26 @@ class HistoricalOpenF1Adapter:
             )
         except asyncio.CancelledError:
             stopping.set()
+            last_event_at = max(
+                (event.event_time for event in all_records if event.event_time is not None),
+                default=None,
+            )
             if ownership_lost.is_set():
                 remaining_cancellations = owner.uncancel()
                 if remaining_cancellations == 0:
-                    await self.runs.finish(
+                    await self._record_cancelled_run(
                         run_id,
-                        status="failed",
                         result=result,
-                        last_event_at=max(
-                            (
-                                event.event_time
-                                for event in all_records
-                                if event.event_time is not None
-                            ),
-                            default=None,
-                        ),
+                        last_event_at=last_event_at,
                         last_error="HistoricalRunOwnershipLostError",
                     )
                     raise HistoricalRunOwnershipLostError(
                         "Historical ingestion run ownership was lost; retry the session"
                     ) from None
-            await self.runs.finish(
+            await self._record_cancelled_run(
                 run_id,
-                status="failed",
                 result=result,
-                last_event_at=max(
-                    (event.event_time for event in all_records if event.event_time is not None),
-                    default=None,
-                ),
+                last_event_at=last_event_at,
                 last_error="CancelledError",
             )
             logger.warning("Historical OpenF1 ingestion cancelled session=%s", session_key)

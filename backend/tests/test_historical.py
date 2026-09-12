@@ -59,6 +59,7 @@ class FakeRuns:
         self.two_heartbeats = asyncio.Event()
         self.heartbeat_result = True
         self.heartbeat_hook = None
+        self.finish_error: Exception | None = None
 
     async def start(self, *, provider: str, session_key: str, metadata: dict[str, Any]) -> UUID:
         assert provider == "openf1"
@@ -67,6 +68,8 @@ class FakeRuns:
 
     async def finish(self, run_id: UUID, **values: Any) -> bool:
         assert run_id == self.run_id
+        if self.finish_error is not None:
+            raise self.finish_error
         if not self.running:
             return False
         self.running = False
@@ -436,6 +439,31 @@ async def test_cancellation_finishes_the_run_and_stops_its_heartbeat() -> None:
     assert runs.finished and runs.finished["status"] == "failed"
     assert runs.finished["last_error"] == "CancelledError"
     assert runs.heartbeat_count == cancelled_count
+
+
+@pytest.mark.asyncio
+async def test_cancellation_survives_terminal_persistence_failure(caplog) -> None:
+    client = BlockingOpenF1Client()
+    runs = FakeRuns()
+    runs.finish_error = ConnectionError("synthetic sensitive response")
+    adapter = HistoricalOpenF1Adapter(
+        client=client,  # type: ignore[arg-type]
+        processor=FakeProcessor(),  # type: ignore[arg-type]
+        runs=runs,
+        snapshots=FakeSnapshots(),
+        max_records_per_endpoint=500,
+        run_heartbeat_seconds=0.01,
+    )
+    ingestion = asyncio.create_task(adapter.ingest_session("9839", ["laps"]))
+    await asyncio.wait_for(client.fetch_started.wait(), timeout=1)
+
+    ingestion.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await ingestion
+
+    assert ingestion.cancelled()
+    assert "ConnectionError" in caplog.text
+    assert "synthetic sensitive response" not in caplog.text
 
 
 @pytest.mark.asyncio
