@@ -25,8 +25,55 @@ import type {
 
 import styles from "./live-command-center.module.css";
 
-type Connection = "live" | "reconnecting" | "delayed" | "historical" | "unavailable";
+type Connection = "live" | "reconnecting" | "waiting" | "delayed" | "historical" | "unavailable";
 const EMPTY_BATTLES: BattleState[] = [];
+
+const CONNECTION_PRESENTATION: Record<Connection, { label: string; announcement: string }> = {
+  live: { label: "LIVE", announcement: "Live timing connected" },
+  reconnecting: { label: "RECONNECTING", announcement: "Reconnecting to live timing" },
+  waiting: { label: "WAITING FOR DATA", announcement: "Waiting for timing data" },
+  delayed: { label: "DELAYED", announcement: "Live timing updates delayed" },
+  historical: { label: "REPLAY", announcement: "Historical replay data" },
+  unavailable: { label: "UNAVAILABLE", announcement: "Live timing provider unavailable" },
+};
+
+type ProviderConnectionStatus = {
+  connection_state?: string;
+  current_session_key?: string | null;
+};
+
+function parseStreamPayload<T>(event: Event): T | null {
+  try {
+    return JSON.parse((event as MessageEvent).data) as T;
+  } catch {
+    return null;
+  }
+}
+
+function providerConnection(status: ProviderConnectionStatus): Connection {
+  switch (status.connection_state) {
+    case "LIVE": return "live";
+    case "STALE": return "delayed";
+    case "PROVIDER_UNAVAILABLE": return "unavailable";
+    case "SESSION_COMPLETE": return "historical";
+    case "WAITING_FOR_PROVIDER":
+    case "WAITING_FOR_SESSION_KEY": return "waiting";
+    default: return "reconnecting";
+  }
+}
+
+function isSessionState(value: RaceState | null, sessionKey: string): value is RaceState {
+  return value?.session_key === sessionKey
+    && Number.isFinite(value.sequence_number)
+    && typeof value.drivers === "object"
+    && value.drivers !== null;
+}
+
+function isSessionEvent(value: NormalizedRaceEvent | null, sessionKey: string): value is NormalizedRaceEvent {
+  return value?.session_key === sessionKey
+    && typeof value.id === "string"
+    && Number.isFinite(value.sequence_number);
+}
 
 type TimingRow = {
   number: number;
@@ -233,8 +280,22 @@ export function LiveCommandCenter({
   const [loadingMoreEvents, setLoadingMoreEvents] = useState(false);
   const lastSequenceRef = useRef(0);
   const eventPageCursorRef = useRef(0);
+  const sessionRef = useRef<string | null>(null);
   const { mode, setMode } = useRaceRoomMode();
   const { panel: debugLocation, raw: debugRawPoints } = useLocationDebugFlags();
+
+  useEffect(() => {
+    if (sessionRef.current !== sessionKey) {
+      sessionRef.current = sessionKey;
+      lastSequenceRef.current = 0;
+      eventPageCursorRef.current = 0;
+      setState(null);
+      setEvents([]);
+      setHasMoreEvents(false);
+      setLoadingMoreEvents(false);
+      setConnection("reconnecting");
+    }
+  }, [sessionKey]);
 
   useEffect(() => {
     if (!sessionKey || playbackSequence == null) return;
@@ -259,14 +320,22 @@ export function LiveCommandCenter({
     let source: EventSource | null = null;
     let retry = 0;
     let timer: number | null = null;
+    let disposed = false;
+    let historical = false;
+    let hasAppliedState = false;
     const setNewest = (next: RaceState) => {
+      if (disposed || !isSessionState(next, sessionKey)) return;
       if (next.sequence_number < lastSequenceRef.current) return;
+      if (hasAppliedState && next.sequence_number === lastSequenceRef.current) return;
+      hasAppliedState = true;
       lastSequenceRef.current = next.sequence_number;
       setState(next);
-      setConnection(next.is_replay ? "historical" : "live");
+      historical = next.is_replay || next.status === "finished";
+      if (historical) setConnection("historical");
     };
     getSessionState(sessionKey, controller.signal)
       .then(({ state: initial }) => {
+        if (disposed || !isSessionState(initial, sessionKey)) return;
         setNewest(initial);
         return getSessionEvents(
           sessionKey,
@@ -277,24 +346,45 @@ export function LiveCommandCenter({
           },
           controller.signal,
         ).then((response) => {
-          eventPageCursorRef.current = response.events.at(-1)?.sequence_number ?? 0;
-          setEvents((current) => mergeEvents(current, response.events));
+          if (disposed) return;
+          const incoming = response.events.filter((event) => isSessionEvent(event, sessionKey));
+          eventPageCursorRef.current = incoming.at(-1)?.sequence_number ?? 0;
+          setEvents((current) => mergeEvents(current, incoming));
           setHasMoreEvents(response.count === 100);
         }).catch(() => undefined);
       })
-      .catch(() => setConnection("unavailable"));
+      .catch(() => { if (!disposed && !hasAppliedState) setConnection("unavailable"); });
     const connect = () => {
+      if (disposed) return;
       source = new EventSource(sessionStreamUrl(sessionKey, lastSequenceRef.current));
-      source.addEventListener("open", () => { retry = 0; setConnection("live"); });
-      source.addEventListener("state", (event) => setNewest(JSON.parse((event as MessageEvent).data) as RaceState));
+      let reconnectScheduled = false;
+      source.addEventListener("open", () => { retry = 0; });
+      source.addEventListener("state", (event) => {
+        const next = parseStreamPayload<RaceState>(event);
+        if (isSessionState(next, sessionKey)) setNewest(next);
+      });
       source.addEventListener("event", (event) => {
-        const next = JSON.parse((event as MessageEvent).data) as NormalizedRaceEvent;
+        const next = parseStreamPayload<NormalizedRaceEvent>(event);
+        if (!isSessionEvent(next, sessionKey)) return;
         if (next.importance_level !== "LOW") {
           setEvents((current) => mergeEvents(current, [next]));
         }
       });
+      source.addEventListener("connection_status", (event) => {
+        const status = parseStreamPayload<ProviderConnectionStatus>(event);
+        if (!status) return;
+        if (status.current_session_key && status.current_session_key !== sessionKey) return;
+        const nextConnection = providerConnection(status);
+        const requiresMatchingSession = nextConnection === "live"
+          || nextConnection === "delayed"
+          || nextConnection === "historical";
+        if (requiresMatchingSession && status.current_session_key !== sessionKey) return;
+        setConnection(historical ? "historical" : nextConnection);
+      });
       source.addEventListener("stream_status", () => setConnection("delayed"));
       source.addEventListener("error", () => {
+        if (reconnectScheduled || disposed) return;
+        reconnectScheduled = true;
         source?.close();
         retry += 1;
         setConnection(retry > 3 ? "delayed" : "reconnecting");
@@ -303,6 +393,7 @@ export function LiveCommandCenter({
     };
     connect();
     return () => {
+      disposed = true;
       controller.abort();
       source?.close();
       if (timer != null) window.clearTimeout(timer);
@@ -334,9 +425,11 @@ export function LiveCommandCenter({
   const liveSamples = useMemo(() => liveLocationSamples(state), [state]);
   const locations = useDriverLocations({
     sessionKey,
-    // A replay is positioned by the backend clock; a live session has no
-    // replay position, so the newest applied event time is the session time.
-    clockIso: sessionClock ?? (connection === "historical" ? null : state?.last_updated_at ?? null),
+    // Room detail can include a paused replay clock even while live intake is
+    // active. Only replay state may use it to pin the rendered GPS position.
+    clockIso: state?.is_replay
+      ? sessionClock ?? state.last_updated_at
+      : state?.last_updated_at ?? null,
     liveSamples,
   });
   const mapDrivers = useMemo(
@@ -357,17 +450,20 @@ export function LiveCommandCenter({
   );
   const loadMoreEvents = async () => {
     if (!sessionKey || loadingMoreEvents) return;
+    const requestedSession = sessionKey;
     setLoadingMoreEvents(true);
     try {
       const after = eventPageCursorRef.current;
-      const response = await getSessionEvents(sessionKey, {
+      const response = await getSessionEvents(requestedSession, {
         afterSequenceNumber: after,
         beforeSequenceNumber: replaySequence ?? undefined,
         limit: 100,
         minimumImportance: "NORMAL",
       });
-      eventPageCursorRef.current = response.events.at(-1)?.sequence_number ?? after;
-      setEvents((current) => mergeEvents(current, response.events));
+      if (sessionRef.current !== requestedSession) return;
+      const incoming = response.events.filter((event) => isSessionEvent(event, requestedSession));
+      eventPageCursorRef.current = incoming.at(-1)?.sequence_number ?? after;
+      setEvents((current) => mergeEvents(current, incoming));
       setHasMoreEvents(response.count === 100);
     } finally {
       setLoadingMoreEvents(false);
@@ -376,11 +472,23 @@ export function LiveCommandCenter({
   const locatedLabel = locations.status === "ready"
     ? `${locations.driverNumbers.length} cars`
     : locations.status === "loading" ? "Loading" : "No positions";
+  const connectionPresentation = CONNECTION_PRESENTATION[connection];
+  const telemetryUnavailable = state?.is_replay || state?.status === "finished"
+    ? "Car telemetry was not recorded for this session."
+    : connection === "unavailable"
+      ? "Car telemetry is currently unavailable from the timing provider."
+      : "Car telemetry has not been published for this session yet.";
 
   return <>
     <section className={styles.commandCenter} aria-label="Live session command center" data-mode={mode.toLowerCase()}>
     <header className={styles.banner}>
-      <span className={`${styles.connection} ${styles[`connection_${connection}`]}`}><i aria-hidden />{connection === "historical" ? "REPLAY" : connection.toUpperCase()}</span>
+      <span
+        className={`${styles.connection} ${styles[`connection_${connection}`]}`}
+        role="status"
+        aria-live="polite"
+        aria-atomic="true"
+        aria-label={connectionPresentation.announcement}
+      ><i aria-hidden />{connectionPresentation.label}</span>
       <b>{sessionLabel}</b>
       <span>{state?.current_lap != null ? `LAP ${state.current_lap}` : "TIMING READY"}</span>
       <span className={styles.trackStatus}>{trackStatus}</span>
@@ -416,7 +524,7 @@ export function LiveCommandCenter({
       <section className={styles.telemetry} aria-labelledby="telemetry-title">
         <div className={styles.panelHeading}><div><span>Selected driver</span><h2 id="telemetry-title">{activeRow?.name ?? "Telemetry"}</h2></div><small>{selected?.position ? `P${selected.position}` : "—"}</small></div>
         <SelectedDriverContext driverNumber={activeDriver} timing={timing} context={selectedTiming?.battle_context ?? null} mode={mode} />
-        {mode === "ANALYST" ? selected?.telemetry && Object.keys(selected.telemetry).length ? <><div className={styles.speed}>{telemetryMetric("SPEED", selected.telemetry.speed, " km/h")}</div><div className={styles.telemetryGrid}>{telemetryMetric("THROTTLE", selected.telemetry.throttle, "%")}{telemetryMetric("BRAKE", selected.telemetry.brake, "%")}{telemetryMetric("GEAR", selected.telemetry.gear)}{telemetryMetric("DRS", selected.telemetry.drs)}</div></> : <div className={styles.telemetryFallback}><span className={styles.telemetryEyebrow}>Timing-only view</span><b>Car telemetry was not recorded for this session.</b><p>{activeRow ? `${activeRow.code} remains selected, so the tower and session facts stay in sync.` : "Choose a driver in the timing tower to keep the session context in focus."}</p></div> : null}
+        {mode === "ANALYST" ? selected?.telemetry && Object.keys(selected.telemetry).length ? <><div className={styles.speed}>{telemetryMetric("SPEED", selected.telemetry.speed, " km/h")}</div><div className={styles.telemetryGrid}>{telemetryMetric("THROTTLE", selected.telemetry.throttle, "%")}{telemetryMetric("BRAKE", selected.telemetry.brake, "%")}{telemetryMetric("GEAR", selected.telemetry.gear)}{telemetryMetric("DRS", selected.telemetry.drs)}</div></> : <div className={styles.telemetryFallback}><span className={styles.telemetryEyebrow}>Timing-only view</span><b>{telemetryUnavailable}</b><p>{activeRow ? `${activeRow.code} remains selected, so the tower and session facts stay in sync.` : "Choose a driver in the timing tower to keep the session context in focus."}</p></div> : null}
         {activeDriver != null && <dl className={styles.driverFacts}><div><dt>Latest</dt><dd>{formatLapTime(selected?.latest_lap_duration)}</dd></div><div><dt>Best</dt><dd>{formatLapTime(selected?.best_lap_duration)}</dd></div><div><dt>Gap</dt><dd>{formatGap(selected?.gap_to_leader)}</dd></div><div><dt>Pits</dt><dd>{selected?.pit_stops.length ?? 0}</dd></div></dl>}
       </section>
     </div>
