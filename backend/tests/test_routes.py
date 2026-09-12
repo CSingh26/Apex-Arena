@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from datetime import UTC, date, datetime
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from fastapi.testclient import TestClient
@@ -272,6 +272,121 @@ def test_historical_ingestion_returns_pipeline_counts(settings: Settings) -> Non
 
     assert response.status_code == 200
     assert response.json()["normalized_inserted"] == 3
+
+
+def test_backfill_status_requires_the_existing_internal_key(settings: Settings) -> None:
+    protected = Settings.model_validate(
+        {**settings.model_dump(), "internal_api_key": "safe-internal-key"}
+    )
+    app = create_app(protected)
+    with TestClient(app) as client:
+        missing = client.get("/api/v1/internal/openf1/backfill-status")
+        incorrect = client.get(
+            "/api/v1/internal/openf1/backfill-status",
+            headers={"X-Internal-API-Key": "wrong-key"},
+        )
+
+    assert missing.status_code == 401
+    assert incorrect.status_code == 401
+    assert "safe-internal-key" not in missing.text
+    assert "safe-internal-key" not in incorrect.text
+
+
+def test_backfill_status_exposes_allowlisted_shared_live_diagnostics(
+    settings: Settings,
+) -> None:
+    protected = Settings.model_validate(
+        {**settings.model_dump(), "internal_api_key": "safe-internal-key"}
+    )
+    app = create_app(protected)
+    with TestClient(app) as client:
+        services = app.state.services
+        services.backfill_jobs.latest = AsyncMock(return_value=None)
+        services.provider_status = AsyncMock(
+            return_value={
+                "connection_state": "LIVE",
+                "current_session_key": "901",
+                "last_event_at": "2026-07-19T12:00:00+00:00",
+                "transport": "rest",
+                "room_slug": "2026-belgian-grand-prix-race",
+                "endpoints": {
+                    "laps": {
+                        "state": "ready",
+                        "row_count": 42,
+                        "error": None,
+                        "next_retry_at": "2026-07-19T12:00:15+00:00",
+                        "authorization": "provider-secret",
+                    }
+                },
+                "access_token": "provider-secret",
+            }
+        )
+        services.event_bus.diagnostics = Mock(
+            return_value={
+                "last_successful_event_publish_at": "2026-07-19T12:00:01+00:00",
+                "last_successful_state_publish_at": "2026-07-19T12:00:02+00:00",
+                "last_error": {"type": "ConnectionError", "at": "2026-07-19T12:00:03+00:00"},
+                "active_session_sse_clients": 2,
+                "password": "redis-secret",
+            }
+        )
+
+        response = client.get(
+            "/api/v1/internal/openf1/backfill-status",
+            headers={"X-Internal-API-Key": "safe-internal-key"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["mqtt_state"] == "LIVE"
+    assert body["last_provider_event_timestamp"] == "2026-07-19T12:00:00+00:00"
+    assert body["live_pipeline"]["current_session_key"] == "901"
+    assert body["live_pipeline"]["endpoints"]["laps"]["row_count"] == 42
+    assert body["event_bus"]["active_session_sse_clients"] == 2
+    assert "provider-secret" not in response.text
+    assert "redis-secret" not in response.text
+    assert "access_token" not in response.text
+    assert "authorization" not in response.text
+    assert "password" not in response.text
+    services.provider_status.assert_awaited_once()
+    services.event_bus.diagnostics.assert_called_once_with("901")
+
+
+def test_backfill_status_handles_a_missing_provider_session_key(settings: Settings) -> None:
+    protected = Settings.model_validate(
+        {**settings.model_dump(), "internal_api_key": "safe-internal-key"}
+    )
+    app = create_app(protected)
+    with TestClient(app) as client:
+        services = app.state.services
+        services.backfill_jobs.latest = AsyncMock(return_value=None)
+        services.provider_status = AsyncMock(
+            return_value={
+                "connection_state": "WAITING_FOR_SESSION_KEY",
+                "current_session_key": None,
+                "last_event_at": None,
+            }
+        )
+        services.event_bus.diagnostics = Mock(
+            side_effect=AssertionError("session diagnostics require a session key")
+        )
+
+        response = client.get(
+            "/api/v1/internal/openf1/backfill-status",
+            headers={"X-Internal-API-Key": "safe-internal-key"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["mqtt_state"] == "WAITING_FOR_SESSION_KEY"
+    assert body["last_provider_event_timestamp"] is None
+    assert body["event_bus"] == {
+        "last_successful_event_publish_at": None,
+        "last_successful_state_publish_at": None,
+        "last_error": None,
+        "active_session_sse_clients": 0,
+    }
+    services.event_bus.diagnostics.assert_not_called()
 
 
 def test_debug_config_is_available_outside_production(settings: Settings) -> None:

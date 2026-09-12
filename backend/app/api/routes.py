@@ -97,12 +97,68 @@ EVENT_CATEGORY_TYPES: dict[RaceEventCategory, set[RaceEventType]] = {
     },
 }
 
+LIVE_PIPELINE_DIAGNOSTIC_FIELDS = {
+    "calendar_state",
+    "checked_at",
+    "connection_state",
+    "current_session_key",
+    "degraded_reason",
+    "error",
+    "event",
+    "ingestion_running",
+    "internal_session_id",
+    "last_event_age",
+    "last_event_at",
+    "meeting_key",
+    "next_catalog_retry_at",
+    "provider",
+    "provider_connected",
+    "provider_session_resolved",
+    "reconnect_attempts",
+    "room_slug",
+    "session",
+    "transport",
+}
+ENDPOINT_DIAGNOSTIC_FIELDS = {"state", "row_count", "error", "next_retry_at"}
+
 
 def get_services(request: Request) -> AppServices:
     return request.app.state.services
 
 
 Services = Annotated[AppServices, Depends(get_services)]
+
+
+def _safe_live_pipeline_diagnostics(status: dict[str, object]) -> dict[str, object]:
+    diagnostics = {
+        key: value for key, value in status.items() if key in LIVE_PIPELINE_DIAGNOSTIC_FIELDS
+    }
+    endpoints = status.get("endpoints")
+    if isinstance(endpoints, dict):
+        diagnostics["endpoints"] = {
+            str(name): {
+                key: value for key, value in detail.items() if key in ENDPOINT_DIAGNOSTIC_FIELDS
+            }
+            for name, detail in endpoints.items()
+            if isinstance(detail, dict)
+        }
+    return diagnostics
+
+
+def _safe_event_bus_diagnostics(diagnostics: dict[str, object] | None = None) -> dict[str, object]:
+    diagnostics = diagnostics or {}
+    last_error = diagnostics.get("last_error")
+    safe_error = (
+        {key: last_error[key] for key in ("type", "at") if key in last_error}
+        if isinstance(last_error, dict)
+        else None
+    )
+    return {
+        "last_successful_event_publish_at": diagnostics.get("last_successful_event_publish_at"),
+        "last_successful_state_publish_at": diagnostics.get("last_successful_state_publish_at"),
+        "last_error": safe_error,
+        "active_session_sse_clients": diagnostics.get("active_session_sse_clients", 0),
+    }
 
 
 async def _session_geometry(services: AppServices, session_key: str):
@@ -262,9 +318,7 @@ async def health_ready(services: Services) -> JSONResponse:
 async def health_provider(services: Services) -> JSONResponse:
     """Report the latest OpenF1 ingestion state without exposing credentials or tokens."""
     source = (
-        "redis_status_stream"
-        if services.settings.app_process_role == "api"
-        else "local_process"
+        "redis_status_stream" if services.settings.app_process_role == "api" else "local_process"
     )
     provider = await services.provider_status()
 
@@ -356,16 +410,20 @@ async def openf1_backfill_status(
     ):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid internal key")
     latest = await services.backfill_jobs.latest()
-    live = services.openf1_live.status()
+    live = await services.provider_status()
+    session_key = str(live.get("current_session_key") or "") or None
+    event_bus = services.event_bus.diagnostics(session_key) if session_key is not None else None
     return {
         "process_role": services.settings.app_process_role,
         "ingestion_mode": services.settings.openf1_ingestion_mode,
-        "mqtt_state": live["connection_state"],
+        "mqtt_state": live.get("connection_state"),
         "rest_backfill_enabled": services.settings.openf1_rest_backfill_enabled,
         "recent_session_reconciliation": services.recent_reconciliation.status,
         "current_job": backfill_job_status(latest),
         "advisory_lease_owner": services.database.ingestor_lease_owned,
-        "last_provider_event_timestamp": live["last_event_at"],
+        "last_provider_event_timestamp": live.get("last_event_at"),
+        "live_pipeline": _safe_live_pipeline_diagnostics(live),
+        "event_bus": _safe_event_bus_diagnostics(event_bus),
     }
 
 
