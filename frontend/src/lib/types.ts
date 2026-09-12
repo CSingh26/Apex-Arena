@@ -546,10 +546,13 @@ export type MessageType = "observation" | "analysis" | "question" | "reply" | "a
 
 export type RaceRoom = {
   id: string; slug: string; session_key: string | null; season: number; round_number: number | null;
+  event_slug?: string | null; meeting_key?: string | null;
   race_name: string; official_name: string; circuit_name: string; country: string; session_type: string;
   country_code: string | null;
   scheduled_start: string; actual_start: string | null; status: RoomStatus; mode: RoomMode;
   current_lap: number | null; total_laps: number | null; source_availability: SourceAvailability;
+  eligibility_status?: string; ingestion_status?: string;
+  replay_available?: boolean; results_available?: boolean;
   telemetry_quality: string;
   message_count: number; agent_count: number; last_event_at: string | null; created_at: string; updated_at: string;
   is_featured: boolean;

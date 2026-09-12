@@ -253,4 +253,55 @@ describe("useDriverLocations", () => {
 
     await waitFor(() => expect(api.getSessionLocationSamples.mock.calls.length).toBeGreaterThan(initialCalls));
   });
+
+  it("fetches each immutable replay window once across rapid 8x clock ticks", async () => {
+    const view = renderHook(
+      ({ clockIso }) => useDriverLocations({
+        sessionKey: "race-1",
+        clockIso,
+        dataMode: "immutable",
+      }),
+      { initialProps: { clockIso: "2026-09-06T13:00:01Z" } },
+    );
+    await waitFor(() => expect(api.getSessionLocationSamples).toHaveBeenCalledTimes(3));
+
+    for (const seconds of [9, 17, 25, 33, 41]) {
+      view.rerender({ clockIso: `2026-09-06T13:00:${String(seconds).padStart(2, "0")}Z` });
+      await act(async () => { await Promise.resolve(); });
+    }
+    await waitFor(() => expect(api.getSessionLocationSamples).toHaveBeenCalledTimes(4));
+
+    const requestedWindows = api.getSessionLocationSamples.mock.calls.map((call) => call[1].since);
+    expect(new Set(requestedWindows).size).toBe(requestedWindows.length);
+  });
+
+  it("keeps slow immutable window requests alive across replay clock ticks and aborts them on unmount", async () => {
+    const requests: Array<{
+      pending: ReturnType<typeof deferred<ReturnType<typeof locations>>>;
+      signal: AbortSignal;
+    }> = [];
+    api.getSessionLocationSamples.mockImplementation((_sessionKey: string, _window: unknown, signal: AbortSignal) => {
+      const pending = deferred<ReturnType<typeof locations>>();
+      requests.push({ pending, signal });
+      return pending.promise;
+    });
+    const view = renderHook(
+      ({ clockIso }) => useDriverLocations({
+        sessionKey: "race-1",
+        clockIso,
+        dataMode: "immutable",
+      }),
+      { initialProps: { clockIso: "2026-09-06T13:00:01Z" } },
+    );
+    await waitFor(() => expect(requests).toHaveLength(1));
+
+    for (const seconds of [9, 17, 25, 33, 41]) {
+      view.rerender({ clockIso: `2026-09-06T13:00:${String(seconds).padStart(2, "0")}Z` });
+    }
+    await waitFor(() => expect(requests.length).toBeGreaterThan(1));
+
+    expect(requests.every(({ signal }) => !signal.aborted)).toBe(true);
+    view.unmount();
+    expect(requests.every(({ signal }) => signal.aborted)).toBe(true);
+  });
 });

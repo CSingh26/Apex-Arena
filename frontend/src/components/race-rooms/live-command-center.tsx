@@ -10,7 +10,7 @@ import { RaceRoomModeToggle, useRaceRoomMode } from "@/components/race-rooms/rac
 import { SelectedDriverContext } from "@/components/race-rooms/selected-driver-context";
 import { getSessionEvents, getSessionState, sessionStreamUrl } from "@/lib/api";
 import { formatGap, formatLapTime } from "@/lib/timing";
-import { useDriverLocations } from "@/lib/use-driver-locations";
+import { useDriverLocations, type LocationDataMode } from "@/lib/use-driver-locations";
 import type {
   BattleState,
   DriverBattleContext,
@@ -119,6 +119,7 @@ type LiveCommandCenterProps = {
   onSelectDriver: (driver: number) => void;
   initialIntelligence?: SessionIntelligenceState;
   sourceAvailability?: SourceAvailability;
+  locationDataMode?: LocationDataMode;
 };
 
 function driverNumber(value: string, driver: DriverRaceState): number {
@@ -284,6 +285,7 @@ export function LiveCommandCenter({
   onSelectDriver,
   initialIntelligence,
   sourceAvailability = "telemetry",
+  locationDataMode = "mutable",
 }: LiveCommandCenterProps) {
   const [state, setState] = useState<RaceState | null>(null);
   const [connection, setConnection] = useState<Connection>("reconnecting");
@@ -478,6 +480,7 @@ export function LiveCommandCenter({
   const liveSamples = useMemo(() => liveLocationSamples(state), [state]);
   const locations = useDriverLocations({
     sessionKey,
+    dataMode: locationDataMode,
     // Room detail can include a paused replay clock even while live intake is
     // active. Only replay state may use it to pin the rendered GPS position.
     clockIso: state?.is_replay

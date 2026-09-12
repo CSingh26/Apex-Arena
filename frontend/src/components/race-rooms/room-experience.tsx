@@ -15,13 +15,25 @@ import { RoomContext } from "@/components/race-rooms/room-context";
 import { getRaceRoom, getRoomMessages, roomStreamUrl, startRoomReplay, updateRoomPlayback } from "@/lib/api";
 import { appRoutes } from "@/lib/app-paths";
 import { mergeRoomMessages } from "@/lib/room-state";
-import type { PlaybackAction, RaceRoomDetailResponse, ReplayAction, RoomMessage, RoomPlayback, RoomStatus } from "@/lib/types";
+import type { MessageTopic, MessageType, PlaybackAction, RaceRoomDetailResponse, ReplayAction, RoomMessage, RoomMode, RoomPlayback, RoomStatus } from "@/lib/types";
 
 import styles from "./race-rooms-revamp.module.css";
 
 type ConnectionState = "connecting" | "live" | "reconnecting" | "degraded";
 const ROOM_STATUSES = new Set<RoomStatus>(["pending", "ingesting", "ready", "live", "replaying", "paused", "completed", "failed", "unavailable"]);
+const ROOM_MODES = new Set<RoomMode>(["live", "replay", "archived", "development"]);
+const MESSAGE_TOPICS = new Set<MessageTopic>(["strategy", "pace", "racecraft", "incident", "race_control", "weather", "pit_stop", "tyres", "championship", "summary", "session"]);
+const MESSAGE_TYPES = new Set<MessageType>(["observation", "analysis", "question", "reply", "agreement", "disagreement", "correction", "summary", "uncertainty_notice"]);
+const MESSAGE_CONFIDENCE = new Set(["low", "medium", "high"]);
+const EVIDENCE_STATUSES = new Set(["grounded", "partial", "unavailable"]);
 const IMPORTANT_TOPICS = new Set(["incident", "race_control", "pit_stop", "weather"]);
+
+type StreamRecord = Record<string, unknown>;
+type RoomStatusPayload = {
+  status: RoomStatus;
+  mode?: RoomMode;
+  current_lap?: number | null;
+};
 
 function friendlyRoomError(reason: unknown): string {
   if (reason instanceof TypeError) return "We couldn’t reach the race service. Check your connection and try again.";
@@ -31,15 +43,87 @@ function friendlyRoomError(reason: unknown): string {
   return "This room is temporarily unavailable. Try again in a moment.";
 }
 
-function streamPayload<T>(event: Event): T | null {
+function streamRecord(event: Event): StreamRecord | null {
   try {
     const payload = JSON.parse((event as MessageEvent).data) as unknown;
     return payload !== null && typeof payload === "object" && !Array.isArray(payload)
-      ? payload as T
+      ? payload as StreamRecord
       : null;
   } catch {
     return null;
   }
+}
+
+function isFiniteInteger(value: unknown, minimum = 0): value is number {
+  return typeof value === "number" && Number.isFinite(value) && Number.isInteger(value) && value >= minimum;
+}
+
+function isNullableString(value: unknown): value is string | null {
+  return value === null || typeof value === "string";
+}
+
+function hasMatchingOptionalIdentity(payload: StreamRecord, roomId: string, sessionKey: string | null): boolean {
+  if ("room_id" in payload && payload.room_id !== roomId) return false;
+  if ("session_key" in payload && payload.session_key !== sessionKey) return false;
+  return true;
+}
+
+function roomMessagePayload(event: Event, roomId: string, sessionKey: string | null): RoomMessage | null {
+  const payload = streamRecord(event);
+  if (!payload || !hasMatchingOptionalIdentity(payload, roomId, sessionKey)) return null;
+  if (
+    typeof payload.id !== "string"
+    || payload.room_id !== roomId
+    || typeof payload.agent_id !== "string"
+    || !isFiniteInteger(payload.sequence, 1)
+    || !(payload.lap_number === null || isFiniteInteger(payload.lap_number))
+    || !(payload.session_time === null || (typeof payload.session_time === "number" && Number.isFinite(payload.session_time)))
+    || !isNullableString(payload.wall_time)
+    || !MESSAGE_TOPICS.has(payload.topic as MessageTopic)
+    || !MESSAGE_TYPES.has(payload.message_type as MessageType)
+    || typeof payload.content !== "string"
+    || !MESSAGE_CONFIDENCE.has(payload.confidence as string)
+    || !EVIDENCE_STATUSES.has(payload.evidence_status as string)
+    || !isNullableString(payload.reply_to_message_id)
+    || !isNullableString(payload.trigger_event_id)
+    || !isNullableString(payload.trigger_snapshot_id)
+    || typeof payload.generated_by !== "string"
+    || !isNullableString(payload.model_name)
+    || typeof payload.prompt_version !== "string"
+    || typeof payload.created_at !== "string"
+    || !(payload.session_phase === undefined || isNullableString(payload.session_phase))
+  ) return null;
+  return payload as RoomMessage;
+}
+
+function playbackPayload(event: Event, roomId: string, sessionKey: string | null): RoomPlayback | null {
+  const payload = streamRecord(event);
+  if (!payload || !hasMatchingOptionalIdentity(payload, roomId, sessionKey)) return null;
+  if (
+    payload.room_id !== roomId
+    || !isFiniteInteger(payload.current_event_sequence)
+    || !isFiniteInteger(payload.current_message_sequence)
+    || !(payload.current_lap === null || isFiniteInteger(payload.current_lap))
+    || !(typeof payload.playback_speed === "number" && Number.isFinite(payload.playback_speed) && payload.playback_speed > 0)
+    || typeof payload.is_paused !== "boolean"
+    || !isNullableString(payload.started_at)
+    || typeof payload.updated_at !== "string"
+    || !isNullableString(payload.session_clock)
+  ) return null;
+  return payload as RoomPlayback;
+}
+
+function roomStatusPayload(event: Event, roomId: string, sessionKey: string | null): RoomStatusPayload | null {
+  const payload = streamRecord(event);
+  if (!payload || !hasMatchingOptionalIdentity(payload, roomId, sessionKey)) return null;
+  if (!ROOM_STATUSES.has(payload.status as RoomStatus)) return null;
+  if ("mode" in payload && !ROOM_MODES.has(payload.mode as RoomMode)) return null;
+  if ("current_lap" in payload && !(payload.current_lap === null || isFiniteInteger(payload.current_lap))) return null;
+  return {
+    status: payload.status as RoomStatus,
+    ...(payload.mode === undefined ? {} : { mode: payload.mode as RoomMode }),
+    ...(payload.current_lap === undefined ? {} : { current_lap: payload.current_lap as number | null }),
+  };
 }
 
 function RoomLoadingState() {
@@ -62,8 +146,14 @@ export function RoomExperience({ slug }: { slug: string }) {
   const [controlBusy, setControlBusy] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
   const [streamGeneration, setStreamGeneration] = useState(0);
+  const [terminalReconciliation, setTerminalReconciliation] = useState(false);
   const lastSequenceRef = useRef(0);
   const roomUpdateRef = useRef(0);
+  const sessionKeyRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    sessionKeyRef.current = detail?.room.session_key ?? null;
+  }, [detail?.room.session_key]);
 
   const mergeMessages = useCallback((incoming: RoomMessage[]) => {
     if (incoming.length) lastSequenceRef.current = Math.max(lastSequenceRef.current, ...incoming.map((message) => message.sequence));
@@ -80,6 +170,7 @@ export function RoomExperience({ slug }: { slug: string }) {
       if (!active) return;
       setDetail(room);
       setPlayback(room.playback);
+      setTerminalReconciliation(false);
       setMessages([]);
       lastSequenceRef.current = 0;
       mergeMessages(feed.messages);
@@ -93,41 +184,53 @@ export function RoomExperience({ slug }: { slug: string }) {
   const roomId = detail?.room.id;
   const liveRoom = detail?.room.status === "live";
   useEffect(() => {
-    if (!liveRoom || !roomId) return;
+    if ((!liveRoom && !terminalReconciliation) || !roomId) return;
     const controller = new AbortController();
     let disposed = false;
     let timer: number | null = null;
     const refresh = async () => {
       const requestRoomUpdate = roomUpdateRef.current;
+      let reconciledTerminal = false;
       try {
         const latest = await getRaceRoom(slug, controller.signal);
-        if (!disposed) {
-          setDetail((current) => {
-            if (!current || current.room.id !== roomId) return current;
-            if (roomUpdateRef.current === requestRoomUpdate) return latest;
-            return {
-              ...latest,
-              room: {
-                ...latest.room,
-                status: current.room.status,
-                current_lap: current.room.current_lap,
-              },
-            };
-          });
+        if (!disposed && latest.room.id === roomId) {
+          const authoritativeTerminal = terminalReconciliation
+            && latest.room.status === "completed"
+            && latest.room.mode === "archived";
+          if (authoritativeTerminal) {
+            reconciledTerminal = true;
+            setDetail((current) => current?.room.id === roomId ? latest : current);
+            setPlayback(latest.playback);
+            setTerminalReconciliation(false);
+          } else {
+            setDetail((current) => {
+              if (!current || current.room.id !== roomId) return current;
+              if (!terminalReconciliation && roomUpdateRef.current === requestRoomUpdate) return latest;
+              return {
+                ...latest,
+                room: {
+                  ...latest.room,
+                  status: current.room.status,
+                  mode: current.room.mode,
+                  current_lap: current.room.current_lap,
+                },
+              };
+            });
+          }
         }
       } catch {
         // Keep last known data while the shared backend ingestion reconnects.
       } finally {
-        if (!disposed) timer = window.setTimeout(refresh, 15_000);
+        if (!disposed && !reconciledTerminal) timer = window.setTimeout(refresh, 15_000);
       }
     };
-    timer = window.setTimeout(refresh, 15_000);
+    timer = window.setTimeout(refresh, terminalReconciliation ? 0 : 15_000);
     return () => {
       disposed = true;
       controller.abort();
       if (timer !== null) window.clearTimeout(timer);
     };
-  }, [liveRoom, roomId, slug]);
+  }, [liveRoom, roomId, slug, terminalReconciliation]);
 
   useEffect(() => {
     if (!roomId) return;
@@ -150,27 +253,34 @@ export function RoomExperience({ slug }: { slug: string }) {
       });
       nextSource.addEventListener("room_message", (event) => {
         if (!isCurrent()) return;
-        const message = streamPayload<RoomMessage>(event);
+        const message = roomMessagePayload(event, roomId, sessionKeyRef.current);
         if (!message) return;
         mergeMessages([message]);
       });
       nextSource.addEventListener("playback_state", (event) => {
         if (!isCurrent()) return;
-        const nextPlayback = streamPayload<RoomPlayback>(event);
+        const nextPlayback = playbackPayload(event, roomId, sessionKeyRef.current);
         if (nextPlayback) setPlayback(nextPlayback);
       });
       nextSource.addEventListener("room_status", (event) => {
         if (!isCurrent()) return;
-        const payload = streamPayload<Record<string, unknown>>(event);
+        const payload = roomStatusPayload(event, roomId, sessionKeyRef.current);
         if (!payload) return;
-        const nextStatus = String(payload.status ?? "");
-        if (!ROOM_STATUSES.has(nextStatus as RoomStatus)) return;
         roomUpdateRef.current += 1;
-        setDetail((current) => current && ROOM_STATUSES.has(nextStatus as RoomStatus) ? { ...current, room: { ...current.room, status: nextStatus as RoomStatus, current_lap: typeof payload.current_lap === "number" ? payload.current_lap : current.room.current_lap } } : current);
+        setTerminalReconciliation(payload.status === "completed");
+        setDetail((current) => current ? {
+          ...current,
+          room: {
+            ...current.room,
+            status: payload.status,
+            mode: payload.mode ?? current.room.mode,
+            current_lap: payload.current_lap === undefined ? current.room.current_lap : payload.current_lap,
+          },
+        } : current);
       });
       nextSource.addEventListener("connection_status", (event) => {
         if (!isCurrent()) return;
-        const payload = streamPayload<{ status?: string }>(event);
+        const payload = streamRecord(event);
         if (!payload) return;
         if (payload.status === "degraded") setConnection("degraded");
       });
@@ -244,7 +354,7 @@ export function RoomExperience({ slug }: { slug: string }) {
     <header className="room-header"><div><div className="room-header__meta"><span>Round {room.round_number ?? "—"}</span><span>{room.session_type.replaceAll("_", " ")}</span><span className={`status status--${room.status}`}>{room.status}</span></div><h1>{room.race_name}</h1><p>{room.circuit_name} · {room.country}</p></div><CircuitOutline circuitName={room.circuit_name} eventName={room.race_name} /><div className="session-progress"><span>{progressLabel}</span><b>{progressValue}</b>{!qualifying && room.total_laps != null && <small>/ {room.total_laps}</small>}</div></header>
     {connection !== "live" && <div className={styles.connectionNotice} role="status"><span aria-hidden /> <b>{connection === "degraded" ? "Live updates are delayed" : "Reconnecting to live updates"}</b><p>The conversation already loaded remains available while the connection recovers.</p></div>}
     <div className="sticky-playback"><PlaybackControls room={room} playback={playback} busy={controlBusy} error={controlError} onReplay={runReplay} onControl={runControl} /></div>
-    <LiveCommandCenter sessionKey={room.session_key} circuitName={room.circuit_name} eventName={room.race_name} playbackSequence={playback.current_event_sequence} sessionClock={playback.session_clock} selectedDriver={selectedDriver} onSelectDriver={setSelectedDriver} initialIntelligence={detail.intelligence} sourceAvailability={room.source_availability} />
+    <LiveCommandCenter sessionKey={room.session_key} circuitName={room.circuit_name} eventName={room.race_name} playbackSequence={playback.current_event_sequence} sessionClock={playback.session_clock} selectedDriver={selectedDriver} onSelectDriver={setSelectedDriver} initialIntelligence={detail.intelligence} sourceAvailability={room.source_availability} locationDataMode={room.mode === "live" && room.status === "live" ? "mutable" : "immutable"} />
     {latestSignal && <aside className={styles.raceSignal} aria-label="Latest important room update"><span>{latestSignal.session_phase ?? (latestSignal.lap_number == null ? "Session update" : `Lap ${latestSignal.lap_number}`)}</span><div><b>{latestSignal.topic.replaceAll("_", " ")}</b><p>{latestSignal.content}</p></div><a href="#timeline-title">Open conversation <span aria-hidden>↓</span></a></aside>}
     <AgentRoster agents={agents} selectedAgent={selectedAgent} onSelectAgent={setSelectedAgent} />
     <div className="room-layout">

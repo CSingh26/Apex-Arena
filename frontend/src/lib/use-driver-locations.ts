@@ -15,6 +15,7 @@ import {
 import type { DriverLocationSample, SessionTrackState } from "@/lib/types";
 
 export type LocationStatus = "idle" | "loading" | "ready" | "no-samples" | "error";
+export type LocationDataMode = "mutable" | "immutable";
 
 export type LocationDebug = {
   sessionKey: string | null;
@@ -47,6 +48,8 @@ type ClockAnchor = { target: number; anchorTarget: number; anchorPerf: number; r
  */
 type SessionCache = {
   sessionKey: string | null;
+  dataMode: LocationDataMode;
+  controllers: Set<AbortController>;
   series: SampleSeries;
   loadedKeys: Set<string>;
   inFlight: Set<string>;
@@ -73,6 +76,8 @@ const EMPTY_LOAD: LoadState = {
 
 type Options = {
   sessionKey: string | null;
+  /** Live windows may grow; replay/archive windows are immutable once fetched. */
+  dataMode?: LocationDataMode;
   /** Authoritative session clock: the replay/live event time, in UTC ISO. */
   clockIso: string | null;
   /** Live fixes arriving on the session stream, merged into the same series. */
@@ -97,9 +102,11 @@ function nowPerf(): number {
   return typeof performance !== "undefined" ? performance.now() : Date.now();
 }
 
-function emptyCache(sessionKey: string | null): SessionCache {
+function emptyCache(sessionKey: string | null, dataMode: LocationDataMode): SessionCache {
   return {
     sessionKey,
+    dataMode,
+    controllers: new Set(),
     series: new Map(),
     loadedKeys: new Set(),
     inFlight: new Set(),
@@ -113,12 +120,13 @@ function sameNumbers(left: number[], right: number[]): boolean {
 
 export function useDriverLocations({
   sessionKey,
+  dataMode = "mutable",
   clockIso,
   liveSamples,
   enabled = true,
 }: Options): DriverLocationsResult {
   const [loadState, setLoadState] = useState<LoadState>(EMPTY_LOAD);
-  const cacheRef = useRef<SessionCache>(emptyCache(null));
+  const cacheRef = useRef<SessionCache>(emptyCache(null, dataMode));
   const lastTrackRefreshRef = useRef<{ sessionKey: string | null; at: number }>({ sessionKey: null, at: 0 });
   const liveSamplesRef = useRef<{
     sessionKey: string | null;
@@ -147,14 +155,25 @@ export function useDriverLocations({
     [],
   );
 
-  const cacheFor = useCallback((key: string | null) => {
-    if (cacheRef.current.sessionKey !== key) cacheRef.current = emptyCache(key);
+  const cacheFor = useCallback((key: string | null, mode: LocationDataMode) => {
+    if (cacheRef.current.sessionKey !== key || cacheRef.current.dataMode !== mode) {
+      for (const controller of cacheRef.current.controllers) controller.abort();
+      cacheRef.current = emptyCache(key, mode);
+    }
     return cacheRef.current;
   }, []);
 
   useEffect(() => {
+    cacheFor(enabled ? sessionKey : null, dataMode);
+  }, [cacheFor, dataMode, enabled, sessionKey]);
+
+  useEffect(() => () => {
+    for (const controller of cacheRef.current.controllers) controller.abort();
+  }, []);
+
+  useEffect(() => {
     if (!sessionKey || !enabled) return;
-    cacheFor(sessionKey);
+    cacheFor(sessionKey, dataMode);
     const controller = new AbortController();
     let cancelled = false;
     const request = ++trackRequestRef.current;
@@ -178,7 +197,7 @@ export function useDriverLocations({
       cancelled = true;
       controller.abort();
     };
-  }, [cacheFor, enabled, sessionKey, update]);
+  }, [cacheFor, dataMode, enabled, sessionKey, update]);
 
   // A room can open before the provider has emitted enough fixes to derive a
   // circuit trace. Refresh once fixes begin, with a bound for frequent state
@@ -224,7 +243,7 @@ export function useDriverLocations({
   // driven by the feed's own pace rather than a guessed animation speed.
   useEffect(() => {
     if (targetMs == null) return;
-    const cache = cacheFor(sessionKey);
+    const cache = cacheFor(sessionKey, dataMode);
     const perf = nowPerf();
     const previous = cache.clock;
     if (!previous || targetMs < previous.target) {
@@ -242,7 +261,7 @@ export function useDriverLocations({
       // Smooth the estimate: replay ticks are not evenly spaced in session time.
       rate: previous.rate === 0 ? rate : previous.rate * 0.6 + rate * 0.4,
     };
-  }, [cacheFor, sessionKey, targetMs]);
+  }, [cacheFor, dataMode, sessionKey, targetMs]);
 
   const currentClockMs = useCallback(() => {
     const anchor = cacheRef.current.sessionKey === sessionKey ? cacheRef.current.clock : null;
@@ -256,63 +275,66 @@ export function useDriverLocations({
   // Load the windows the clock is about to need.
   useEffect(() => {
     if (!sessionKey || !enabled || targetMs == null) return;
-    const cache = cacheFor(sessionKey);
-    let cancelled = false;
+    const cache = cacheFor(sessionKey, dataMode);
     const controller = new AbortController();
+    cache.controllers.add(controller);
+    const isStale = () => controller.signal.aborted || cacheRef.current !== cache;
 
     const load = async () => {
-      const first = windowIndex(targetMs - WINDOW_LOOKBEHIND_MS);
-      const last = windowIndex(targetMs + WINDOW_LOOKAHEAD_MS);
-      let loadedAny = false;
-      for (let index = first; index <= last; index += 1) {
-        const key = `${sessionKey}:${index}`;
-        if (cache.loadedKeys.has(key) || cache.inFlight.has(key)) continue;
-        cache.inFlight.add(key);
-        try {
-          const response = await getSessionLocationSamples(
-            sessionKey,
-            {
-              since: new Date(index * WINDOW_MS).toISOString(),
-              until: new Date((index + 1) * WINDOW_MS).toISOString(),
-              limit: 20_000,
-            },
-            controller.signal,
-          );
-          if (cancelled) return;
-          // The active and lookahead windows may still be receiving provider
-          // rows. Seal only past windows; advancing live clocks will retry the
-          // rest and append newly published samples by timestamp.
-          if (index < windowIndex(targetMs)) cache.loadedKeys.add(key);
-          cache.series = appendSamples(cache.series, response.locations.samples);
-          loadedAny = true;
-        } catch (reason) {
-          if (cancelled || (reason as Error).name === "AbortError") return;
-          update(sessionKey, (previous) =>
-            previous.status === "ready" ? {} : { status: "error" },
-          );
-        } finally {
-          cache.inFlight.delete(key);
+      try {
+        const first = windowIndex(targetMs - WINDOW_LOOKBEHIND_MS);
+        const last = windowIndex(targetMs + WINDOW_LOOKAHEAD_MS);
+        let loadedAny = false;
+        for (let index = first; index <= last; index += 1) {
+          const key = `${sessionKey}:${index}`;
+          if (cache.loadedKeys.has(key) || cache.inFlight.has(key)) continue;
+          cache.inFlight.add(key);
+          try {
+            const response = await getSessionLocationSamples(
+              sessionKey,
+              {
+                since: new Date(index * WINDOW_MS).toISOString(),
+                until: new Date((index + 1) * WINDOW_MS).toISOString(),
+                limit: 20_000,
+              },
+              controller.signal,
+            );
+            if (isStale()) return;
+            // Immutable replay/archive windows are complete at request time.
+            // Live active/lookahead windows can still grow and remain retryable.
+            if (dataMode === "immutable" || index < windowIndex(targetMs)) {
+              cache.loadedKeys.add(key);
+            }
+            cache.series = appendSamples(cache.series, response.locations.samples);
+            loadedAny = true;
+          } catch (reason) {
+            if (isStale() || (reason as Error).name === "AbortError") return;
+            update(sessionKey, (previous) =>
+              previous.status === "ready" ? {} : { status: "error" },
+            );
+          } finally {
+            cache.inFlight.delete(key);
+          }
         }
+        if (isStale() || !loadedAny) return;
+        const latestTarget = cache.clock?.target ?? targetMs;
+        cache.series = pruneSeries(cache.series, latestTarget - SERIES_RETENTION_MS);
+        const numbers = [...cache.series.keys()].sort((left, right) => left - right);
+        update(sessionKey, (previous) => ({
+          driverNumbers: sameNumbers(previous.driverNumbers, numbers)
+            ? previous.driverNumbers
+            : numbers,
+          loadedSamples: seriesSampleCount(cache.series),
+          loadedWindows: cache.loadedKeys.size,
+          status: numbers.length ? "ready" : "no-samples",
+        }));
+      } finally {
+        cache.controllers.delete(controller);
       }
-      if (cancelled || !loadedAny) return;
-      cache.series = pruneSeries(cache.series, targetMs - SERIES_RETENTION_MS);
-      const numbers = [...cache.series.keys()].sort((left, right) => left - right);
-      update(sessionKey, (previous) => ({
-        driverNumbers: sameNumbers(previous.driverNumbers, numbers)
-          ? previous.driverNumbers
-          : numbers,
-        loadedSamples: seriesSampleCount(cache.series),
-        loadedWindows: cache.loadedKeys.size,
-        status: numbers.length ? "ready" : "no-samples",
-      }));
     };
 
     void load();
-    return () => {
-      cancelled = true;
-      controller.abort();
-    };
-  }, [cacheFor, enabled, sessionKey, targetMs, update]);
+  }, [cacheFor, dataMode, enabled, sessionKey, targetMs, update]);
 
   // Live fixes go into the same series, so live and replay render identically.
   useEffect(() => {
@@ -321,7 +343,7 @@ export function useDriverLocations({
       && previousInput.samples === liveSamples;
     liveSamplesRef.current = { sessionKey, samples: liveSamples };
     if (!sessionKey || !enabled || !liveSamples?.length || belongsToPreviousSession) return;
-    const cache = cacheFor(sessionKey);
+    const cache = cacheFor(sessionKey, dataMode);
     cache.series = appendSamples(cache.series, liveSamples);
     const numbers = [...cache.series.keys()].sort((left, right) => left - right);
     update(sessionKey, (previous) => ({
@@ -331,7 +353,7 @@ export function useDriverLocations({
       loadedSamples: seriesSampleCount(cache.series),
       status: numbers.length ? "ready" : previous.status,
     }));
-  }, [cacheFor, enabled, liveSamples, sessionKey, update]);
+  }, [cacheFor, dataMode, enabled, liveSamples, sessionKey, update]);
 
   // Derived, not stored: geometry reporting zero fixes settles whether this
   // session has positions at all, without another round trip.
