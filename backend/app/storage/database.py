@@ -66,6 +66,7 @@ class Database:
             ("normalized_race_events", "event_origin"),
             ("normalized_race_events", "primary_driver_number"),
             ("normalized_race_events", "importance_level"),
+            ("race_rooms", "reconciliation_attempted_at"),
             ("session_location_samples", "sample_time"),
             ("session_track_geometry", "path"),
         }
@@ -76,7 +77,8 @@ class Database:
                         text(
                             "SELECT table_name, column_name FROM information_schema.columns "
                             "WHERE table_schema='public' AND table_name IN "
-                            "('normalized_race_events','session_location_samples','session_track_geometry')"
+                            "('normalized_race_events','race_rooms',"
+                            "'session_location_samples','session_track_geometry')"
                         )
                     )
                 ).all()

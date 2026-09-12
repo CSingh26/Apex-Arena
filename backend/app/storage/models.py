@@ -343,6 +343,9 @@ class RaceRoomRecord(Base, TimestampMixin):
     generation_completed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    reconciliation_attempted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
     last_event_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     is_featured: Mapped[bool] = mapped_column(Boolean, default=False)
 

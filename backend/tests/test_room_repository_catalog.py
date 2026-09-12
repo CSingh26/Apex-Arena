@@ -39,6 +39,9 @@ class AsyncSQLiteSession:
     async def execute(self, statement: object):
         return self._session.execute(statement)  # type: ignore[arg-type]
 
+    async def commit(self) -> None:
+        self._session.commit()
+
 
 class SQLiteDatabase:
     def __init__(self, engine: object) -> None:
@@ -144,17 +147,16 @@ async def test_recent_candidates_include_practice_only_after_the_grace_and_durat
             grace_minutes=15,
             limit=10,
         )
-        offset_candidates = await repository.list_recent_reconciliation_candidates(
+        await repository.mark_recent_reconciliation_attempt(
+            "completed-practice",
+            attempted_at=now,
+        )
+        restarted_repository = SqlRaceRoomRepository(SQLiteDatabase(engine))  # type: ignore[arg-type]
+        after_restart = await restarted_repository.list_recent_reconciliation_candidates(
             now=now,
             lookback_days=7,
             grace_minutes=15,
             limit=1,
-            offset=1,
-        )
-        candidate_count = await repository.count_recent_reconciliation_candidates(
-            now=now,
-            lookback_days=7,
-            grace_minutes=15,
         )
 
         assert [room.slug for room in candidates] == [
@@ -162,8 +164,7 @@ async def test_recent_candidates_include_practice_only_after_the_grace_and_durat
             "eligible-practice",
             "eligible-race",
         ]
-        assert [room.slug for room in offset_candidates] == ["eligible-practice"]
-        assert candidate_count == 3
+        assert [room.slug for room in after_restart] == ["eligible-practice"]
     finally:
         engine.dispose()
 

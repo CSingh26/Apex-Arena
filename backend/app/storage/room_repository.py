@@ -206,33 +206,36 @@ class SqlRaceRoomRepository:
         lookback_days: int,
         grace_minutes: int,
         limit: int,
-        offset: int = 0,
     ) -> list[RaceRoom]:
-        """Find completed weekend rooms, including practice, after provider grace."""
+        """Return never-attempted then least-recently-attempted completed rooms."""
 
         statement = (
             select(RaceRoomRecord)
             .where(*self._recent_reconciliation_filters(now, lookback_days, grace_minutes))
-            .order_by(RaceRoomRecord.scheduled_start.desc(), RaceRoomRecord.slug.asc())
-            .offset(offset)
+            .order_by(
+                RaceRoomRecord.reconciliation_attempted_at.asc().nulls_first(),
+                RaceRoomRecord.scheduled_start.desc(),
+                RaceRoomRecord.slug.asc(),
+            )
             .limit(limit)
         )
         async with self.database.session_factory() as session:
             records = (await session.execute(statement)).scalars().all()
             return [RaceRoom.model_validate(record, from_attributes=True) for record in records]
 
-    async def count_recent_reconciliation_candidates(
-        self,
-        *,
-        now: datetime,
-        lookback_days: int,
-        grace_minutes: int,
-    ) -> int:
-        statement = select(func.count(RaceRoomRecord.id)).where(
-            *self._recent_reconciliation_filters(now, lookback_days, grace_minutes)
-        )
+    async def mark_recent_reconciliation_attempt(
+        self, slug: str, *, attempted_at: datetime
+    ) -> None:
+        """Advance durable fair ordering before any fallible provider work."""
+
+        await self.database.require_ingestion_schema()
         async with self.database.session_factory() as session:
-            return int((await session.execute(statement)).scalar_one())
+            await session.execute(
+                update(RaceRoomRecord)
+                .where(RaceRoomRecord.slug == slug)
+                .values(reconciliation_attempted_at=attempted_at)
+            )
+            await session.commit()
 
     @staticmethod
     def _recent_reconciliation_filters(
