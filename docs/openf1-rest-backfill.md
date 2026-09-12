@@ -14,8 +14,9 @@ full-season backfill. There are three separate paths:
   session.
 - `app.cli.backfill_completed_rooms` handles a bounded or full set of
   incomplete completed-room candidates, practice included.
-- recent-session reconciliation optionally selects at most the configured
-  number of recently completed rooms per pass and invokes resumable backfill.
+- recent-session reconciliation optionally inspects at most the configured
+  number of incomplete, age-eligible room candidates per pass and invokes
+  resumable backfill only after the provider completion guard accepts them.
 
 `OPENF1_REST_BACKFILL_ENABLED` is currently a configuration/status guard; it
 does not schedule either CLI. Keep it `false` for normal services and invoke
@@ -167,13 +168,23 @@ RECENT_SESSION_RECONCILIATION_ENABLED=true
 RECENT_SESSION_AUTO_BACKFILL_ENABLED=true
 ```
 
-It runs only in `ingestor` or `combined`, never selects a future/live session,
-and covers Practice 1/2/3, Sprint Qualifying, Sprint, Qualifying, and Race. The
-defaults are a 14-day lookback, 15-minute provider grace, 900-second interval,
-and one selected room per pass. Selected rooms are processed sequentially.
+It runs only in `ingestor` or `combined` and covers Practice 1/2/3, Sprint
+Qualifying, Sprint, Qualifying, and Race. The defaults are a 14-day lookback,
+15-minute provider grace, 900-second interval, and one selected room per pass.
+Selected rooms are processed sequentially.
 `RECENT_SESSION_AUTO_BACKFILL_MAX_CONCURRENT` is declared and validated but is
 not consumed by this reconciler. Durable least-recently-attempted ordering
 prevents permanent starvation across restarts.
+
+The recent candidate query can select an incomplete `RoomStatus.LIVE` row once
+its scheduled start is sufficiently overdue (four hours for a race, two hours
+for other types, in addition to the provider grace). It advances
+`reconciliation_attempted_at` before provider work. The reconciler may inspect
+endpoints and resolve/bind identity, but the historical service then refuses a
+provider session with a missing or future `date_end`; no historical endpoint
+ingestion runs, and the attempt remains retryable. This differs from
+`backfill_completed_rooms`, whose repository query explicitly excludes live
+rooms before invoking backfill.
 
 The reconciler inspects provider endpoint availability first. It binds a
 confident provider identity but leaves the room pending when drivers/timing are

@@ -64,8 +64,10 @@ Tasks 1–18 retain one provider-neutral normalized event path and add or correc
   durable least-recently-attempted ordering;
 - replay state rebuilding through the saved cursor with replay-marked event
   copies and bounded rehydration;
-- role-aware provider health: API roles read the Redis status stream and reject
-  reports older than 120 seconds as `STALE`; worker roles report local state;
+- role-aware provider health: API roles read the Redis status stream and mark
+  reports older than 120 seconds `STALE`; API/combined provider probes can
+  return HTTP 503, while the dedicated ingestor's diagnostic provider route
+  always returns HTTP 200 and exposes state in JSON;
 - session-scoped browser streams, strict frame validation, authoritative room
   rehydration, bounded GPS caches, mutable live windows, immutable replay
   windows, and two-sided seek pruning that preserves quiet drivers.
@@ -90,7 +92,16 @@ The committed modes are not interchangeable:
 `api` serves HTTP/SSE and reads shared provider state. `ingestor` runs the
 dedicated worker app. `combined` performs both roles. Staging/production
 ingesting roles require the direct `DATABASE_MIGRATION_URL`; production rejects
-the legacy `all` role.
+the legacy `all` role. Only API/combined exposes `/health/ready` and its
+200/503 `/health/provider` gate. A dedicated ingestor exposes `/health/live`
+and an always-200 `/health/provider` diagnostic, so operators must inspect the
+JSON state and check shared dependency readiness elsewhere.
+
+Recent recovery uses an age/status candidate predicate. It can inspect a
+sufficiently overdue live row and records the attempt before provider work.
+The historical backfill completion guard refuses a missing/future provider
+`date_end`, so no historical endpoint ingestion runs for an unfinished
+session. The manual completed-room batch separately excludes live rows.
 
 ## Historical Italian GP evidence
 

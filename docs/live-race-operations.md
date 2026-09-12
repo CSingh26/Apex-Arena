@@ -26,7 +26,8 @@ Use one of these deployed process roles:
 - `APP_PROCESS_ROLE=api`: HTTP/SSE only. It never starts live ingestion or
   recent-session reconciliation.
 - `APP_PROCESS_ROLE=ingestor`: dedicated worker entry point selected by
-  `python -m app.runtime`; it exposes only worker health routes.
+  `python -m app.runtime`; it exposes only `/health/live` and the diagnostic
+  `/health/provider`. It does not expose `/health/ready` or the API routes.
 - `APP_PROCESS_ROLE=combined`: API and worker in one process.
 
 `all` is retained for non-production compatibility and is rejected when
@@ -85,22 +86,24 @@ production exposure.
 
 ## Health interpretation
 
-Use the endpoints according to what they actually prove:
+Use the endpoints according to the process entry point and what they actually
+prove:
 
-1. `/health/live` proves only that the current process can answer HTTP.
-2. `/health/ready` checks PostgreSQL and Redis readiness; it does not prove that
-   OpenF1 is fresh.
-3. `/health/provider` is the transport-oriented readiness check. An API role
-   reads the shared status from Redis and marks a report older than 120 seconds
-   `STALE`; worker roles report local state. `PROVIDER_UNAVAILABLE`, `STALE`,
-   and other non-ready states return HTTP 503 when the live worker is enabled.
-4. `/api/v1/live/status` returns the same role-aware provider state with more
-   detail. `/api/v1/engine/status` adds durable counts and database/Redis
-   health, but its top-level readiness still reflects database and Redis, not
-   provider freshness.
-5. `/health` is a legacy aggregate whose OpenF1-live component is based on
-   configuration and credential presence. Do not use it as proof that the
-   REST/MQTT worker is running.
+| Process | Probe behavior |
+| --- | --- |
+| API or combined | `/health/live` is process-only HTTP 200. `/health/ready` checks PostgreSQL and Redis and returns 200 or 503. `/health/provider` evaluates provider state and returns 200 or 503 when live transport is configured. |
+| Dedicated ingestor | `/health/live` is process-only HTTP 200. `/health/provider` always returns HTTP 200 when its handler completes; its JSON `status`, `current_session_key`, `last_event_at`, reconnect count, and reconciliation fields are diagnostic and must be inspected. `/health/ready`, `/health`, `/api/v1/live/status`, and `/api/v1/engine/status` are not registered. |
+
+On an API process, provider state is read from the shared Redis status stream
+and a report older than 120 seconds becomes `STALE`; a combined process reads
+its local worker state. `/api/v1/live/status` on API/combined returns that
+role-aware state with more detail. `/api/v1/engine/status` adds durable counts
+and database/Redis health, but its top-level readiness still reflects database
+and Redis, not provider freshness.
+
+The API/combined `/health` route is a legacy aggregate whose OpenF1-live
+component is based on configuration and credential presence. Do not use it as
+proof that the REST/MQTT worker is running.
 
 Useful live states are `WAITING_FOR_SESSION_KEY`, `WAITING_FOR_PROVIDER`,
 `LIVE`, `STALE`, `PROVIDER_UNAVAILABLE`, and `SESSION_COMPLETE`. A browser SSE
@@ -116,10 +119,18 @@ Before a session:
 2. Confirm the database is at the single Alembic head
    `20260911_0015`; see the migration checks below.
 3. Confirm exactly one ingestor owns the advisory lease.
-4. Confirm `/health/ready` and `/health/provider`, then inspect
+4. Against the API/combined service, require HTTP 200 from `/health/ready`, use
+   `/health/provider` as the 200/503 provider gate, and inspect
    `/api/v1/live/status` for the expected room/session identity.
-5. Open `/api/v1/race-rooms/events`. A calendar-live item may link to a waiting
-   room with no session key; an upcoming item remains schedule-only.
+5. Against a dedicated ingestor, require HTTP 200 from `/health/live`, then
+   parse `/health/provider` and require an operational JSON `status` and the
+   expected session/freshness fields. Do not probe its absent `/health/ready`
+   route or treat the diagnostic endpoint's HTTP 200 alone as readiness. Check
+   shared PostgreSQL/Redis readiness through the API service or an explicit
+   operator database-status check.
+6. Open `/api/v1/race-rooms/events` on the API service. A calendar-live item may
+   link to a waiting room with no session key; an upcoming item remains
+   schedule-only.
 
 During a session, watch the provider state, endpoint error classes and retry
 times, `last_event_at`, durable raw/normalized counts, Redis diagnostics, and
@@ -172,6 +183,14 @@ checkpoints, retries empty endpoints, and leaves incomplete provider data
 pending. `RECENT_SESSION_AUTO_BACKFILL_MAX_CONCURRENT` is declared and
 validated but is not consumed by the current sequential reconciler. Migration
 `20260911_0015` supplies the durable fairness marker.
+
+The candidate query is age/status based rather than a strict `status != live`
+filter. A sufficiently overdue `RoomStatus.LIVE` row can therefore be selected
+and have `reconciliation_attempted_at` advanced. The reconciler may resolve or
+bind provider identity, but `OpenF1HistoricalBackfillService` rejects an
+unfinished provider session whose `date_end` is missing or in the future, so
+historical endpoint ingestion does not run. This is reported as retryable. The
+manual completed-room batch has a separate explicit `status != live` filter.
 
 For explicit recovery, use
 [`openf1-rest-backfill.md`](openf1-rest-backfill.md).

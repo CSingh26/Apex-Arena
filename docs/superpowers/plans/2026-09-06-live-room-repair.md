@@ -80,7 +80,16 @@ even when `OPENF1_LIVE_AUTO_CONNECT=false`; `mqtt` requires auto-connect and
 does not fall back to REST; `auto` requires auto-connect and uses REST only
 while MQTT is not connected and fresh for the same session. `api` processes do
 not ingest. API-role provider status is read from Redis and becomes `STALE`
-after 120 seconds; worker roles report local state.
+after 120 seconds; combined reports local state. API/combined owns
+`/health/ready` and the provider route that can return HTTP 503. The dedicated
+ingestor has no readiness route, and its `/health/provider` is an always-200
+diagnostic whose JSON status must be evaluated.
+
+Recent recovery can select a sufficiently overdue live row, mark its durable
+attempt time, and inspect/resolve provider data. The historical service's
+provider completion guard rejects an unfinished `date_end`, so it does not run
+historical endpoint ingestion for that row. Manual completed-room selection
+explicitly excludes live status.
 
 Replay now rebuilds state through the durable playback cursor. Browser GPS uses
 session-scoped bounded caches, mutable live windows, immutable replay/archive
