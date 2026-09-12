@@ -7,6 +7,7 @@ from uuid import UUID
 
 from sqlalchemy import and_, case, delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.rooms import (
     AgentProfile,
@@ -46,6 +47,10 @@ COMPLETED_BACKFILL_SESSION_TYPES: tuple[SessionType, ...] = (
     SessionType.QUALIFYING,
     SessionType.RACE,
 )
+
+
+class ReplayOwnershipLostError(RuntimeError):
+    """The replay lease expired or another worker now owns the playback row."""
 
 
 class SqlRaceRoomRepository:
@@ -752,6 +757,128 @@ class SqlRaceRoomRepository:
                 else None
             )
 
+    async def _lock_replay(self, session: AsyncSession, room_id: UUID):
+        return (
+            await session.execute(
+                select(RoomPlaybackStateRecord)
+                .where(RoomPlaybackStateRecord.room_id == room_id)
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+
+    async def _require_replay_owner(
+        self, session: AsyncSession, room_id: UUID, owner_token: UUID
+    ) -> RoomPlaybackStateRecord:
+        record = await self._lock_replay(session, room_id)
+        # clock_timestamp is evaluated AFTER acquiring the row lock: transaction
+        # start time can predate a long lock wait and must not revive an expired lease.
+        now = await session.scalar(select(func.clock_timestamp()))
+        if (
+            record is None
+            or record.replay_owner_token != owner_token
+            or record.replay_owner_expires_at is None
+            or record.replay_owner_expires_at <= now
+        ):
+            raise ReplayOwnershipLostError("Replay ownership expired; retry the control request")
+        return record
+
+    async def claim_replay(self, room_id: UUID, owner_token: UUID, *, lease_seconds: float) -> bool:
+        async with self.database.session_factory() as session:
+            await session.execute(
+                insert(RoomPlaybackStateRecord)
+                .values(room_id=room_id)
+                .on_conflict_do_nothing(index_elements=["room_id"])
+            )
+            record = await self._lock_replay(session, room_id)
+            room = (
+                await session.execute(
+                    select(RaceRoomRecord).where(RaceRoomRecord.id == room_id).with_for_update()
+                )
+            ).scalar_one()
+            now = await session.scalar(select(func.clock_timestamp()))
+            if room.mode not in {RoomMode.REPLAY.value, RoomMode.ARCHIVED.value}:
+                return False
+            if (
+                record.replay_owner_token is not None
+                and record.replay_owner_expires_at is not None
+                and record.replay_owner_expires_at > now
+            ):
+                return False
+            record.replay_owner_token = owner_token
+            record.replay_owner_expires_at = now + timedelta(seconds=lease_seconds)
+            await session.commit()
+            return True
+
+    async def renew_replay(self, room_id: UUID, owner_token: UUID, *, lease_seconds: float) -> bool:
+        async with self.database.session_factory() as session:
+            try:
+                record = await self._require_replay_owner(session, room_id, owner_token)
+            except ReplayOwnershipLostError:
+                return False
+            now = await session.scalar(select(func.clock_timestamp()))
+            record.replay_owner_expires_at = now + timedelta(seconds=lease_seconds)
+            await session.commit()
+            return True
+
+    async def release_replay(self, room_id: UUID, owner_token: UUID) -> bool:
+        async with self.database.session_factory() as session:
+            try:
+                record = await self._require_replay_owner(session, room_id, owner_token)
+            except ReplayOwnershipLostError:
+                return False
+            record.replay_owner_token = None
+            record.replay_owner_expires_at = None
+            await session.commit()
+            return True
+
+    async def pause_orphaned_running_rows(self) -> int:
+        """Pause existing orphan rows; callers must first drain pre-lease workers."""
+        async with self.database.session_factory() as session:
+            candidates = (
+                await session.scalars(
+                    select(RoomPlaybackStateRecord.room_id)
+                    .join(RaceRoomRecord, RaceRoomRecord.id == RoomPlaybackStateRecord.room_id)
+                    .where(
+                        RoomPlaybackStateRecord.is_paused.is_(False),
+                        RaceRoomRecord.status == RoomStatus.REPLAYING.value,
+                        RaceRoomRecord.mode.in_([RoomMode.REPLAY.value, RoomMode.ARCHIVED.value]),
+                    )
+                    .order_by(RoomPlaybackStateRecord.room_id)
+                )
+            ).all()
+        recovered = 0
+        for room_id in candidates:
+            # Same lock order as claims and fenced writes: playback, then room.
+            # One short transaction per candidate; recheck after both locks.
+            async with self.database.session_factory() as session:
+                record = await self._lock_replay(session, room_id)
+                room = (
+                    await session.execute(
+                        select(RaceRoomRecord).where(RaceRoomRecord.id == room_id).with_for_update()
+                    )
+                ).scalar_one_or_none()
+                now = await session.scalar(select(func.clock_timestamp()))
+                if (
+                    record is None
+                    or record.is_paused
+                    or room is None
+                    or room.status != RoomStatus.REPLAYING.value
+                    or room.mode not in {RoomMode.REPLAY.value, RoomMode.ARCHIVED.value}
+                    or (
+                        record.replay_owner_token is not None
+                        and record.replay_owner_expires_at is not None
+                        and record.replay_owner_expires_at > now
+                    )
+                ):
+                    continue
+                record.is_paused = True
+                record.replay_owner_token = None
+                record.replay_owner_expires_at = None
+                room.status = RoomStatus.PAUSED.value
+                await session.commit()
+                recovered += 1
+        return recovered
+
     async def get_playback(self, room_id: UUID) -> RoomPlaybackState:
         async with self.database.session_factory() as session:
             record = await session.get(RoomPlaybackStateRecord, room_id)
@@ -772,8 +899,12 @@ class SqlRaceRoomRepository:
         playback_speed: float | None = None,
         is_paused: bool | None = None,
         started_at: datetime | None = None,
+        owner_token: UUID | None = None,
+        room_status: RoomStatus | None = None,
+        last_event_at: datetime | None = None,
     ) -> RoomPlaybackState:
-        await self.get_playback(room_id)
+        if owner_token is None:
+            await self.get_playback(room_id)
         values = {"updated_at": datetime.now(UTC)}
         if current_event_sequence is not None:
             values["current_event_sequence"] = current_event_sequence
@@ -788,13 +919,26 @@ class SqlRaceRoomRepository:
         if started_at is not None:
             values["started_at"] = started_at
         async with self.database.session_factory() as session:
+            if owner_token is not None:
+                await self._require_replay_owner(session, room_id, owner_token)
             await session.execute(
                 update(RoomPlaybackStateRecord)
                 .where(RoomPlaybackStateRecord.room_id == room_id)
                 .values(**values)
             )
+            if room_status is not None:
+                room_values: dict[str, object] = {"status": room_status.value}
+                if current_lap is not None:
+                    room_values["current_lap"] = current_lap
+                if last_event_at is not None:
+                    room_values["last_event_at"] = last_event_at
+                await session.execute(
+                    update(RaceRoomRecord).where(RaceRoomRecord.id == room_id).values(**room_values)
+                )
+            record = await session.get(RoomPlaybackStateRecord, room_id)
+            result = RoomPlaybackState.model_validate(record, from_attributes=True)
             await session.commit()
-        return await self.get_playback(room_id)
+            return result
 
     async def max_message_sequence(self, room_id: UUID) -> int:
         statement = select(func.max(RoomMessageRecord.sequence)).where(
@@ -832,6 +976,7 @@ class SqlRaceRoomRepository:
         *,
         current_lap: int | None = None,
         last_event_at: datetime | None = None,
+        owner_token: UUID | None = None,
     ) -> None:
         values: dict[str, object] = {"status": status.value, "updated_at": datetime.now(UTC)}
         if current_lap is not None:
@@ -839,6 +984,8 @@ class SqlRaceRoomRepository:
         if last_event_at is not None:
             values["last_event_at"] = last_event_at
         async with self.database.session_factory() as session:
+            if owner_token is not None:
+                await self._require_replay_owner(session, room_id, owner_token)
             await session.execute(
                 update(RaceRoomRecord).where(RaceRoomRecord.id == room_id).values(**values)
             )
@@ -934,9 +1081,11 @@ class SqlRaceRoomRepository:
             await session.commit()
             return int(result.rowcount or 0)
 
-    async def reset_discussion(self, room_id: UUID) -> None:
+    async def reset_discussion(self, room_id: UUID, *, owner_token: UUID | None = None) -> None:
         message_ids = select(RoomMessageRecord.id).where(RoomMessageRecord.room_id == room_id)
         async with self.database.session_factory() as session:
+            if owner_token is not None:
+                await self._require_replay_owner(session, room_id, owner_token)
             await session.execute(
                 delete(MessageEvidenceRecord).where(
                     MessageEvidenceRecord.message_id.in_(message_ids)

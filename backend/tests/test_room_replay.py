@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime, timedelta
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -17,6 +17,7 @@ from app.domain.rooms import (
 )
 from app.services.race_state import RaceState
 from app.services.room_replay import ReplayUnavailableError, RoomReplayCoordinator
+from app.storage.room_repository import ReplayOwnershipLostError
 
 
 def replay_room(*, session_key: str | None = "belgian-race-session") -> RaceRoom:
@@ -64,6 +65,53 @@ class FakeRoomRepository:
         self.event_message_sequences: dict[int, int] = {}
         self.event_message_queries: list[tuple[str, int]] = []
         self.terminal_status = asyncio.Event()
+        self.owner_token: UUID | None = None
+        self.owner_expires = 0.0
+        self.renewals = 0
+
+    async def claim_replay(self, room_id, owner_token, *, lease_seconds):
+        if self.owner_token and self.owner_expires > asyncio.get_running_loop().time():
+            return False
+        self.owner_token = owner_token
+        self.owner_expires = asyncio.get_running_loop().time() + lease_seconds
+        return True
+
+    async def renew_replay(self, room_id, owner_token, *, lease_seconds):
+        try:
+            self.require_owner(owner_token)
+        except ReplayOwnershipLostError:
+            return False
+        self.renewals += 1
+        self.owner_expires = asyncio.get_running_loop().time() + lease_seconds
+        return True
+
+    async def release_replay(self, room_id, owner_token):
+        if self.owner_token != owner_token:
+            return False
+        self.owner_token = None
+        return True
+
+    def require_owner(self, owner_token):
+        if (
+            self.owner_token != owner_token
+            or self.owner_expires <= asyncio.get_running_loop().time()
+        ):
+            raise ReplayOwnershipLostError("Replay ownership expired; retry the control request")
+
+    async def pause_orphaned_running_rows(self):
+        if (
+            self.room.mode in {RoomMode.REPLAY, RoomMode.ARCHIVED}
+            and self.room.status == RoomStatus.REPLAYING
+            and not self.playback.is_paused
+            and (
+                self.owner_token is None or self.owner_expires <= asyncio.get_running_loop().time()
+            )
+        ):
+            self.playback = self.playback.model_copy(update={"is_paused": True})
+            self.room = self.room.model_copy(update={"status": RoomStatus.PAUSED})
+            self.owner_token = None
+            return 1
+        return 0
 
     async def get_playback(self, room_id: UUID) -> RoomPlaybackState:
         assert room_id == self.room.id
@@ -79,8 +127,13 @@ class FakeRoomRepository:
         playback_speed: float | None = None,
         is_paused: bool | None = None,
         started_at: datetime | None = None,
+        owner_token: UUID | None = None,
+        room_status: RoomStatus | None = None,
+        last_event_at: datetime | None = None,
     ) -> RoomPlaybackState:
         assert room_id == self.room.id
+        if owner_token is not None:
+            self.require_owner(owner_token)
         updates: dict[str, object] = {"updated_at": datetime.now(UTC)}
         for key, value in (
             ("current_event_sequence", current_event_sequence),
@@ -93,6 +146,14 @@ class FakeRoomRepository:
             if value is not None:
                 updates[key] = value
         self.playback = self.playback.model_copy(update=updates)
+        if room_status is not None:
+            await self.update_room_status(
+                room_id,
+                room_status,
+                current_lap=current_lap,
+                last_event_at=last_event_at,
+                owner_token=owner_token,
+            )
         return self.playback.model_copy(deep=True)
 
     async def update_room_status(
@@ -102,8 +163,11 @@ class FakeRoomRepository:
         *,
         current_lap: int | None = None,
         last_event_at: datetime | None = None,
+        owner_token: UUID | None = None,
     ) -> None:
         assert room_id == self.room.id
+        if owner_token is not None:
+            self.require_owner(owner_token)
         self.status_updates.append((status, current_lap))
         updates: dict[str, object] = {"status": status}
         if current_lap is not None:
@@ -114,8 +178,10 @@ class FakeRoomRepository:
         if status in {RoomStatus.COMPLETED, RoomStatus.FAILED}:
             self.terminal_status.set()
 
-    async def reset_discussion(self, room_id: UUID) -> None:
+    async def reset_discussion(self, room_id: UUID, *, owner_token=None) -> None:
         assert room_id == self.room.id
+        if owner_token is not None:
+            self.require_owner(owner_token)
         self.reset_count += 1
         self.message_sequence = 0
         self.event_message_sequences.clear()
@@ -311,6 +377,204 @@ def coordinator(
         base_interval_seconds=interval,
     )
     return replay, rooms, event_repository, discussion, race_state, event_bus
+
+
+@pytest.mark.parametrize("operation", ["start", "restart", "resume", "pause", "speed", "seek"])
+async def test_healthy_peer_rejects_control_without_mutation(operation):
+    room = replay_room()
+    service, rooms, _, discussion, race_state, bus = coordinator(room, [replay_event(1, 1)])
+    await rooms.claim_replay(room.id, uuid4(), lease_seconds=30)
+    before = rooms.playback.model_copy(deep=True)
+    try:
+        with pytest.raises(ReplayUnavailableError, match="retry"):
+            if operation == "start":
+                await service.start(room)
+            elif operation == "restart":
+                await service.start(room, restart=True)
+            elif operation == "resume":
+                await service.resume(room)
+            elif operation == "pause":
+                await service.pause(room)
+            elif operation == "speed":
+                await service.set_speed(room, 2)
+            else:
+                await service.seek_to_sequence(room, 1)
+        assert rooms.playback == before
+        assert rooms.status_updates == []
+        assert rooms.reset_count == 0
+        assert discussion.consumed == []
+        assert race_state.resets == []
+        assert bus.states == []
+    finally:
+        await service.close()
+
+
+@pytest.mark.parametrize("initializing", [True, False])
+async def test_heartbeat_covers_long_initialization_and_worker_awaits(initializing):
+    room = replay_room()
+    service, rooms, _, discussion, _, _ = coordinator(room, [replay_event(1, 1)])
+    service.lease_seconds = 0.09
+    if initializing:
+        rooms.playback = rooms.playback.model_copy(update={"current_event_sequence": 1})
+    discussion.block_on_sequence = 1
+    starting = asyncio.create_task(service.resume(room))
+    try:
+        await asyncio.wait_for(discussion.consume_started.wait(), 1)
+        await asyncio.sleep(0.2)
+        assert rooms.renewals >= 2
+        assert not await rooms.claim_replay(room.id, uuid4(), lease_seconds=30)
+        assert starting.done() is not initializing
+        discussion.consume_release.set()
+        await starting
+        await asyncio.wait_for(rooms.terminal_status.wait(), 1)
+    finally:
+        starting.cancel()
+        await service.close()
+        await asyncio.gather(starting, return_exceptions=True)
+    assert rooms.owner_token is None
+
+
+async def test_lost_ownership_cancels_blocked_worker_without_failed_write():
+    room = replay_room()
+    service, rooms, _, discussion, _, bus = coordinator(room, [replay_event(1, 1)])
+    service.lease_seconds = 0.06
+    discussion.block_on_sequence = 1
+    try:
+        await service.start(room)
+        await asyncio.wait_for(discussion.consume_started.wait(), 1)
+        replacement = uuid4()
+        rooms.owner_token = replacement
+        rooms.playback = rooms.playback.model_copy(update={"current_event_sequence": 8})
+        rooms.room = rooms.room.model_copy(update={"status": RoomStatus.PAUSED})
+        await asyncio.sleep(0.15)
+        assert rooms.playback.current_event_sequence == 8
+        assert rooms.room.status == RoomStatus.PAUSED
+        assert rooms.owner_token == replacement
+        assert all(item["status"] != "failed" for item in bus.statuses)
+        assert not service._tasks or all(task.done() for task in service._tasks.values())
+    finally:
+        await service.close()
+
+
+async def test_recovered_cursor_explicitly_resumes_and_paused_worker_renews():
+    room = replay_room().model_copy(update={"status": RoomStatus.REPLAYING})
+    service, rooms, _, discussion, _, _ = coordinator(
+        room, [replay_event(1, 1), replay_event(2, 2)], interval=1
+    )
+    service.lease_seconds = 0.09
+    rooms.playback = rooms.playback.model_copy(
+        update={"current_event_sequence": 1, "current_message_sequence": 1, "is_paused": False}
+    )
+    try:
+        assert await service.reconcile_interrupted_replays() == 1
+        assert rooms.playback.current_event_sequence == 1
+        await service.resume(rooms.room)
+        await service.pause(rooms.room)
+        await asyncio.sleep(0.2)
+        assert rooms.renewals >= 2
+        assert await service.reconcile_interrupted_replays() == 0
+        assert rooms.playback.current_event_sequence == 1
+        assert discussion.consumed == [1]
+    finally:
+        await service.close()
+    assert rooms.owner_token is None
+
+
+async def test_temporary_seek_owner_is_released_on_failure():
+    room = replay_room()
+    service, rooms, _, _, _, _ = coordinator(
+        room, [replay_event(1, 1)], discussion_failure=RuntimeError("failed")
+    )
+    with pytest.raises(RuntimeError):
+        await service.seek_to_sequence(room, 1)
+    assert rooms.owner_token is None
+    await service.close()
+
+
+async def test_restarting_before_worker_first_tick_retires_old_lease():
+    room = replay_room()
+    service, rooms, _, _, _, _ = coordinator(room, [replay_event(1, 1)])
+    try:
+        await service.start(room)
+        first_token = rooms.owner_token
+        first_heartbeat = service._leases[room.id].heartbeat
+        await service.start(room, restart=True)
+        assert rooms.owner_token != first_token
+        assert first_heartbeat.done()
+    finally:
+        await service.close()
+
+
+async def test_close_cancels_initialization_and_stops_renewal():
+    room = replay_room()
+    service, rooms, _, discussion, _, _ = coordinator(room, [replay_event(1, 1)])
+    rooms.playback = rooms.playback.model_copy(update={"current_event_sequence": 1})
+    discussion.block_on_sequence = 1
+    starting = asyncio.create_task(service.resume(room))
+    await asyncio.wait_for(discussion.consume_started.wait(), 1)
+    await asyncio.wait_for(service.close(), 1)
+    assert starting.cancelled()
+    assert rooms.owner_token is None
+    assert not service._leases
+
+
+async def test_close_cancels_initial_claim_before_lease_is_registered():
+    room = replay_room()
+    service, rooms, _, _, _, _ = coordinator(room, [replay_event(1, 1)])
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    original = rooms.claim_replay
+
+    async def blocked_claim(*args, **kwargs):
+        entered.set()
+        await release.wait()
+        return await original(*args, **kwargs)
+
+    rooms.claim_replay = blocked_claim
+    starting = asyncio.create_task(service.start(room))
+    try:
+        await asyncio.wait_for(entered.wait(), 1)
+        await asyncio.wait_for(service.close(), 1)
+        assert starting.cancelled()
+        assert rooms.owner_token is None
+    finally:
+        starting.cancel()
+        await asyncio.gather(starting, return_exceptions=True)
+
+
+async def test_resume_waits_for_retiring_worker_then_claims_new_lifetime():
+    room = replay_room()
+    service, rooms, events, _, _, _ = coordinator(room, [replay_event(1, 1)])
+    releasing, release = asyncio.Event(), asyncio.Event()
+    original = rooms.release_replay
+    first_token = None
+
+    async def blocked_release(room_id, token):
+        if token == first_token:
+            releasing.set()
+            await release.wait()
+        return await original(room_id, token)
+
+    rooms.release_replay = blocked_release
+    resuming = None
+    try:
+        await service.start(room)
+        first_token = rooms.owner_token
+        await asyncio.wait_for(releasing.wait(), 1)
+        events.events.append(replay_event(2, 2))
+        resuming = asyncio.create_task(service.resume(rooms.room))
+        await asyncio.sleep(0.02)
+        assert not resuming.done()
+        release.set()
+        await asyncio.wait_for(resuming, 1)
+        await asyncio.wait_for(service._tasks[room.id], 1)
+        assert rooms.playback.current_event_sequence == 2
+        assert rooms.owner_token is None
+    finally:
+        release.set()
+        if resuming is not None:
+            await asyncio.gather(resuming, return_exceptions=True)
+        await service.close()
 
 
 @pytest.mark.asyncio

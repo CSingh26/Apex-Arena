@@ -495,6 +495,10 @@ class RoomPlaybackStateRecord(Base):
     playback_speed: Mapped[float] = mapped_column(Float, default=1.0)
     is_paused: Mapped[bool] = mapped_column(Boolean, default=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    replay_owner_token: Mapped[uuid.UUID | None] = mapped_column(nullable=True)
+    replay_owner_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )

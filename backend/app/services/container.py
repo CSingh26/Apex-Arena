@@ -222,6 +222,23 @@ class AppServices:
             backfill=self.backfill,
         )
         self._recent_reconciliation_task: asyncio.Task[None] | None = None
+        self._replay_reconciliation_task: asyncio.Task[None] | None = None
+
+    async def start_replay_recovery(self) -> None:
+        await self.room_replay.reconcile_interrupted_replays()
+        if self._replay_reconciliation_task is None:
+            self._replay_reconciliation_task = asyncio.create_task(
+                self._deferred_replay_recovery(), name="replay-startup-recovery"
+            )
+
+    async def _deferred_replay_recovery(self) -> None:
+        # A dead peer can still hold a fresh lease during the initial sweep.
+        # One bounded sweep after its lifetime recovers that startup window.
+        await asyncio.sleep(self.room_replay.lease_seconds)
+        try:
+            await self.room_replay.reconcile_interrupted_replays()
+        except Exception as exc:
+            logger.warning("Deferred replay recovery failed error=%s", type(exc).__name__)
 
     async def start_live_services(self) -> None:
         """Connect live telemetry and reconcile provider sessions in the background."""
@@ -299,6 +316,11 @@ class AppServices:
             await asyncio.sleep(self.settings.openf1_live_poll_seconds)
 
     async def close(self) -> None:
+        if self._replay_reconciliation_task is not None:
+            self._replay_reconciliation_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._replay_reconciliation_task
+            self._replay_reconciliation_task = None
         if self._recent_reconciliation_task is not None:
             self._recent_reconciliation_task.cancel()
             with suppress(asyncio.CancelledError):

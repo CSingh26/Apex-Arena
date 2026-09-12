@@ -7,6 +7,17 @@ from app.core.settings import Settings
 
 
 @pytest.fixture
+def no_replay_startup_io(monkeypatch):
+    """Route-only tests isolate SQL; lifecycle/recovery tests exercise real startup."""
+    from app.storage.room_repository import SqlRaceRoomRepository
+
+    async def recover(_repository):
+        return 0
+
+    monkeypatch.setattr(SqlRaceRoomRepository, "pause_orphaned_running_rows", recover)
+
+
+@pytest.fixture
 def settings() -> Settings:
     return Settings(
         app_env="test",

@@ -3,9 +3,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Protocol
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from app.domain.models import NormalizedRaceEvent
 from app.domain.rooms import RaceRoom, RoomPlaybackState, RoomStatus
@@ -14,12 +18,13 @@ from app.services.race_state import RaceStateEngine
 from app.services.session_semantics import normalize_qualifying_phase
 from app.storage.redis import EventBus
 from app.storage.repositories import SqlNormalizedEventRepository
-from app.storage.room_repository import SqlRaceRoomRepository
+from app.storage.room_repository import ReplayOwnershipLostError, SqlRaceRoomRepository
 
 logger = logging.getLogger(__name__)
 
 # How long to wait before re-checking a session that had no recorded span.
 SPAN_RETRY_BACKOFF_SECONDS = 60.0
+REPLAY_LEASE_SECONDS = 30.0
 
 
 class ReplayUnavailableError(RuntimeError):
@@ -28,6 +33,15 @@ class ReplayUnavailableError(RuntimeError):
 
 class SessionTimeSpanReader(Protocol):
     async def time_range(self, session_key: str) -> tuple[datetime | None, datetime | None]: ...
+
+
+@dataclass
+class ReplayLease:
+    token: UUID = field(default_factory=uuid4)
+    users: set[asyncio.Task] = field(default_factory=set)
+    heartbeat: asyncio.Task | None = None
+    lost: bool = False
+    retiring: bool = False
 
 
 class RoomReplayCoordinator:
@@ -54,6 +68,123 @@ class RoomReplayCoordinator:
         self._locks: dict[UUID, asyncio.Lock] = {}
         self._spans: dict[str, tuple[datetime, datetime, int]] = {}
         self._span_misses: dict[str, float] = {}
+        self.lease_seconds = REPLAY_LEASE_SECONDS
+        self._leases: dict[UUID, ReplayLease] = {}
+        self._operations: set[asyncio.Task] = set()
+        self._owner: ContextVar[UUID] = ContextVar("replay_owner")
+        self._closed = False
+
+    async def reconcile_interrupted_replays(self) -> int:
+        return await self.rooms.pause_orphaned_running_rows()
+
+    async def _renew_lease(self, room_id: UUID, lease: ReplayLease) -> None:
+        try:
+            while True:
+                await asyncio.sleep(self.lease_seconds / 3)
+                if not await self.rooms.renew_replay(
+                    room_id, lease.token, lease_seconds=self.lease_seconds
+                ):
+                    break
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("Replay renewal failed error=%s", type(exc).__name__)
+        lease.lost = True
+        for task in list(lease.users):
+            task.cancel()
+
+    async def _release_lease(self, room_id: UUID, lease: ReplayLease) -> None:
+        if lease.heartbeat is not None:
+            lease.heartbeat.cancel()
+            await asyncio.gather(lease.heartbeat, return_exceptions=True)
+        try:
+            await self.rooms.release_replay(room_id, lease.token)
+        except Exception as exc:
+            # Expiry remains the recovery mechanism when SQL is unavailable.
+            logger.warning("Replay release failed error=%s", type(exc).__name__)
+        finally:
+            if self._leases.get(room_id) is lease:
+                self._leases.pop(room_id)
+
+    @asynccontextmanager
+    async def _operation(
+        self, room: RaceRoom, *, replace_worker: bool = False
+    ) -> AsyncIterator[None]:
+        task = asyncio.current_task()
+        assert task is not None
+        self._operations.add(task)
+        try:
+            async with self._owned_operation(room, replace_worker=replace_worker):
+                yield
+        finally:
+            self._operations.discard(task)
+
+    @asynccontextmanager
+    async def _owned_operation(
+        self, room: RaceRoom, *, replace_worker: bool = False
+    ) -> AsyncIterator[None]:
+        async with self._locks.setdefault(room.id, asyncio.Lock()):
+            if self._closed:
+                raise ReplayUnavailableError("Replay service is closing; retry shortly")
+            if replace_worker:
+                await self._cancel(room.id)
+            lease = self._leases.get(room.id)
+            if lease is not None and lease.retiring:
+                # Terminal cleanup has left the tick lock but still owns SQL.
+                # Never join that lifetime or resume without a surviving worker.
+                task = self._tasks.get(room.id)
+                if task is not None:
+                    await asyncio.gather(task, return_exceptions=True)
+                lease = self._leases.get(room.id)
+            if lease is None:
+                lease = ReplayLease()
+                if not await self.rooms.claim_replay(
+                    room.id, lease.token, lease_seconds=self.lease_seconds
+                ):
+                    raise ReplayUnavailableError(
+                        "Replay is owned by another worker; retry the control request shortly"
+                    )
+                self._leases[room.id] = lease
+                lease.heartbeat = asyncio.create_task(
+                    self._renew_lease(room.id, lease), name=f"replay-renew:{room.slug}"
+                )
+            elif lease.lost or not await self.rooms.renew_replay(
+                room.id, lease.token, lease_seconds=self.lease_seconds
+            ):
+                raise ReplayUnavailableError("Replay ownership expired; retry the control request")
+            task = asyncio.current_task()
+            assert task is not None
+            lease.users.add(task)
+            context = self._owner.set(lease.token)
+            try:
+                yield
+            except ReplayOwnershipLostError as exc:
+                raise ReplayUnavailableError(str(exc)) from exc
+            except asyncio.CancelledError:
+                if lease.lost:
+                    raise ReplayUnavailableError(
+                        "Replay ownership expired; retry the control request"
+                    ) from None
+                raise
+            finally:
+                self._owner.reset(context)
+                lease.users.discard(task)
+                if not lease.users:
+                    await self._release_lease(room.id, lease)
+
+    async def _update_playback(self, room_id: UUID, **values) -> RoomPlaybackState:
+        return await self.rooms.update_playback(room_id, owner_token=self._owner.get(), **values)
+
+    async def _update_room_status(self, room_id: UUID, status: RoomStatus, **values) -> None:
+        await self.rooms.update_room_status(
+            room_id, status, owner_token=self._owner.get(), **values
+        )
+
+    def _start_worker(self, room: RaceRoom) -> None:
+        lease = self._leases[room.id]
+        task = asyncio.create_task(self._run(room), name=f"room-replay:{room.slug}")
+        self._tasks[room.id] = task
+        lease.users.add(task)
 
     async def _session_span(self, session_key: str) -> tuple[datetime, datetime, int] | None:
         """Session start, session end and the highest replayable sequence.
@@ -127,13 +258,12 @@ class RoomReplayCoordinator:
         available = await self.events.list_for_session(room.session_key, limit=1)
         if not available:
             raise ReplayUnavailableError("No normalized events are available for replay")
-        async with self._locks.setdefault(room.id, asyncio.Lock()):
-            await self._cancel(room.id)
+        async with self._operation(room, replace_worker=True):
             if restart:
-                await self.rooms.reset_discussion(room.id)
+                await self.rooms.reset_discussion(room.id, owner_token=self._owner.get())
                 self.discussion.reset_session(room.session_key, str(room.id))
                 await self.race_state.reset_session(room.session_key, is_replay=True)
-                playback = await self.rooms.update_playback(
+                playback = await self._update_playback(
                     room.id,
                     current_event_sequence=0,
                     current_message_sequence=0,
@@ -141,34 +271,34 @@ class RoomReplayCoordinator:
                     playback_speed=1,
                     is_paused=False,
                     started_at=datetime.now(UTC),
+                    room_status=RoomStatus.REPLAYING,
                 )
                 await self._publish_status(str(room.id), {"status": "discussion_reset"})
             else:
                 current = await self.rooms.get_playback(room.id)
                 await self._rebuild_to_sequence(room, current.current_event_sequence)
-                playback = await self.rooms.update_playback(
+                playback = await self._update_playback(
                     room.id,
                     is_paused=False,
                     started_at=datetime.now(UTC),
+                    room_status=RoomStatus.REPLAYING,
                 )
             await self._prime_driver_profiles(room.session_key)
-            await self.rooms.update_room_status(room.id, RoomStatus.REPLAYING)
             published = await self._publish(room, playback, RoomStatus.REPLAYING)
-            self._tasks[room.id] = asyncio.create_task(
-                self._run(room), name=f"room-replay:{room.slug}"
-            )
+            self._start_worker(room)
             return published
 
     async def pause(self, room: RaceRoom) -> RoomPlaybackState:
-        async with self._locks.setdefault(room.id, asyncio.Lock()):
-            playback = await self.rooms.update_playback(room.id, is_paused=True)
-            await self.rooms.update_room_status(room.id, RoomStatus.PAUSED)
+        async with self._operation(room):
+            playback = await self._update_playback(
+                room.id, is_paused=True, room_status=RoomStatus.PAUSED
+            )
             return await self._publish(room, playback, RoomStatus.PAUSED)
 
     async def resume(self, room: RaceRoom) -> RoomPlaybackState:
         if room.session_key is None:
             raise ReplayUnavailableError("No normalized session is linked to this room")
-        async with self._locks.setdefault(room.id, asyncio.Lock()):
+        async with self._operation(room):
             current = await self.rooms.get_playback(room.id)
             task = self._tasks.get(room.id)
             should_start = task is None or task.done()
@@ -176,19 +306,18 @@ class RoomReplayCoordinator:
                 await self._rebuild_to_sequence(room, current.current_event_sequence)
             else:
                 await self._prime_driver_profiles(room.session_key)
-            playback = await self.rooms.update_playback(room.id, is_paused=False)
-            await self.rooms.update_room_status(room.id, RoomStatus.REPLAYING)
+            playback = await self._update_playback(
+                room.id, is_paused=False, room_status=RoomStatus.REPLAYING
+            )
             if should_start:
-                self._tasks[room.id] = asyncio.create_task(
-                    self._run(room), name=f"room-replay:{room.slug}"
-                )
+                self._start_worker(room)
             return await self._publish(room, playback, RoomStatus.REPLAYING)
 
     async def set_speed(self, room: RaceRoom, speed: float) -> RoomPlaybackState:
         if speed not in {0.5, 1.0, 2.0, 4.0, 8.0}:
             raise ValueError("Unsupported playback speed")
-        async with self._locks.setdefault(room.id, asyncio.Lock()):
-            playback = await self.rooms.update_playback(room.id, playback_speed=speed)
+        async with self._operation(room):
+            playback = await self._update_playback(room.id, playback_speed=speed)
             return await self._publish(room, playback, room.status)
 
     async def seek_to_sequence(self, room: RaceRoom, sequence: int) -> RoomPlaybackState:
@@ -197,7 +326,7 @@ class RoomReplayCoordinator:
         maximum = await self.events.max_sequence(room.session_key)
         if sequence > maximum:
             raise ReplayUnavailableError("Replay sequence is outside the available event range")
-        async with self._locks.setdefault(room.id, asyncio.Lock()):
+        async with self._operation(room):
             playback = await self._rebuild_to_sequence(room, sequence)
             room_status = await self._status_after_seek(room, sequence, maximum)
             await self._publish_session_state(room.session_key)
@@ -211,7 +340,7 @@ class RoomReplayCoordinator:
             raise ReplayUnavailableError("Replay lap is outside the available event range")
         maximum = await self.events.max_sequence(room.session_key)
         target_sequence = max(0, sequence - 1)
-        async with self._locks.setdefault(room.id, asyncio.Lock()):
+        async with self._operation(room):
             playback = await self._rebuild_to_sequence(
                 room,
                 target_sequence,
@@ -240,7 +369,7 @@ class RoomReplayCoordinator:
             )
         maximum = await self.events.max_sequence(room.session_key)
         target_sequence = max(0, sequence - 1)
-        async with self._locks.setdefault(room.id, asyncio.Lock()):
+        async with self._operation(room):
             playback = await self._rebuild_to_sequence(room, target_sequence)
             room_status = await self._status_after_seek(room, target_sequence, maximum)
             await self._publish_session_state(room.session_key)
@@ -260,20 +389,25 @@ class RoomReplayCoordinator:
             raise ReplayUnavailableError("Replay session time is outside the available range")
         maximum = await self.events.max_sequence(room.session_key)
         target_sequence = max(0, sequence - 1)
-        async with self._locks.setdefault(room.id, asyncio.Lock()):
+        async with self._operation(room):
             playback = await self._rebuild_to_sequence(room, target_sequence)
             room_status = await self._status_after_seek(room, target_sequence, maximum)
             await self._publish_session_state(room.session_key)
             return await self._publish(room, playback, room_status)
 
     async def close(self) -> None:
-        await asyncio.gather(
-            *(self._cancel(room_id) for room_id in list(self._tasks)),
-            return_exceptions=True,
-        )
+        self._closed = True
+        tasks = self._operations | {task for lease in self._leases.values() for task in lease.users}
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        for room_id, lease in list(self._leases.items()):
+            await self._release_lease(room_id, lease)
+        self._tasks.clear()
 
     async def _run(self, room: RaceRoom) -> None:
         assert room.session_key is not None
+        lease = self._leases[room.id]
         try:
             while True:
                 should_wait = False
@@ -288,8 +422,9 @@ class RoomReplayCoordinator:
                             limit=1,
                         )
                         if not events:
-                            completed = await self.rooms.update_playback(room.id, is_paused=True)
-                            await self.rooms.update_room_status(room.id, RoomStatus.COMPLETED)
+                            completed = await self._update_playback(
+                                room.id, is_paused=True, room_status=RoomStatus.COMPLETED
+                            )
                             await self._publish(room, completed, RoomStatus.COMPLETED)
                             await self._publish_status(str(room.id), {"status": "replay_complete"})
                             return
@@ -297,16 +432,12 @@ class RoomReplayCoordinator:
                         await self.race_state.consume(event)
                         await self.discussion.consume(event)
                         message_sequence = await self.rooms.max_message_sequence(room.id)
-                        advanced = await self.rooms.update_playback(
+                        advanced = await self._update_playback(
                             room.id,
                             current_event_sequence=event.sequence_number,
                             current_message_sequence=message_sequence,
                             current_lap=event.lap_number,
-                        )
-                        await self.rooms.update_room_status(
-                            room.id,
-                            RoomStatus.REPLAYING,
-                            current_lap=event.lap_number,
+                            room_status=RoomStatus.REPLAYING,
                             last_event_at=event.event_time,
                         )
                         await self._publish_session_update(event)
@@ -321,13 +452,25 @@ class RoomReplayCoordinator:
                     continue
                 await asyncio.sleep(self.base_interval_seconds / advanced.playback_speed)
         except asyncio.CancelledError:
+            lease.retiring = True
             raise
+        except ReplayOwnershipLostError:
+            lease.retiring = True
+            return
         except Exception as exc:
+            lease.retiring = True
             logger.error("Room replay failed room=%s error=%s", room.slug, type(exc).__name__)
-            await self.rooms.update_room_status(room.id, RoomStatus.FAILED)
+            try:
+                await self._update_playback(room.id, is_paused=True, room_status=RoomStatus.FAILED)
+            except ReplayOwnershipLostError:
+                return
             await self._publish_status(
                 str(room.id), {"status": "failed", "detail": "Replay processing failed"}
             )
+        finally:
+            lease.retiring = True
+            lease.users.discard(asyncio.current_task())
+            await self._release_lease(room.id, lease)
 
     async def _rebuild_to_sequence(
         self,
@@ -365,7 +508,7 @@ class RoomReplayCoordinator:
             room.session_key,
             target_sequence,
         )
-        return await self.rooms.update_playback(
+        return await self._update_playback(
             room.id,
             current_event_sequence=target_sequence,
             current_message_sequence=message_sequence,
@@ -385,7 +528,7 @@ class RoomReplayCoordinator:
         maximum_sequence: int,
     ) -> RoomStatus:
         if room.status == RoomStatus.COMPLETED and target_sequence < maximum_sequence:
-            await self.rooms.update_room_status(room.id, RoomStatus.PAUSED)
+            await self._update_room_status(room.id, RoomStatus.PAUSED)
             return RoomStatus.PAUSED
         return room.status
 
@@ -500,7 +643,13 @@ class RoomReplayCoordinator:
 
     async def _cancel(self, room_id: UUID) -> None:
         task = self._tasks.pop(room_id, None)
-        if task is None or task.done():
-            return
-        task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
+        lease = self._leases.get(room_id)
+        if task is not None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        # A task cancelled before its first instruction never enters _run's
+        # finally block. Retire that lease here as well.
+        if lease is not None:
+            lease.users.discard(task)
+            if self._leases.get(room_id) is lease:
+                await self._release_lease(room_id, lease)

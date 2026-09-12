@@ -36,18 +36,17 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
         worker_enabled = settings.app_process_role in {"combined", "all"} and (
             settings.live_worker_enabled or settings.recent_session_reconciliation_enabled
         )
-        if worker_enabled:
-            # Combined mode ingests as well as serves, so it must take the same
-            # singleton lease the dedicated ingestor uses. Without it, two
-            # overlapping deploys would both subscribe to OpenF1 MQTT and
-            # double-write the event pipeline.
-            if not await services.database.acquire_ingestor_lease():
-                raise RuntimeError("Another Apex Arena ingestor owns the singleton lease")
-        if settings.app_process_role in {"combined", "all"}:
-            if settings.live_worker_enabled:
-                await services.start_live_services()
-            await services.start_recent_reconciliation()
         try:
+            if worker_enabled:
+                # Combined instances share the dedicated ingestor's singleton lease.
+                if not await services.database.acquire_ingestor_lease():
+                    raise RuntimeError("Another Apex Arena ingestor owns the singleton lease")
+            if settings.app_process_role in {"api", "combined", "all"}:
+                await services.start_replay_recovery()
+            if settings.app_process_role in {"combined", "all"}:
+                if settings.live_worker_enabled:
+                    await services.start_live_services()
+                await services.start_recent_reconciliation()
             yield
         finally:
             await services.close()

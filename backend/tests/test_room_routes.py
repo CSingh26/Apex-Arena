@@ -47,8 +47,49 @@ from app.services.discussion import DiscussionMetrics
 from app.services.race_state import RaceState
 from app.services.room_replay import ReplayUnavailableError
 
+pytestmark = pytest.mark.usefixtures("no_replay_startup_io")
+
 REPLAY_OPERATOR_HEADER = "X-Apex-Replay-Password"
 REPLAY_OPERATOR_PASSWORD = "operator-test-password"
+
+
+@pytest.mark.parametrize(
+    "action,fields",
+    [
+        ("pause", {}),
+        ("resume", {}),
+        ("set_speed", {"playback_speed": 2}),
+        ("seek_to_sequence", {"sequence": 1}),
+        ("seek_to_lap", {"lap_number": 1}),
+        ("seek_to_phase", {"phase": "Q1"}),
+        ("seek_to_session_time", {"session_time": 1}),
+    ],
+)
+async def test_all_playback_controls_translate_peer_conflict_to_409(action, fields):
+    room = api_room()
+    services = route_services(room)
+    services.room_replay = SimpleNamespace(
+        **{
+            name: AsyncMock(
+                side_effect=ReplayUnavailableError(
+                    "Replay is owned by another worker; retry the control request shortly"
+                )
+            )
+            for name in (
+                "pause",
+                "resume",
+                "set_speed",
+                "seek_to_sequence",
+                "seek_to_lap",
+                "seek_to_phase",
+                "seek_to_session_time",
+            )
+        }
+    )
+    with pytest.raises(HTTPException) as error:
+        await change_playback(room.slug, PlaybackRequest(action=action, **fields), services)
+    assert error.value.status_code == 409
+    assert "retry" in error.value.detail
 
 
 def api_room(

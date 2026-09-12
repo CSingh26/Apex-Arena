@@ -18,6 +18,8 @@ from app.main import create_app
 from app.services.historical import HistoricalIngestionResult
 from app.services.race_state import DriverRaceState, RaceState
 
+pytestmark = pytest.mark.usefixtures("no_replay_startup_io")
+
 
 def test_health_reports_dependency_and_live_degradation(settings: Settings) -> None:
     app = create_app(settings)

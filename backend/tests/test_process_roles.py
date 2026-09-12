@@ -10,6 +10,8 @@ from app.core.settings import Settings
 from app.ingestor import create_ingestor_app
 from app.main import create_app
 
+pytestmark = pytest.mark.usefixtures("no_replay_startup_io")
+
 
 def settings_with(settings: Settings, **changes: object) -> Settings:
     return Settings.model_validate({**settings.model_dump(), **changes})

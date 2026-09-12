@@ -5,10 +5,13 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.core.settings import Settings
 from app.main import create_app
+
+pytestmark = pytest.mark.usefixtures("no_replay_startup_io")
 
 
 def _staging(settings: Settings, **overrides: object) -> Settings:
