@@ -10,6 +10,55 @@
 
 **Spec:** `docs/superpowers/specs/2026-09-10-apexarena-master-build-design.md`
 
+## Current foundation completion record — 12 September 2026
+
+The controller ledger records Tasks 1–26 independently reviewed, committed and
+pushed on `sprints`; Task 27's fresh local phase gate tested
+`7f7513efaba6ffe93cc20292ecb3915e716e85c1`. This closure commit changes only
+documentation. Independent whole-foundation review follows; no production GO,
+main promotion, hosted CI run, image publication, deployment, master-roadmap
+completion, or 150-push claim is made.
+The controller ledger contains 54 distinct pushes before this documentation
+commit across the sprint; that is not a count of pushes made today.
+
+Checked steps below mean the reviewed deliverable and its recorded verification
+were completed, including approved equivalent commands and scope rulings. They
+do **not** assert that every original illustrative shell/Python/YAML sketch was
+executed literally. Tasks 1–19 integrated an existing repair candidate with
+focused/exact-artifact review, not a retroactively invented TDD history.
+Tasks 20–25 used recorded RED/GREEN tests. Explicit supersession notes preserve
+the original sketches where reviewed security/concurrency prerequisites changed
+the implementation. Actual current verification commands and provenance are in
+[the repair report](../../italian-gp-live-room-repair-report.md#current-foundation-gate-task-27-september-12).
+
+| Completed scope | Reviewed endpoint / evidence |
+| --- | --- |
+| Tasks 1–18: live repair integration | `35666c0`; focused/exact-artifact tests and review per task |
+| Task 19: operational provenance | `bf62fc3`; historical September 6 record remains separate |
+| Task 20: fail-closed proxy | `b706df4`; unsafe configuration and request regression tests |
+| Task 21: replay operator authentication | `79d1670`; independent operator boundary and canonical header encoding |
+| Task 22: interrupted replay ownership | `c4fb795`; real PostgreSQL lock/expiry/fencing/rollback tests |
+| Catalog fixture correction | `5274df4`; original user fixture change reviewed and committed unchanged |
+| Task 23: interrupted ingestion recovery | `9580782`; heartbeat freshness and cancellation preservation tests |
+| Task 24: guarded current CI fixtures | `db2d2c8`; fresh isolated E2E 13/13, no retries/skips |
+| Task 25: mandatory release graph | `2e3eb4a`; parser/negative mutation checks and actual Settings snippets |
+| Task 26: formatter-only gate | `7f7513e`; 12 AST-equivalent files, combined Ruff clean |
+| Task 27: fresh local foundation gate | Tested `7f7513e`: backend 699/699, frontend 211/211, lint/format/type/build, head 0017, synthetic Compose and release checks |
+
+Task 27 used all four opt-ins against verified disposable PostgreSQL/Redis
+resources with dotenv disabled: no backend skips, one existing TestClient/httpx
+deprecation. Frontend gates used a clean Git export without real dotenv files.
+Task 24's unchanged 13-test browser evidence is cited at its exact revision, not
+relabelled as a fresh Task 27 run. Task 25 preserved its E2E contract; Task 26
+changed no Python ASTs. Parent test containers remain until phase review; only
+Task 27's own database/role is cleaned.
+
+The existing dependency audit report (11 findings, including one critical) and
+TestClient warning remain unresolved. Deployment also requires credential
+rotation, a fresh production audit/backup, legacy-worker drains, approved
+migrations through `20260912_0017`, compatible rollout and health/canary checks.
+Remaining master-build phases are still pending.
+
 ## Global Constraints
 
 - Work remains on `sprints` and targets `origin/sprints`.
@@ -37,14 +86,14 @@
 - Consumes: existing `Settings` and process-role configuration.
 - Produces: validated REST live-ingestion settings and role-aware startup configuration.
 
-- [ ] **Step 1: Run the focused configuration tests.**
+- [x] **Step 1: Run the focused configuration tests.**
 
 ```bash
 cd backend
 ./.venv/bin/pytest tests/test_ingestion_schema.py tests/test_process_roles.py -q
 ```
 
-- [ ] **Step 2: Review and stage only the coherent configuration contract.**
+- [x] **Step 2: Review and stage only the coherent configuration contract.**
 
 ```bash
 git diff -- .env.example backend/app/core/settings.py docker-compose.yml
@@ -52,7 +101,7 @@ git add .env.example backend/app/core/settings.py docker-compose.yml backend/tes
 git diff --cached --check
 ```
 
-- [ ] **Step 3: Commit and push.**
+- [x] **Step 3: Commit and push.**
 
 ```bash
 git commit -m "feat(live): configure REST session ingestion"
@@ -69,7 +118,7 @@ git push origin sprints
 - Consumes: existing `OpenF1Client` REST and authentication behavior.
 - Produces: bounded credential retry and explicit live REST requests.
 
-- [ ] **Step 1: Run provider tests and stage the implementation with its regression tests.**
+- [x] **Step 1: Run provider tests and stage the implementation with its regression tests.**
 
 ```bash
 cd backend
@@ -79,7 +128,7 @@ git add backend/app/providers/openf1.py backend/tests/test_openf1.py
 git diff --cached --check
 ```
 
-- [ ] **Step 2: Commit and push.**
+- [x] **Step 2: Commit and push.**
 
 ```bash
 git commit -m "fix(provider): bound OpenF1 live retries"
@@ -96,7 +145,7 @@ git push origin sprints
 - Consumes: `RaceRoom` metadata and OpenF1 session rows.
 - Produces: one confidence-bearing matcher shared by catalog and backfill.
 
-- [ ] **Step 1: Run matching tests and stage the canonical matcher.**
+- [x] **Step 1: Run matching tests and stage the canonical matcher.**
 
 ```bash
 cd backend
@@ -106,7 +155,7 @@ git add backend/app/services/provider_matching.py backend/tests/test_openf1_back
 git diff --cached --check
 ```
 
-- [ ] **Step 2: Commit and push.**
+- [x] **Step 2: Commit and push.**
 
 ```bash
 git commit -m "fix(provider): unify OpenF1 session matching"
@@ -124,7 +173,7 @@ git push origin sprints
 - Consumes: public session lifecycle and provider availability.
 - Produces: explicit waiting, live, historical, and provider-pending eligibility.
 
-- [ ] **Step 1: Run lifecycle tests and stage the domain policy.**
+- [x] **Step 1: Run lifecycle tests and stage the domain policy.**
 
 ```bash
 cd backend
@@ -134,7 +183,7 @@ git add backend/app/domain/rooms.py backend/app/services/room_eligibility.py bac
 git diff --cached --check
 ```
 
-- [ ] **Step 2: Commit and push.**
+- [x] **Step 2: Commit and push.**
 
 ```bash
 git commit -m "fix(rooms): model live waiting eligibility"
@@ -154,7 +203,7 @@ git push origin sprints
 - Consumes: Jolpica meetings, OpenF1 sessions, and room eligibility.
 - Produces: refreshable catalog state, provider diagnostics, stable identity, and current-weekend hydration.
 
-- [ ] **Step 1: Run catalog tests and stage the coherent catalog slice.**
+- [x] **Step 1: Run catalog tests and stage the coherent catalog slice.**
 
 ```bash
 cd backend
@@ -164,7 +213,7 @@ git add backend/app/services/rooms.py backend/app/storage/room_repository.py bac
 git diff --cached --check
 ```
 
-- [ ] **Step 2: Commit and push.**
+- [x] **Step 2: Commit and push.**
 
 ```bash
 git commit -m "fix(rooms): hydrate current session catalog"
@@ -182,7 +231,7 @@ git push origin sprints
 - Consumes: room catalog, OpenF1 REST, normalized processing, and location ingestion.
 - Produces: `LiveSessionIngestionService.run_once(now=...)` with bounded discovery and polling.
 
-- [ ] **Step 1: Run live-ingestion tests and stage the service.**
+- [x] **Step 1: Run live-ingestion tests and stage the service.**
 
 ```bash
 cd backend
@@ -192,7 +241,7 @@ git add backend/app/services/live_ingestion.py backend/tests/test_live_ingestion
 git diff --cached --check
 ```
 
-- [ ] **Step 2: Commit and push.**
+- [x] **Step 2: Commit and push.**
 
 ```bash
 git commit -m "feat(live): add REST ingestion coordinator"
@@ -211,7 +260,7 @@ git push origin sprints
 - Consumes: `LiveSessionIngestionService` and singleton worker leases.
 - Produces: role-correct startup, shutdown, and health status.
 
-- [ ] **Step 1: Run lifecycle tests and stage service composition.**
+- [x] **Step 1: Run lifecycle tests and stage service composition.**
 
 ```bash
 cd backend
@@ -221,7 +270,7 @@ git add backend/app/services/container.py backend/app/main.py backend/app/ingest
 git diff --cached --check
 ```
 
-- [ ] **Step 2: Commit and push.**
+- [x] **Step 2: Commit and push.**
 
 ```bash
 git commit -m "feat(live): run REST worker by process role"
@@ -238,7 +287,7 @@ git push origin sprints
 - Consumes: asynchronous SQLAlchemy sessions and worker cancellation.
 - Produces: shielded rollback/close semantics without connection leaks.
 
-- [ ] **Step 1: Run the integration contract and stage database cleanup.**
+- [x] **Step 1: Run the integration contract and stage database cleanup.**
 
 ```bash
 cd backend
@@ -248,7 +297,7 @@ git add backend/app/storage/database.py
 git diff --cached --check
 ```
 
-- [ ] **Step 2: Commit and push.**
+- [x] **Step 2: Commit and push.**
 
 ```bash
 git commit -m "fix(storage): shield database cleanup on cancellation"
@@ -269,7 +318,7 @@ git push origin sprints
 - Consumes: raw provider facts and normalized writes.
 - Produces: commit-before-publish ordering and database-backed state freshness.
 
-- [ ] **Step 1: Run event-path tests and stage the transaction boundary.**
+- [x] **Step 1: Run event-path tests and stage the transaction boundary.**
 
 ```bash
 cd backend
@@ -279,7 +328,7 @@ git add backend/app/services/raw_events.py backend/app/services/event_pipeline.p
 git diff --cached --check
 ```
 
-- [ ] **Step 2: Commit and push.**
+- [x] **Step 2: Commit and push.**
 
 ```bash
 git commit -m "fix(events): publish only committed race state"
@@ -298,7 +347,7 @@ git push origin sprints
 - Consumes: Redis Streams and durable normalized-event pagination.
 - Produces: bounded multi-page catch-up and honest outage behavior.
 
-- [ ] **Step 1: Run stream tests and stage event recovery.**
+- [x] **Step 1: Run stream tests and stage event recovery.**
 
 ```bash
 cd backend
@@ -308,7 +357,7 @@ git add backend/app/storage/redis.py backend/app/api/streaming.py backend/tests/
 git diff --cached --check
 ```
 
-- [ ] **Step 2: Commit and push.**
+- [x] **Step 2: Commit and push.**
 
 ```bash
 git commit -m "fix(streaming): recover bounded Redis event gaps"
@@ -325,7 +374,7 @@ git push origin sprints
 - Consumes: durable messages and Redis room streams.
 - Produces: paginated reconnect recovery without duplicates.
 
-- [ ] **Step 1: Run room-stream tests and stage recovery.**
+- [x] **Step 1: Run room-stream tests and stage recovery.**
 
 ```bash
 cd backend
@@ -335,7 +384,7 @@ git add backend/app/api/room_streaming.py backend/tests/test_room_streaming.py
 git diff --cached --check
 ```
 
-- [ ] **Step 2: Commit and push.**
+- [x] **Step 2: Commit and push.**
 
 ```bash
 git commit -m "fix(streaming): recover room messages after reconnect"
@@ -357,7 +406,7 @@ git push origin sprints
 - Consumes: canonical matching, endpoint checkpoints, and normalized session data.
 - Produces: durable partial/complete outcomes and retryable empty endpoints.
 
-- [ ] **Step 1: Run historical tests and stage the backfill slice.**
+- [x] **Step 1: Run historical tests and stage the backfill slice.**
 
 ```bash
 cd backend
@@ -367,7 +416,7 @@ git add backend/app/services/historical.py backend/app/services/openf1_backfill.
 git diff --cached --check
 ```
 
-- [ ] **Step 2: Commit and push.**
+- [x] **Step 2: Commit and push.**
 
 ```bash
 git commit -m "fix(replay): make historical backfill resumable"
@@ -384,7 +433,7 @@ git push origin sprints
 - Consumes: completed room candidates and backfill job state.
 - Produces: fair bounded recovery including practice sessions.
 
-- [ ] **Step 1: Run reconciliation tests and stage the service.**
+- [x] **Step 1: Run reconciliation tests and stage the service.**
 
 ```bash
 cd backend
@@ -394,7 +443,7 @@ git add backend/app/services/recent_sessions.py backend/tests/test_recent_sessio
 git diff --cached --check
 ```
 
-- [ ] **Step 2: Commit and push.**
+- [x] **Step 2: Commit and push.**
 
 ```bash
 git commit -m "fix(backfill): fairly recover recent sessions"
@@ -411,7 +460,7 @@ git push origin sprints
 - Consumes: playback cursor and persisted snapshots.
 - Produces: fresher replay state and bounded rehydration.
 
-- [ ] **Step 1: Run replay tests and stage state refresh.**
+- [x] **Step 1: Run replay tests and stage state refresh.**
 
 ```bash
 cd backend
@@ -421,7 +470,7 @@ git add backend/app/services/room_replay.py backend/tests/test_room_replay.py
 git diff --cached --check
 ```
 
-- [ ] **Step 2: Commit and push.**
+- [x] **Step 2: Commit and push.**
 
 ```bash
 git commit -m "fix(replay): refresh persisted race state"
@@ -438,7 +487,7 @@ git push origin sprints
 - Consumes: provider, ingestion, Redis, and database status.
 - Produces: secret-safe live-ingestion health diagnostics.
 
-- [ ] **Step 1: Run route tests and stage diagnostics.**
+- [x] **Step 1: Run route tests and stage diagnostics.**
 
 ```bash
 cd backend
@@ -448,7 +497,7 @@ git add backend/app/api/routes.py backend/tests/test_routes.py
 git diff --cached --check
 ```
 
-- [ ] **Step 2: Commit and push.**
+- [x] **Step 2: Commit and push.**
 
 ```bash
 git commit -m "feat(health): expose live ingestion status"
@@ -467,7 +516,7 @@ git push origin sprints
 - Consumes: public room lifecycle and provider status.
 - Produces: completed wording, honest waiting states, and compact filters.
 
-- [ ] **Step 1: Run catalog tests and stage the UX slice.**
+- [x] **Step 1: Run catalog tests and stage the UX slice.**
 
 ```bash
 cd frontend
@@ -477,7 +526,7 @@ git add frontend/src/components/race-rooms/race-rooms-index.tsx frontend/src/com
 git diff --cached --check
 ```
 
-- [ ] **Step 2: Commit and push.**
+- [x] **Step 2: Commit and push.**
 
 ```bash
 git commit -m "fix(ui): clarify live room availability"
@@ -495,7 +544,7 @@ git push origin sprints
 - Consumes: session events, snapshots, provider status, and capabilities.
 - Produces: hydrated state, visible reconnect status, and safe transitions.
 
-- [ ] **Step 1: Run command-center tests and stage recovery.**
+- [x] **Step 1: Run command-center tests and stage recovery.**
 
 ```bash
 cd frontend
@@ -505,7 +554,7 @@ git add frontend/src/components/race-rooms/live-command-center.tsx frontend/src/
 git diff --cached --check
 ```
 
-- [ ] **Step 2: Commit and push.**
+- [x] **Step 2: Commit and push.**
 
 ```bash
 git commit -m "fix(ui): hydrate live command center state"
@@ -524,7 +573,7 @@ git push origin sprints
 - Consumes: location windows, track geometry, replay clock, and room metadata.
 - Produces: geometry refresh, reconnect-safe polling, and provider-key hydration.
 
-- [ ] **Step 1: Run GPS/bootstrap tests and stage the changes.**
+- [x] **Step 1: Run GPS/bootstrap tests and stage the changes.**
 
 ```bash
 cd frontend
@@ -534,7 +583,7 @@ git add frontend/src/lib/use-driver-locations.ts frontend/src/lib/use-driver-loc
 git diff --cached --check
 ```
 
-- [ ] **Step 2: Commit and push.**
+- [x] **Step 2: Commit and push.**
 
 ```bash
 git commit -m "fix(map): recover live driver locations"
@@ -553,7 +602,7 @@ git push origin sprints
 - Consumes: verified runtime behavior and provider limitations.
 - Produces: accurate operational and rollout guidance.
 
-- [ ] **Step 1: Validate and stage documentation.**
+- [x] **Step 1: Validate and stage documentation.**
 
 ```bash
 git diff --check -- docs/live-race-operations.md docs/openf1-rest-backfill.md docs/italian-gp-live-room-repair-report.md docs/superpowers/plans/2026-09-06-live-room-repair.md
@@ -561,7 +610,7 @@ git add docs/live-race-operations.md docs/openf1-rest-backfill.md docs/italian-g
 git diff --cached --check
 ```
 
-- [ ] **Step 2: Commit and push.**
+- [x] **Step 2: Commit and push.**
 
 ```bash
 git commit -m "docs(live): record room repair operations"
@@ -579,7 +628,7 @@ git push origin sprints
 - Consumes: `APP_ENV`, `PROXY_ENFORCEMENT_ENABLED`, and `APEX_ARENA_PROXY_TOKEN`.
 - Produces: startup validation and fail-closed proxy enforcement.
 
-- [ ] **Step 1: Add and run a failing test for production without a proxy token.**
+- [x] **Step 1: Add and run a failing test for production without a proxy token.**
 
 ```python
 def test_production_proxy_enforcement_requires_token():
@@ -592,14 +641,14 @@ cd backend
 ./.venv/bin/pytest tests/test_proxy_security.py -q
 ```
 
-- [ ] **Step 2: Implement cross-field validation and constant-time request checking.**
+- [x] **Step 2: Implement cross-field validation and constant-time request checking.**
 
 ```python
 if self.app_env == "production" and self.proxy_enforcement_enabled and not self.apex_arena_proxy_token:
     raise ValueError("APEX_ARENA_PROXY_TOKEN is required when production proxy enforcement is enabled")
 ```
 
-- [ ] **Step 3: Run focused tests and Ruff, then commit and push.**
+- [x] **Step 3: Run focused tests and Ruff, then commit and push.**
 
 ```bash
 cd backend
@@ -613,6 +662,14 @@ git push origin sprints
 
 ### Task 21: Protect Shared Replay Mutations
 
+> Superseded by the reviewed Task 21 security ruling: the trusted deployment
+> proxy is available to every visitor and cannot authorize shared mutations.
+> The implemented contract requires a separate operator password via canonical
+> Base64 UTF-8 `X-Apex-Replay-Password`, constant-time comparison and fail-closed
+> configuration; public reads remain anonymous. The proxy-only dependency
+> sketch below is retained as original plan provenance, not executable guidance.
+> Reviewed endpoint: `79d1670`; controller ledger Task 21 and its report.
+
 **Files:**
 - Modify: `backend/app/api/room_routes.py`
 - Modify: `backend/app/api/proxy.py`
@@ -622,7 +679,7 @@ git push origin sprints
 - Consumes: trusted proxy authentication from Task 20.
 - Produces: authenticated replay mutations and public read-only replay state.
 
-- [ ] **Step 1: Add and run a failing anonymous mutation test.**
+- [x] **Step 1: Add and run a failing anonymous mutation test.**
 
 ```python
 response = client.post(f"/api/v1/race-rooms/{slug}/replay")
@@ -634,13 +691,13 @@ cd backend
 ./.venv/bin/pytest tests/test_room_routes.py -q
 ```
 
-- [ ] **Step 2: Reuse one trusted-proxy dependency on replay mutation routes.**
+- [x] **Step 2: Reuse one trusted-proxy dependency on replay mutation routes.**
 
 ```python
 dependencies=[Depends(require_trusted_proxy)]
 ```
 
-- [ ] **Step 3: Run tests, commit, and push.**
+- [x] **Step 3: Run tests, commit, and push.**
 
 ```bash
 cd backend
@@ -653,6 +710,16 @@ git push origin sprints
 
 ### Task 22: Reconcile Interrupted Replay Workers
 
+> Superseded by the reviewed Task 22 durable-ownership ruling: the minimal
+> pause-all sketch is insufficient with healthy peers. The implementation adds
+> migration 0016, renewable SQL owner tokens, atomic paired status/cursor writes,
+> bounded lock contention and final ownership checks, temporary control leases,
+> retryable healthy-peer 409s and a bounded deferred startup sweep. Real database
+> tests verify liveness and rollback. Legacy replay workers must drain first;
+> no cross-process command routing is implied. Original sketch retained below.
+> Reviewed endpoint: `c4fb795`; controller ledger Task 22 and
+> [recovery contract](../../replay-worker-recovery.md).
+
 **Files:**
 - Modify: `backend/app/services/room_replay.py`
 - Modify: `backend/app/services/container.py`
@@ -663,7 +730,7 @@ git push origin sprints
 - Consumes: persisted playback rows at startup.
 - Produces: `reconcile_interrupted_replays()` that pauses orphaned rows while preserving cursors.
 
-- [ ] **Step 1: Add and run a failing orphaned-running-row test.**
+- [x] **Step 1: Add and run a failing orphaned-running-row test.**
 
 ```python
 await service.reconcile_interrupted_replays()
@@ -675,14 +742,14 @@ cd backend
 ./.venv/bin/pytest tests/test_room_replay.py -q
 ```
 
-- [ ] **Step 2: Implement idempotent startup reconciliation.**
+- [x] **Step 2: Implement idempotent startup reconciliation.**
 
 ```python
 async def reconcile_interrupted_replays(self) -> int:
     return await self.playback.pause_orphaned_running_rows()
 ```
 
-- [ ] **Step 3: Run tests, commit, and push.**
+- [x] **Step 3: Run tests, commit, and push.**
 
 ```bash
 cd backend
@@ -695,6 +762,14 @@ git push origin sprints
 
 ### Task 23: Reconcile Interrupted Ingestion Runs
 
+> Reviewed prerequisite beyond the original age-only sketch: migration 0017
+> stores nullable heartbeat freshness; conditional heartbeat/finish/recovery
+> transitions preserve healthy long-running work. A one-shot 30-minute startup
+> sweep uses started_at only for legacy null-heartbeat rows. Legacy historical
+> workers must drain, and cancellation remains cancellation even if cleanup
+> fails. Reviewed endpoint: `9580782`; controller ledger Task 23 and
+> [recovery contract](../../ingestion-run-recovery.md).
+
 **Files:**
 - Modify: `backend/app/services/historical.py`
 - Modify: `backend/app/storage/repositories.py`
@@ -704,7 +779,7 @@ git push origin sprints
 - Consumes: persisted ingestion runs left running after termination.
 - Produces: age-bounded startup reconciliation to a retryable failed state.
 
-- [ ] **Step 1: Add and run a failing stale-run test.**
+- [x] **Step 1: Add and run a failing stale-run test.**
 
 ```python
 count = await service.reconcile_stale_runs(now=now, stale_after=timedelta(minutes=30))
@@ -716,13 +791,13 @@ cd backend
 ./.venv/bin/pytest tests/test_historical.py -q
 ```
 
-- [ ] **Step 2: Implement guarded stale-run reconciliation.**
+- [x] **Step 2: Implement guarded stale-run reconciliation.**
 
 ```python
 await repository.fail_running_before(cutoff, reason="worker interrupted")
 ```
 
-- [ ] **Step 3: Run tests, commit, and push.**
+- [x] **Step 3: Run tests, commit, and push.**
 
 ```bash
 cd backend
@@ -735,6 +810,14 @@ git push origin sprints
 
 ### Task 24: Repair CI Development Seed
 
+> Approved Task 24 fixture/provider ruling expands the original rooms-only
+> sketch to a guarded synthetic provider and standalone internal-network
+> Compose stack with a matching-version Playwright runner. Current calendar
+> metadata requires standard/sprint/future schedules; future sessions remain
+> metadata-only. The production image imports no tests, real reducers build
+> lap-six battle/pit evidence, and CI supplies the separate operator credential.
+> Reviewed endpoint: `db2d2c8`; 13 unchanged browser tests passed locally.
+
 **Files:**
 - Modify: `.github/workflows/release.yml`
 - Create: `backend/app/cli/seed_e2e_room.py`
@@ -744,7 +827,7 @@ git push origin sprints
 - Consumes: current room/session schemas and deterministic test-only fixtures.
 - Produces: a guarded CLI-owned E2E seed.
 
-- [ ] **Step 1: Add and run a failing production-refusal test.**
+- [x] **Step 1: Add and run a failing production-refusal test.**
 
 ```python
 with pytest.raises(RuntimeError, match="test environments"):
@@ -756,13 +839,13 @@ cd backend
 ./.venv/bin/pytest tests/test_seed_e2e_room.py -q
 ```
 
-- [ ] **Step 2: Implement the CLI and replace the removed fixture flag/slug in CI.**
+- [x] **Step 2: Implement the CLI and replace the removed fixture flag/slug in CI.**
 
 ```bash
 python -m app.cli.seed_e2e_room --scenario normal-race --slug e2e-normal-race
 ```
 
-- [ ] **Step 3: Run tests, commit, and push.**
+- [x] **Step 3: Run tests, commit, and push.**
 
 ```bash
 cd backend
@@ -775,6 +858,14 @@ git push origin sprints
 
 ### Task 25: Restore Reachable Release Publishing
 
+> Superseded by the reviewed Task 25 actual-graph ruling: `quality` and
+> `build-images` below were illustrative, nonexistent job names. Actual publish
+> prerequisites remain `backend`, `frontend`, `containers`, `end-to-end`,
+> and `deployment-validation`; optional Vercel deployment is excluded. Fixes
+> address concrete Dockerfile paths and Settings fixtures; a safe YAML validator
+> rejects negative graph/status/shape mutations. No hosted publication was run.
+> Reviewed endpoint: `2e3eb4a`; controller ledger Task 25 and its report.
+
 **Files:**
 - Modify: `.github/workflows/release.yml`
 - Create: `scripts/test-release-workflow.sh`
@@ -783,19 +874,19 @@ git push origin sprints
 - Consumes: successful quality and container jobs.
 - Produces: a release graph where disabled optional deployment cannot block publication.
 
-- [ ] **Step 1: Add a failing shell assertion for the dependency graph.**
+- [x] **Step 1: Add a failing shell assertion for the dependency graph.**
 
 ```bash
 ./scripts/test-release-workflow.sh .github/workflows/release.yml
 ```
 
-- [ ] **Step 2: Make verified publication depend only on mandatory jobs.**
+- [x] **Step 2: Make verified publication depend only on mandatory jobs.**
 
 ```yaml
 needs: [quality, build-images]
 ```
 
-- [ ] **Step 3: Run checks, commit, and push.**
+- [x] **Step 3: Run checks, commit, and push.**
 
 ```bash
 bash -n scripts/test-release-workflow.sh
@@ -807,6 +898,11 @@ git push origin sprints
 
 ### Task 26: Apply Backend Formatting Gate
 
+> Approved formatter-only extension: Ruff selected 11 app/test files plus
+> `migrations/versions/20260901_0012_race_intelligence.py`. Only these 12 paths
+> were formatted/staged; all ASTs matched their parent ignoring attributes.
+> Combined app/tests/migrations lint and format passed at `7f7513e`.
+
 **Files:**
 - Modify: files selected by `ruff format app tests`.
 
@@ -814,7 +910,7 @@ git push origin sprints
 - Consumes: current Python source and tests.
 - Produces: behavior-preserving code accepted by the formatting gate.
 
-- [ ] **Step 1: Capture the current formatting failure, apply Ruff, and inspect the diff.**
+- [x] **Step 1: Capture the current formatting failure, apply Ruff, and inspect the diff.**
 
 ```bash
 cd backend
@@ -823,7 +919,7 @@ cd backend
 git diff --stat
 ```
 
-- [ ] **Step 2: Verify format, lint, and backend tests.**
+- [x] **Step 2: Verify format, lint, and backend tests.**
 
 ```bash
 ./.venv/bin/ruff format --check app tests
@@ -831,7 +927,7 @@ git diff --stat
 ./.venv/bin/pytest -q
 ```
 
-- [ ] **Step 3: Commit and push only formatter changes.**
+- [x] **Step 3: Commit and push only formatter changes.**
 
 ```bash
 cd ..
@@ -842,6 +938,15 @@ git push origin sprints
 
 ### Task 27: Verify the Foundation Phase
 
+> Executed equivalents: pytest used the synthetic dotenv-disabled launcher and
+> all four isolated integration opt-ins (699 passed, zero skipped). Frontend
+> commands ran in an exact-commit Git export with no dotenv files (211 passed).
+> Compose used `scripts/e2e.env.example` and unique explicit project names;
+> normal-stack validation additionally used `--no-env-resolution`, never the
+> real `.env`. Alembic `heads` reported `20260912_0017` without upgrading a
+> database. Release validator and actual Settings snippets also passed.
+> Exact commands/results: [current verification record](../../italian-gp-live-room-repair-report.md#current-foundation-gate-task-27-september-12).
+
 **Files:**
 - Modify: `docs/italian-gp-live-room-repair-report.md`
 - Modify: `docs/superpowers/plans/2026-09-10-foundation-and-release-safety.md`
@@ -850,7 +955,7 @@ git push origin sprints
 - Consumes: all completed foundation changes and fresh command output.
 - Produces: exact verification evidence and a closed phase checklist.
 
-- [ ] **Step 1: Run backend and frontend quality gates.**
+- [x] **Step 1: Run backend and frontend quality gates.**
 
 ```bash
 cd backend
@@ -864,7 +969,7 @@ npm run typecheck
 npm run build
 ```
 
-- [ ] **Step 2: Verify migrations and Compose.**
+- [x] **Step 2: Verify migrations and Compose.**
 
 ```bash
 cd ../backend
@@ -873,7 +978,7 @@ cd ..
 docker compose config --quiet
 ```
 
-- [ ] **Step 3: Record exact results, stage documentation, commit, and push.**
+- [x] **Step 3: Record exact results, stage documentation, commit, and push.**
 
 ```bash
 git add docs/italian-gp-live-room-repair-report.md docs/superpowers/plans/2026-09-10-foundation-and-release-safety.md
