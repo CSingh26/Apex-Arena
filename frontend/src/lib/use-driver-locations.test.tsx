@@ -305,15 +305,13 @@ describe("useDriverLocations", () => {
     expect(requests.every(({ signal }) => signal.aborted)).toBe(true);
   });
 
-  it("bounds immutable visited windows and inactive driver series during a long replay", async () => {
-    let nextDriver = 0;
+  it("bounds immutable visited windows and per-driver series during a long replay", async () => {
     api.getSessionLocationSamples.mockImplementation((sessionKey: string, window: { since: string }) => {
-      nextDriver += 1;
-      return Promise.resolve(locations([{
-        ...sample(nextDriver),
-        driver_number: nextDriver,
+      return Promise.resolve(locations(Array.from({ length: 20 }, (_, index) => ({
+        ...sample(index + 1),
+        driver_number: index + 1,
         sample_time: new Date(Date.parse(window.since) + 1_000).toISOString(),
-      }], sessionKey));
+      })), sessionKey));
     });
     const initialClock = Date.parse("2026-09-06T13:00:01Z");
     const view = renderHook(
@@ -330,12 +328,11 @@ describe("useDriverLocations", () => {
       view.rerender({ clockIso: new Date(initialClock + step * 30_000).toISOString() });
       await waitFor(() => expect(api.getSessionLocationSamples).toHaveBeenCalledTimes(3 + step));
     }
-    await waitFor(() => expect(view.result.current.driverNumbers).toContain(33));
+    await waitFor(() => expect(view.result.current.driverNumbers).toHaveLength(20));
 
     expect(view.result.current.status).toBe("ready");
     expect(view.result.current.debug.loadedWindows).toBeLessThanOrEqual(9);
-    expect(view.result.current.debug.loadedSamples).toBeLessThanOrEqual(9);
-    expect(view.result.current.driverNumbers.length).toBeLessThanOrEqual(9);
-    expect(nextDriver).toBe(33);
+    expect(view.result.current.debug.loadedSamples).toBeLessThanOrEqual(180);
+    expect(view.result.current.driverNumbers).toHaveLength(20);
   });
 });

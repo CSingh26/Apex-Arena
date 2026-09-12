@@ -143,23 +143,52 @@ describe("appendSamples", () => {
 describe("pruneSeries", () => {
   it("keeps one fix before the cut so a car still has a position", () => {
     const series = seriesOf(sample(1, 0, 0, 0), sample(1, 10, 10, 0), sample(1, 20, 20, 0));
-    const pruned = pruneSeries(series, BASE + 15_000);
+    const pruned = pruneSeries(series, BASE + 20_000, 5_000, 0);
     const kept = pruned.get(1) ?? [];
     expect(kept.length).toBe(2);
     expect(selectLocationsAt(pruned, BASE + 12_000)[0].x).toBe(10);
   });
 
-  it("evicts drivers whose entire series is older than the retained horizon", () => {
+  it("retains a quiet driver's latest fix for stale hold-position rendering", () => {
     const series = seriesOf(
       sample(1, 0, 0, 0),
       sample(1, 10, 10, 0),
       sample(4, 190, 20, 0),
     );
 
-    const pruned = pruneSeries(series, BASE + 180_000);
+    const target = BASE + 180_000;
+    const pruned = pruneSeries(series, target, 60_000, 30_000);
+    const states = selectLocationsAt(pruned, target, { staleAfterMs: 10_000 });
+    const quiet = states.find((state) => state.driverNumber === 1);
 
-    expect([...pruned.keys()]).toEqual([4]);
-    expect(seriesSampleCount(pruned)).toBe(1);
+    expect(pruned.get(1)?.map((item) => item.x)).toEqual([10]);
+    expect(quiet?.x).toBe(10);
+    expect(quiet?.stale).toBe(true);
+  });
+
+  it("bounds both sides of every driver series across repeated large seeks", () => {
+    let series: SampleSeries = new Map();
+    for (const targetSeconds of [600, 60, 540, 120, 480, 180]) {
+      const incoming: DriverLocationSample[] = [];
+      for (let driver = 1; driver <= 20; driver += 1) {
+        for (let offset = -19; offset <= 39; offset += 2) {
+          incoming.push(sample(driver, targetSeconds + offset, targetSeconds + offset, driver));
+        }
+      }
+      const target = BASE + targetSeconds * 1_000;
+      series = pruneSeries(appendSamples(series, incoming), target, 60_000, 30_000);
+
+      expect(series.size).toBe(20);
+      for (const list of series.values()) {
+        const times = list.map((item) => Date.parse(item.sample_time));
+        expect(times.filter((time) => time < target - 60_000).length).toBeLessThanOrEqual(1);
+        expect(Math.max(...times)).toBeLessThanOrEqual(target + 30_000);
+        expect(list.length).toBeLessThanOrEqual(46);
+      }
+      const states = selectLocationsAt(series, target);
+      expect(states).toHaveLength(20);
+      expect(states.every((state) => state.interpolated)).toBe(true);
+    }
   });
 });
 

@@ -101,15 +101,33 @@ function dedupeByTime(list: DriverLocationSample[]): DriverLocationSample[] {
   return result;
 }
 
-/** Drop fixes older than `keepFromMs` so a long replay does not grow forever. */
-export function pruneSeries(series: SampleSeries, keepFromMs: number): SampleSeries {
+/**
+ * Bound each driver's fixes around the active clock. The retained interval is
+ * `[target - history, target + lookahead]`, plus at most one predecessor so
+ * selection can interpolate or hold position. A quiet driver with no fix in
+ * the interval keeps only its newest fix before the target and renders stale;
+ * samples beyond the lookahead are discarded so backward seeks cannot retain
+ * an ever-growing future tail.
+ */
+export function pruneSeries(
+  series: SampleSeries,
+  targetMs: number,
+  historyMs: number,
+  lookaheadMs: number,
+): SampleSeries {
+  const keepFromMs = targetMs - historyMs;
+  const keepUntilMs = targetMs + lookaheadMs;
   const next: SampleSeries = new Map();
   for (const [driverNumber, list] of series) {
-    const index = list.findIndex((sample) => sampleTime(sample) >= keepFromMs);
-    if (index < 0) continue;
-    // Keep one fix before the cut so a driver still has a position to hold.
-    const start = index <= 0 ? 0 : index - 1;
-    next.set(driverNumber, start === 0 ? list : list.slice(start));
+    const afterUpper = list.findIndex((sample) => sampleTime(sample) > keepUntilMs);
+    const end = afterUpper < 0 ? list.length : afterUpper;
+    if (end === 0) continue;
+    const bounded = end === list.length ? list : list.slice(0, end);
+    const firstInHorizon = bounded.findIndex((sample) => sampleTime(sample) >= keepFromMs);
+    const start = firstInHorizon < 0
+      ? bounded.length - 1
+      : Math.max(0, firstInHorizon - 1);
+    next.set(driverNumber, start === 0 ? bounded : bounded.slice(start));
   }
   return next;
 }

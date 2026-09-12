@@ -329,7 +329,12 @@ export function useDriverLocations({
         }
         if (isStale() || !loadedAny) return;
         const latestTarget = cache.clock?.target ?? targetMs;
-        cache.series = pruneSeries(cache.series, latestTarget - SERIES_RETENTION_MS);
+        cache.series = pruneSeries(
+          cache.series,
+          latestTarget,
+          SERIES_RETENTION_MS,
+          WINDOW_LOOKAHEAD_MS,
+        );
         pruneLoadedWindows(cache, latestTarget);
         const numbers = [...cache.series.keys()].sort((left, right) => left - right);
         update(sessionKey, (previous) => ({
