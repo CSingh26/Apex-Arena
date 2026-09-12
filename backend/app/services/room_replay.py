@@ -169,10 +169,16 @@ class RoomReplayCoordinator:
         if room.session_key is None:
             raise ReplayUnavailableError("No normalized session is linked to this room")
         async with self._locks.setdefault(room.id, asyncio.Lock()):
-            await self._prime_driver_profiles(room.session_key)
+            current = await self.rooms.get_playback(room.id)
+            task = self._tasks.get(room.id)
+            should_start = task is None or task.done()
+            if should_start and current.current_event_sequence > 0:
+                await self._rebuild_to_sequence(room, current.current_event_sequence)
+            else:
+                await self._prime_driver_profiles(room.session_key)
             playback = await self.rooms.update_playback(room.id, is_paused=False)
             await self.rooms.update_room_status(room.id, RoomStatus.REPLAYING)
-            if room.id not in self._tasks or self._tasks[room.id].done():
+            if should_start:
                 self._tasks[room.id] = asyncio.create_task(
                     self._run(room), name=f"room-replay:{room.slug}"
                 )

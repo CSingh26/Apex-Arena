@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 import pytest
@@ -38,7 +38,7 @@ def replay_room(*, session_key: str | None = "belgian-race-session") -> RaceRoom
 
 
 def replay_event(sequence: int, lap: int) -> NormalizedRaceEvent:
-    timestamp = datetime(2026, 7, 17, 12, 0, sequence, tzinfo=UTC)
+    timestamp = datetime(2026, 7, 17, 12, tzinfo=UTC) + timedelta(seconds=sequence)
     return NormalizedRaceEvent(
         session_key="belgian-race-session",
         source="fixture",
@@ -221,12 +221,14 @@ class FakeDiscussion:
 class FakeRaceState:
     def __init__(self) -> None:
         self.consumed: list[int] = []
+        self.consumed_replay_modes: list[bool] = []
         self.resets: list[str] = []
         self.reset_modes: list[bool] = []
         self.primed_profiles: list[list[int]] = []
 
     async def consume(self, event: NormalizedRaceEvent) -> None:
         self.consumed.append(event.sequence_number)
+        self.consumed_replay_modes.append(event.is_replay)
 
     async def reset_session(self, session_key: str, *, is_replay: bool = False) -> None:
         self.resets.append(session_key)
@@ -411,7 +413,7 @@ async def test_restart_resets_discussion_state_and_replays_from_sequence_zero() 
 @pytest.mark.asyncio
 async def test_pause_prevents_consumption_until_resume_then_completes() -> None:
     room = replay_room()
-    replay, rooms, _, discussion, _, _ = coordinator(
+    replay, rooms, _, discussion, race_state, _ = coordinator(
         room,
         [replay_event(1, 1), replay_event(2, 2)],
         interval=0.01,
@@ -430,7 +432,64 @@ async def test_pause_prevents_consumption_until_resume_then_completes() -> None:
 
     assert resumed.is_paused is False
     assert discussion.consumed == [1, 2]
+    assert race_state.resets == ["belgian-race-session"]
     await replay.close()
+
+
+@pytest.mark.asyncio
+async def test_fresh_coordinator_resume_rebuilds_persisted_cursor_as_replay() -> None:
+    room = replay_room().model_copy(update={"status": RoomStatus.PAUSED})
+    recorded = [
+        replay_event(sequence, sequence).model_copy(update={"is_replay": False})
+        for sequence in range(1, 4)
+    ]
+    replay, rooms, events, discussion, race_state, _ = coordinator(room, recorded, interval=1)
+    rooms.playback = rooms.playback.model_copy(
+        update={
+            "current_event_sequence": 2,
+            "current_message_sequence": 2,
+            "current_lap": 2,
+            "is_paused": True,
+        }
+    )
+
+    try:
+        resumed = await replay.resume(room)
+
+        assert resumed.current_event_sequence == 2
+        assert resumed.is_paused is False
+        assert race_state.resets == ["belgian-race-session"]
+        assert race_state.reset_modes == [True]
+        assert race_state.consumed == [1, 2]
+        assert race_state.consumed_replay_modes == [True, True]
+        assert discussion.consumed == [1, 2]
+        assert events.reads == [("belgian-race-session", 0, 250)]
+        assert all(event.is_replay is False for event in recorded)
+    finally:
+        await replay.close()
+
+
+@pytest.mark.asyncio
+async def test_fresh_coordinator_resume_at_zero_only_primes_profiles() -> None:
+    room = replay_room().model_copy(update={"status": RoomStatus.PAUSED})
+    replay, rooms, _, discussion, race_state, _ = coordinator(
+        room,
+        [replay_event(1, 1)],
+        interval=1,
+    )
+    rooms.playback = rooms.playback.model_copy(update={"is_paused": True})
+
+    try:
+        resumed = await replay.resume(room)
+
+        assert resumed.current_event_sequence == 0
+        assert resumed.is_paused is False
+        assert race_state.resets == []
+        assert race_state.primed_profiles == [[]]
+        assert discussion.resets == []
+        assert discussion.consumed == []
+    finally:
+        await replay.close()
 
 
 @pytest.mark.asyncio
@@ -466,6 +525,25 @@ async def test_speed_and_seek_controls_update_durable_playback_and_publish() -> 
     assert race_state.resets == ["belgian-race-session", "belgian-race-session"]
     assert race_state.reset_modes == [True, True]
     assert len(bus.states) == 3
+
+
+@pytest.mark.asyncio
+async def test_seek_rebuilds_more_than_one_bounded_event_page() -> None:
+    room = replay_room()
+    replay, _, events, discussion, race_state, _ = coordinator(
+        room,
+        [replay_event(sequence, sequence) for sequence in range(1, 252)],
+    )
+
+    playback = await replay.seek_to_sequence(room, 251)
+
+    assert playback.current_event_sequence == 251
+    assert race_state.consumed == list(range(1, 252))
+    assert discussion.consumed == list(range(1, 252))
+    assert events.reads == [
+        ("belgian-race-session", 0, 250),
+        ("belgian-race-session", 250, 250),
+    ]
 
 
 @pytest.mark.asyncio
