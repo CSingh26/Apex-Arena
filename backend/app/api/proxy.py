@@ -45,13 +45,16 @@ class ProxyContextMiddleware(BaseHTTPMiddleware):
     def __init__(self, app: object, settings: Settings) -> None:
         super().__init__(app)  # type: ignore[arg-type]
         self.settings = settings
-
-    @property
-    def _enforcing(self) -> bool:
-        return (
-            self.settings.proxy_enforcement_enabled
-            and self.settings.apex_arena_proxy_token is not None
-            and self.settings.app_env in {"staging", "production"}
+        self._enforcing = settings.proxy_enforcement_enabled and settings.app_env in {
+            "staging",
+            "production",
+        }
+        configured = settings.apex_arena_proxy_token
+        configured_value = configured.get_secret_value() if configured is not None else None
+        self._proxy_token = (
+            configured_value
+            if configured_value and configured_value == configured_value.strip()
+            else None
         )
 
     async def dispatch(
@@ -63,10 +66,15 @@ class ProxyContextMiddleware(BaseHTTPMiddleware):
         request.state.request_id = request_id
 
         if self._enforcing and request.url.path not in UNPROTECTED_PATHS:
-            configured = self.settings.apex_arena_proxy_token
-            assert configured is not None  # Narrowed by ``_enforcing``.
-            supplied = request.headers.get(PROXY_TOKEN_HEADER)
-            if supplied is None or not hmac.compare_digest(supplied, configured.get_secret_value()):
+            supplied_values = request.headers.getlist(PROXY_TOKEN_HEADER)
+            supplied = supplied_values[0] if len(supplied_values) == 1 else None
+            if (
+                self._proxy_token is None
+                or supplied is None
+                or not supplied
+                or supplied != supplied.strip()
+                or not hmac.compare_digest(supplied, self._proxy_token)
+            ):
                 # Log the correlation id only; never the supplied token value.
                 logger.warning(
                     "Rejected non-proxied request path=%s request_id=%s",

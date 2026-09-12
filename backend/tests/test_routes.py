@@ -402,6 +402,7 @@ def test_debug_config_is_hidden_in_production_without_flag(settings: Settings) -
         {
             **settings.model_dump(),
             "app_env": "production",
+            "apex_arena_proxy_token": "test-proxy-token",
             "room_diagnostics_enabled": False,
             "debug_ingestion_enabled": False,
             "openf1_live_auto_connect": False,
@@ -412,7 +413,10 @@ def test_debug_config_is_hidden_in_production_without_flag(settings: Settings) -
         }
     )
     with TestClient(create_app(hardened)) as client:
-        response = client.get("/api/v1/debug/config")
+        response = client.get(
+            "/api/v1/debug/config",
+            headers={"X-Apex-Proxy-Token": "test-proxy-token"},
+        )
 
     # The endpoint must not leak internal database/redis hostnames publicly.
     assert response.status_code == 404

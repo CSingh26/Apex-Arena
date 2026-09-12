@@ -19,6 +19,7 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
+        hide_input_in_errors=True,
     )
 
     app_name: str = "Apex Arena"
@@ -291,6 +292,22 @@ class Settings(BaseSettings):
         if self.openf1_reconnect_base_delay_ms > self.openf1_reconnect_max_delay_ms:
             raise ValueError("OpenF1 reconnect base delay cannot exceed maximum delay")
         worker_role = self.app_process_role in {"ingestor", "combined", "all"}
+        api_serving_role = self.app_process_role in {"api", "combined", "all"}
+        proxy_token = (
+            self.apex_arena_proxy_token.get_secret_value()
+            if self.apex_arena_proxy_token is not None
+            else None
+        )
+        if (
+            self.app_env in {"staging", "production"}
+            and api_serving_role
+            and self.proxy_enforcement_enabled
+            and (not proxy_token or proxy_token != proxy_token.strip())
+        ):
+            raise ValueError(
+                "APEX_ARENA_PROXY_TOKEN must be set without surrounding whitespace "
+                "when deployed API proxy enforcement is enabled"
+            )
         if self.openf1_rest_backfill_enabled and self.app_process_role == "api":
             raise ValueError("API processes cannot enable OpenF1 historical backfill")
         if self.recent_session_reconciliation_enabled and not worker_role:
@@ -463,3 +480,8 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()  # type: ignore[call-arg]
+
+
+def get_migration_settings() -> Settings:
+    """Load configuration for a non-HTTP migration process."""
+    return Settings(proxy_enforcement_enabled=False)  # type: ignore[call-arg]

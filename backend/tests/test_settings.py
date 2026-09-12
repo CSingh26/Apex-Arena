@@ -83,6 +83,7 @@ def test_production_combined_role_requires_tls_and_direct_worker_dsn(
     values.update(
         app_env="production",
         app_process_role="combined",
+        apex_arena_proxy_token="test-proxy-token",
         debug_ingestion_enabled=False,
         openf1_live_auto_connect=False,
         recent_session_reconciliation_enabled=True,
@@ -109,6 +110,7 @@ def test_api_role_cannot_enable_recent_reconciliation(settings: Settings) -> Non
     values.update(
         app_env="production",
         app_process_role="api",
+        apex_arena_proxy_token="test-proxy-token",
         recent_session_reconciliation_enabled=True,
         openf1_live_auto_connect=False,
         database_url="postgresql://u:p@pooler.neon.tech/apex?ssl=require",
@@ -125,6 +127,7 @@ def test_managed_dsn_ignores_unrelated_local_postgres_password() -> None:
     """Ambient local Compose credentials do not invalidate an external DSN."""
     managed = Settings(
         app_env="staging",
+        apex_arena_proxy_token="test-proxy-token",
         database_url="postgresql://neon_user:neon_pw@ep-example.neon.tech/apex?ssl=require",
         redis_url="rediss://default:token@example.upstash.io:6379",
         postgres_password="unrelated-local-password",
@@ -138,6 +141,7 @@ def test_managed_dsn_ignores_unrelated_local_postgres_password() -> None:
 def test_managed_direct_migration_dsn_ignores_local_postgres_password() -> None:
     managed = Settings(
         app_env="staging",
+        apex_arena_proxy_token="test-proxy-token",
         database_url="postgresql://u:pooled@pooler.example.net/apex?ssl=require",
         database_migration_url="postgresql://u:direct@direct.example.net/apex?ssl=require",
         redis_url="rediss://default:token@example.upstash.io:6379",
@@ -216,6 +220,7 @@ def test_production_api_cannot_enable_historical_backfill(settings: Settings) ->
     values.update(
         app_env="production",
         app_process_role="api",
+        apex_arena_proxy_token="test-proxy-token",
         openf1_live_auto_connect=False,
         openf1_rest_backfill_enabled=True,
         database_url="postgresql://u:p@pooler.neon.tech/apex?ssl=require",
@@ -232,6 +237,7 @@ def test_neon_libpq_parameters_are_translated_for_asyncpg() -> None:
     """Neon's copy button emits sslmode/channel_binding, which asyncpg rejects."""
     neon = Settings(
         app_env="staging",
+        apex_arena_proxy_token="test-proxy-token",
         database_url=(
             "postgresql://u:p@ep-example.neon.tech/apex?sslmode=require&channel_binding=require"
         ),
@@ -286,6 +292,7 @@ def test_direct_migration_url_is_preferred_when_configured(settings: Settings) -
 def test_upstash_tls_url_is_accepted_and_masked() -> None:
     upstash = Settings(
         app_env="staging",
+        apex_arena_proxy_token="test-proxy-token",
         database_url="postgresql://u:p@ep-example.neon.tech/apex?ssl=require",
         redis_url="rediss://default:secret-token@example.upstash.io:6379",
         postgres_password=None,
@@ -370,6 +377,7 @@ def test_combined_role_also_requires_the_direct_endpoint(settings: Settings) -> 
     values.update(
         app_env="staging",
         app_process_role="all",
+        apex_arena_proxy_token="test-proxy-token",
         openf1_live_auto_connect=True,
         database_url="postgresql://u:p@pooler.neon.tech/apex?ssl=require",
         redis_url="rediss://default:t@x.upstash.io:6379",
@@ -406,6 +414,7 @@ def test_production_rejects_api_auto_ingestion(settings: Settings) -> None:
     values.update(
         app_env="production",
         app_process_role="api",
+        apex_arena_proxy_token="test-proxy-token",
         openf1_live_auto_connect=True,
         debug_ingestion_enabled=False,
         database_url="postgresql://apex:test-password@localhost:5432/apex_arena?ssl=require",

@@ -20,6 +20,7 @@ def test_api_role_never_starts_live_ingestion(settings: Settings) -> None:
         settings,
         app_env="staging",
         app_process_role="api",
+        apex_arena_proxy_token="test-proxy-token",
         openf1_live_auto_connect=True,
     )
     with patch("app.main.AppServices.start_live_services", new_callable=AsyncMock) as start:
