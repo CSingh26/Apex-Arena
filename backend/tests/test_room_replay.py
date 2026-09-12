@@ -312,6 +312,22 @@ def coordinator(
 
 
 @pytest.mark.asyncio
+async def test_live_capture_is_reset_and_marked_replay_without_deleting_discussion() -> None:
+    room = replay_room()
+    events = [replay_event(1, 1).model_copy(update={"is_replay": False})]
+    service, rooms, _, discussion, race_state, bus = coordinator(room, events)
+    try:
+        await service.start(room)
+        await asyncio.wait_for(rooms.terminal_status.wait(), timeout=2)
+        assert race_state.resets == [room.session_key]
+        assert rooms.reset_count == 0
+        assert bus.session_events[0].is_replay is True
+        assert events[0].is_replay is False
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
 async def test_start_consumes_events_in_order_and_completes_durably() -> None:
     room = replay_room()
     replay, rooms, _, discussion, race_state, bus = coordinator(
@@ -500,8 +516,11 @@ async def test_running_replay_and_seek_are_serialized_into_one_coherent_state() 
     assert paused.is_paused is True
     assert discussion.consumed == [1, 1, 2, 3]
     assert race_state.consumed == [1, 1, 2, 3]
-    assert race_state.resets == ["belgian-race-session"]
-    assert rooms.event_message_queries == [("belgian-race-session", 3)]
+    assert race_state.resets == ["belgian-race-session", "belgian-race-session"]
+    assert rooms.event_message_queries == [
+        ("belgian-race-session", 0),
+        ("belgian-race-session", 3),
+    ]
     assert 4 not in discussion.consumed
     await replay.close()
 

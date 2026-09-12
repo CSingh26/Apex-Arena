@@ -144,6 +144,8 @@ class RoomReplayCoordinator:
                 )
                 await self._publish_status(str(room.id), {"status": "discussion_reset"})
             else:
+                current = await self.rooms.get_playback(room.id)
+                await self._rebuild_to_sequence(room, current.current_event_sequence)
                 playback = await self.rooms.update_playback(
                     room.id,
                     is_paused=False,
@@ -285,7 +287,7 @@ class RoomReplayCoordinator:
                             await self._publish(room, completed, RoomStatus.COMPLETED)
                             await self._publish_status(str(room.id), {"status": "replay_complete"})
                             return
-                        event = events[0]
+                        event = events[0].model_copy(update={"is_replay": True})
                         await self.race_state.consume(event)
                         await self.discussion.consume(event)
                         message_sequence = await self.rooms.max_message_sequence(room.id)
@@ -343,7 +345,8 @@ class RoomReplayCoordinator:
             eligible = [event for event in events if event.sequence_number <= target_sequence]
             if not eligible:
                 break
-            for event in eligible:
+            for recorded in eligible:
+                event = recorded.model_copy(update={"is_replay": True})
                 await self.race_state.consume(event)
                 await self.discussion.consume(event)
                 cursor = event.sequence_number
