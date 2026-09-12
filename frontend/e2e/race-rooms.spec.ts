@@ -4,6 +4,13 @@ import { expect, test, type APIRequestContext, type Page } from "@playwright/tes
 const API_BASE_URL = process.env.E2E_API_URL ?? "http://localhost:8764";
 const VIEWPORT_WIDTHS = [1440, 1280, 1024, 768, 390, 320] as const;
 const RACE_SCENARIO_CANDIDATE_LIMIT = 5;
+const REPLAY_OPERATOR_PASSWORD = process.env.E2E_REPLAY_OPERATOR_PASSWORD;
+
+function replayOperatorHeaders(): Record<string, string> | undefined {
+  return REPLAY_OPERATOR_PASSWORD
+    ? { "X-Apex-Replay-Password": REPLAY_OPERATOR_PASSWORD }
+    : undefined;
+}
 
 type SessionSummary = {
   session_type: string;
@@ -90,6 +97,7 @@ async function raceLikeReplayRoom(
     if (initial.room.ingestion_status !== "ready" || !initial.room.session_key) continue;
 
     const seek = await request.post(`${detailUrl}/playback`, {
+      headers: replayOperatorHeaders(),
       data: { action: "seek_to_lap", lap_number: 6 },
     });
     if (!seek.ok()) continue;
@@ -329,6 +337,8 @@ test("keeps a replay conversation compact, inspectable, and session-aware", asyn
   await weather.locator("summary").click();
   await expect(weather.locator(".weather-card__notice")).toBeVisible();
   await expect(page.getByTestId("playback-controls")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Unlock controls" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Start replay" })).toHaveCount(0);
   await expect(page.getByTestId("agent-roster").locator(".agent-profile")).toHaveCount(0);
   await page.getByTestId("agent-roster").getByRole("button", { name: /agents in this room/ }).click();
   await expect(page.getByTestId("agent-roster").locator(".agent-profile")).toHaveCount(5);
@@ -354,11 +364,15 @@ test("keeps a replay conversation compact, inspectable, and session-aware", asyn
 });
 
 test("turns a race replay into persistent Fan and Analyst intelligence", async ({ page, request }) => {
+  test.skip(!REPLAY_OPERATOR_PASSWORD, "E2E_REPLAY_OPERATOR_PASSWORD is required for replay mutations");
   const browserErrors = collectBrowserErrors(page);
   const { session } = await raceLikeReplayRoom(request);
   const seek = await request.post(
     `${API_BASE_URL}/api/v1/race-rooms/${session.room_slug}/playback`,
-    { data: { action: "seek_to_lap", lap_number: 6 } },
+    {
+      headers: replayOperatorHeaders(),
+      data: { action: "seek_to_lap", lap_number: 6 },
+    },
   );
   expect(seek.ok(), `lap seek returned HTTP ${seek.status()}`).toBeTruthy();
 

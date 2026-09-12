@@ -644,6 +644,7 @@ export type PlaybackAction =
   | { action: "seek_to_session_time"; session_time: number }
   | { action: "seek_to_sequence"; sequence: number };
 export type ReplayResponse = { room: RaceRoom; playback: RoomPlayback };
+export type ReplayOperatorVerification = { authorized: true };
 export type RoomDiagnostics = {
   room_slug: string;
   raw_event_count: number;

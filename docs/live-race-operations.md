@@ -79,11 +79,13 @@ in commands, URLs, tickets, logs, or committed files.
   `X-Internal-API-Key`. The public health endpoints do not accept or reveal
   that key.
 
-At this foundation point, Tasks 20 and 21 are still pending: production proxy
-configuration does not yet fail closed when `APEX_ARENA_PROXY_TOKEN` is absent,
-and replay mutation routes are not yet protected by the trusted-proxy
-dependency. Do not treat the current `sprints` artifact as approved for public
-production exposure.
+Production API roles now fail closed if proxy enforcement lacks
+`APEX_ARENA_PROXY_TOKEN`, or if public replay controls lack
+`ADMIN_DASHBOARD_PASSWORD`. The proxy token authenticates only the deployment
+hop. Replay start, restart, resume, pause, speed, and seek additionally require
+the operator-entered `X-Apex-Replay-Password`; public room reads and streams do
+not. The browser keeps that credential in component memory for the current room
+and clears it after a 401 or room change.
 
 ## Health interpretation
 

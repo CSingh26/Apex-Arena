@@ -19,7 +19,7 @@ import logging
 import uuid
 from collections.abc import Awaitable, Callable
 
-from fastapi import Request, Response
+from fastapi import HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.status import HTTP_403_FORBIDDEN
@@ -29,6 +29,7 @@ from app.core.settings import Settings
 logger = logging.getLogger(__name__)
 
 PROXY_TOKEN_HEADER = "X-Apex-Proxy-Token"
+REPLAY_OPERATOR_HEADER = "X-Apex-Replay-Password"
 PUBLIC_HOST_HEADER = "X-Apex-Public-Host"
 PUBLIC_PROTO_HEADER = "X-Apex-Public-Proto"
 ORIGINAL_PATH_HEADER = "X-Apex-Original-Path"
@@ -37,6 +38,41 @@ REQUEST_ID_HEADER = "X-Request-ID"
 # Container platforms probe liveness directly, without traversing the proxy, so
 # this one path stays reachable without a token. It exposes no state.
 UNPROTECTED_PATHS = frozenset({"/health/live"})
+
+
+def replay_operator_password(settings: Settings) -> str | None:
+    """Return the configured replay credential without normalizing its value."""
+    configured = settings.admin_dashboard_password
+    if configured is None:
+        return None
+    value = configured.get_secret_value()
+    return value if value.strip() else None
+
+
+def require_replay_operator(request: Request) -> None:
+    """Authorize a replay mutation independently from the public proxy hop."""
+    settings: Settings = request.app.state.services.settings
+    configured = replay_operator_password(settings)
+    if configured is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Replay operator access is not configured",
+        )
+
+    header_name = REPLAY_OPERATOR_HEADER.lower().encode("ascii")
+    supplied_values = [
+        value for name, value in request.scope["headers"] if name.lower() == header_name
+    ]
+    supplied = supplied_values[0] if len(supplied_values) == 1 else None
+    if (
+        supplied is None
+        or not supplied.strip()
+        or not hmac.compare_digest(supplied, configured.encode("utf-8"))
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid replay operator credential",
+        )
 
 
 class ProxyContextMiddleware(BaseHTTPMiddleware):

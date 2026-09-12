@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import type { NextRequest } from "next/server";
 
-import { backendPath } from "@/lib/backend-proxy";
+import { backendPath, upstreamRequestHeaders } from "@/lib/backend-proxy";
 
 export const dynamic = "force-dynamic";
 // Streaming responses (SSE) must never be buffered or collapsed by the runtime.
@@ -43,16 +43,10 @@ async function proxy(request: NextRequest, context: RouteContext): Promise<Respo
   const upstream = new URL(`${backendOrigin}${backendPath(path)}`);
   upstream.search = incoming.search;
 
-  const headers = new Headers(request.headers);
-  headers.delete("host");
-  headers.delete("content-length");
-  // Drop any inbound token and mint our own so a client cannot forge one.
-  headers.delete("x-apex-proxy-token");
-
   const backendToken = process.env.APEX_ARENA_BACKEND_PROXY_TOKEN;
-  if (backendToken) {
-    headers.set("x-apex-proxy-token", backendToken);
-  }
+  // This proves only the server-to-server hop. Replay authority is supplied
+  // explicitly by an operator and is never minted by the proxy.
+  const headers = upstreamRequestHeaders(request.headers, backendToken);
 
   // Preserve the browser-visible origin so the backend can rebuild public URLs.
   const publicHost = request.headers.get("x-apex-public-host") ?? incoming.host;

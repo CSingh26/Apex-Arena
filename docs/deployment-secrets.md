@@ -205,10 +205,11 @@ masked in `repr()` and log output — preserve that when adding code.
 | `ADMIN_DASHBOARD_PASSWORD` | A | **Yes** | `<admin-password-placeholder>` |
 | `SENTRY_DSN` | A, I | Treat as secret | `https://<key>@o000000.ingest.sentry.io/0000000` |
 
-`JWT_SECRET`, `SESSION_SECRET`, `INTERNAL_API_KEY`, and `ADMIN_DASHBOARD_PASSWORD` are all
-declared as optional (`SecretStr | None`) in `settings.py`. Set them anyway in production:
-an unset secret is a silently disabled protection, and `deploy/railway/api.toml` lists
-`INTERNAL_API_KEY` as required.
+`JWT_SECRET`, `SESSION_SECRET`, `INTERNAL_API_KEY`, and `ADMIN_DASHBOARD_PASSWORD` are
+declared as optional (`SecretStr | None`) in `settings.py`. Set them in production.
+The API refuses to start when `ENABLE_PUBLIC_REPLAYS=true` and
+`ADMIN_DASHBOARD_PASSWORD` is absent; `deploy/railway/api.toml` also lists the internal
+key and replay operator password as required.
 
 Generate each one independently:
 

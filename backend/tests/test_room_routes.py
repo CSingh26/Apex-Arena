@@ -8,6 +8,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from fastapi import HTTPException
+from fastapi.testclient import TestClient
 
 from app.api.room_routes import (
     change_playback,
@@ -20,6 +21,7 @@ from app.api.room_routes import (
     start_replay,
 )
 from app.api.room_schemas import PlaybackRequest, ReplayRequest
+from app.core.settings import Settings
 from app.domain.circuits import SessionWeather
 from app.domain.intelligence import BattleIntensity, BattleState, BattleStatus, BattleTrend
 from app.domain.models import EventOrigin, NormalizedRaceEvent, RaceEventType
@@ -38,10 +40,14 @@ from app.domain.rooms import (
     SourceAvailability,
     WeekendStatus,
 )
+from app.main import create_app
 from app.services.circuit_intelligence import CircuitIntelligenceService
 from app.services.discussion import DiscussionMetrics
 from app.services.race_state import RaceState
 from app.services.room_replay import ReplayUnavailableError
+
+REPLAY_OPERATOR_HEADER = "X-Apex-Replay-Password"
+REPLAY_OPERATOR_PASSWORD = "operator-test-password"
 
 
 def api_room(
@@ -125,6 +131,24 @@ def route_services(room: RaceRoom) -> SimpleNamespace:
             room_diagnostics_enabled=True,
         ),
     )
+
+
+def attach_route_services(app: object, settings: Settings, room: RaceRoom) -> SimpleNamespace:
+    services = route_services(room)
+    services.settings = settings
+    app.state.services = services
+    return services
+
+
+def replay_settings(
+    settings: Settings,
+    password: str | None = REPLAY_OPERATOR_PASSWORD,
+) -> Settings:
+    return Settings.model_validate({**settings.model_dump(), "admin_dashboard_password": password})
+
+
+def operator_headers(password: str = REPLAY_OPERATOR_PASSWORD) -> dict[str, str]:
+    return {REPLAY_OPERATOR_HEADER: password}
 
 
 @pytest.mark.asyncio
@@ -489,6 +513,227 @@ async def test_playback_route_maps_unavailable_seek_to_conflict() -> None:
 
     assert error.value.status_code == 409
     assert "outside" in error.value.detail
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {},
+        {REPLAY_OPERATOR_HEADER: ""},
+        {REPLAY_OPERATOR_HEADER: "wrong-password"},
+        {"X-Apex-Proxy-Token": "proxy-token-is-not-operator-access"},
+    ],
+)
+def test_replay_operator_verification_rejects_missing_blank_wrong_and_proxy_credentials(
+    settings: Settings,
+    headers: dict[str, str],
+) -> None:
+    configured = replay_settings(settings)
+    app = create_app(configured)
+
+    with TestClient(app) as client:
+        attach_route_services(app, configured, api_room())
+        response = client.post("/api/v1/race-rooms/replay-operator/verify", headers=headers)
+
+    assert response.status_code == 401
+    assert REPLAY_OPERATOR_PASSWORD not in response.text
+
+
+def test_replay_operator_verification_rejects_duplicate_headers(settings: Settings) -> None:
+    configured = replay_settings(settings)
+    app = create_app(configured)
+
+    with TestClient(app) as client:
+        attach_route_services(app, configured, api_room())
+        response = client.post(
+            "/api/v1/race-rooms/replay-operator/verify",
+            headers=[
+                (REPLAY_OPERATOR_HEADER, REPLAY_OPERATOR_PASSWORD),
+                (REPLAY_OPERATOR_HEADER, REPLAY_OPERATOR_PASSWORD),
+            ],
+        )
+
+    assert response.status_code == 401
+
+
+def test_replay_operator_verification_fails_closed_when_unconfigured(
+    settings: Settings,
+) -> None:
+    configured = replay_settings(settings, None)
+    app = create_app(configured)
+
+    with TestClient(app) as client:
+        services = attach_route_services(app, configured, api_room())
+        response = client.post(
+            "/api/v1/race-rooms/replay-operator/verify",
+            headers=operator_headers(),
+        )
+
+    assert response.status_code == 503
+    services.rooms.ensure_catalog.assert_not_awaited()
+
+
+def test_replay_operator_verification_uses_constant_time_exact_comparison(
+    settings: Settings,
+) -> None:
+    configured = replay_settings(settings)
+    app = create_app(configured)
+
+    with (
+        TestClient(app) as client,
+        pytest.MonkeyPatch.context() as monkeypatch,
+    ):
+        attach_route_services(app, configured, api_room())
+        compared: list[tuple[bytes, bytes]] = []
+
+        def compare_digest(supplied: bytes, expected: bytes) -> bool:
+            compared.append((supplied, expected))
+            return supplied == expected
+
+        monkeypatch.setattr("app.api.proxy.hmac.compare_digest", compare_digest)
+        response = client.post(
+            "/api/v1/race-rooms/replay-operator/verify",
+            headers=operator_headers(),
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {"authorized": True}
+    encoded = REPLAY_OPERATOR_PASSWORD.encode()
+    assert compared == [(encoded, encoded)]
+
+
+@pytest.mark.parametrize(
+    ("configured_password", "supplied_password", "expected_status"),
+    [
+        ("opérateur-🏎", "opérateur-🏎", 200),
+        (REPLAY_OPERATOR_PASSWORD, "mot-de-passe-🔒", 401),
+        ("mot-de-passe-🔒", REPLAY_OPERATOR_PASSWORD, 401),
+    ],
+)
+def test_replay_operator_verification_handles_non_ascii_credentials_without_server_error(
+    settings: Settings,
+    configured_password: str,
+    supplied_password: str,
+    expected_status: int,
+) -> None:
+    configured = replay_settings(settings, configured_password)
+    app = create_app(configured)
+
+    with TestClient(app) as client:
+        attach_route_services(app, configured, api_room())
+        response = client.post(
+            "/api/v1/race-rooms/replay-operator/verify",
+            headers=[
+                (REPLAY_OPERATOR_HEADER.encode("ascii"), supplied_password.encode("utf-8")),
+            ],
+        )
+
+    assert response.status_code == expected_status
+    assert configured_password not in response.text
+    assert supplied_password not in response.text
+
+
+def test_cross_origin_simple_bodyless_post_cannot_start_replay(settings: Settings) -> None:
+    configured = replay_settings(settings)
+    app = create_app(configured)
+
+    with TestClient(app) as client:
+        services = attach_route_services(app, configured, api_room())
+        response = client.post(
+            "/api/v1/race-rooms/belgian-grand-prix-race/replay",
+            headers={"Origin": "https://attacker.example"},
+        )
+
+    assert response.status_code == 401
+    assert "access-control-allow-origin" not in response.headers
+    services.rooms.ensure_catalog.assert_not_awaited()
+    services.room_replay.start.assert_not_awaited()
+
+
+def test_replay_authorization_precedes_room_lookup_and_payload_validation(
+    settings: Settings,
+) -> None:
+    configured = replay_settings(settings)
+    app = create_app(configured)
+
+    with TestClient(app) as client:
+        services = attach_route_services(app, configured, api_room())
+        missing_room = client.post("/api/v1/race-rooms/missing/replay")
+        invalid_action = client.post(
+            "/api/v1/race-rooms/belgian-grand-prix-race/playback",
+            json={"action": "not-a-real-action"},
+        )
+
+    assert missing_room.status_code == 401
+    assert invalid_action.status_code == 401
+    services.rooms.ensure_catalog.assert_not_awaited()
+    services.room_replay.start.assert_not_awaited()
+
+
+def test_valid_operator_keeps_replay_success_and_existing_error_contracts(
+    settings: Settings,
+) -> None:
+    configured = replay_settings(settings)
+    app = create_app(configured)
+
+    with TestClient(app) as client:
+        services = attach_route_services(app, configured, api_room())
+        successful = client.post(
+            "/api/v1/race-rooms/belgian-grand-prix-race/replay",
+            headers=operator_headers(),
+        )
+
+        services.room_repository.get_room.return_value = None
+        missing = client.post(
+            "/api/v1/race-rooms/missing/replay",
+            headers=operator_headers(),
+        )
+
+        services.room_repository.get_room.return_value = api_room(
+            source_availability=SourceAvailability.UNAVAILABLE,
+            mode=RoomMode.REPLAY,
+        ).model_copy(
+            update={
+                "status": RoomStatus.PENDING,
+                "session_key": None,
+                "replay_available": False,
+                "scheduled_start": datetime(2099, 7, 18, 12, tzinfo=UTC),
+            }
+        )
+        conflict = client.post(
+            "/api/v1/race-rooms/belgian-grand-prix-race/replay",
+            headers=operator_headers(),
+        )
+        invalid = client.post(
+            "/api/v1/race-rooms/belgian-grand-prix-race/playback",
+            headers=operator_headers(),
+            json={"action": "not-a-real-action"},
+        )
+
+    assert successful.status_code == 200
+    assert missing.status_code == 404
+    assert conflict.status_code == 409
+    assert invalid.status_code == 422
+
+
+def test_public_room_reads_do_not_require_operator_credentials(settings: Settings) -> None:
+    configured = replay_settings(settings)
+    app = create_app(configured)
+
+    with TestClient(app) as client:
+        services = attach_route_services(app, configured, api_room())
+        detail_response = client.get("/api/v1/race-rooms/belgian-grand-prix-race")
+        messages_response = client.get("/api/v1/race-rooms/belgian-grand-prix-race/messages")
+        evidence_response = client.get(
+            f"/api/v1/race-rooms/belgian-grand-prix-race/messages/{uuid4()}/evidence"
+        )
+        services.room_repository.get_room.return_value = None
+        stream_response = client.get("/api/v1/race-rooms/missing/stream")
+
+    assert detail_response.status_code == 200
+    assert messages_response.status_code == 200
+    assert evidence_response.status_code == 404
+    assert stream_response.status_code == 404
 
 
 @pytest.mark.asyncio

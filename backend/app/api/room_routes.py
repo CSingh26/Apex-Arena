@@ -10,6 +10,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
 
+from app.api.proxy import require_replay_operator
 from app.api.room_schemas import (
     EventWeekendListResponse,
     MessageEvidenceResponse,
@@ -141,6 +142,15 @@ async def list_event_weekends(
         limit=limit,
         offset=offset,
     )
+
+
+@router.post(
+    "/replay-operator/verify",
+    response_model=dict[str, bool],
+    dependencies=[Depends(require_replay_operator)],
+)
+async def verify_replay_operator() -> dict[str, bool]:
+    return {"authorized": True}
 
 
 @router.post("/sync", response_model=dict[str, int])
@@ -298,7 +308,11 @@ async def message_evidence(
     )
 
 
-@router.post("/{room_slug}/replay", response_model=ReplayResponse)
+@router.post(
+    "/{room_slug}/replay",
+    response_model=ReplayResponse,
+    dependencies=[Depends(require_replay_operator)],
+)
 async def start_replay(
     room_slug: str,
     services: Services,
@@ -324,7 +338,11 @@ async def start_replay(
     return ReplayResponse(room=refreshed or room, playback=playback)
 
 
-@router.post("/{room_slug}/playback", response_model=ReplayResponse)
+@router.post(
+    "/{room_slug}/playback",
+    response_model=ReplayResponse,
+    dependencies=[Depends(require_replay_operator)],
+)
 async def change_playback(
     room_slug: str, payload: PlaybackRequest, services: Services
 ) -> ReplayResponse:

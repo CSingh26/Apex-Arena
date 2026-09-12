@@ -403,6 +403,7 @@ def test_debug_config_is_hidden_in_production_without_flag(settings: Settings) -
             **settings.model_dump(),
             "app_env": "production",
             "apex_arena_proxy_token": "test-proxy-token",
+            "admin_dashboard_password": "test-operator-password",
             "room_diagnostics_enabled": False,
             "debug_ingestion_enabled": False,
             "openf1_live_auto_connect": False,

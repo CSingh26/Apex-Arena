@@ -12,15 +12,22 @@ type PlaybackControlsProps = {
   playback: RoomPlayback;
   busy: boolean;
   error: string | null;
+  authorized: boolean;
+  unlocking: boolean;
+  unlockError: string | null;
+  onUnlock: (password: string) => Promise<void>;
+  onLock: () => void;
   onReplay: (action: ReplayAction) => Promise<void>;
   onControl: (action: PlaybackAction) => Promise<void>;
 };
 
-export function PlaybackControls({ room, playback, busy, error, onReplay, onControl }: PlaybackControlsProps) {
+export function PlaybackControls({ room, playback, busy, error, authorized, unlocking, unlockError, onUnlock, onLock, onReplay, onControl }: PlaybackControlsProps) {
   const [lapTarget, setLapTarget] = useState(String(playback.current_lap ?? 1));
   const [sequenceTarget, setSequenceTarget] = useState(String(playback.current_event_sequence));
   const [sessionTimeTarget, setSessionTimeTarget] = useState("0");
   const [seekOpen, setSeekOpen] = useState(false);
+  const [unlockOpen, setUnlockOpen] = useState(false);
+  const [password, setPassword] = useState("");
   const normalizedSessionType = room.session_type.toUpperCase().replaceAll(" ", "_");
   const qualifying = normalizedSessionType.includes("QUALIFY") || normalizedSessionType.includes("SHOOTOUT");
   const sprintQualifying = normalizedSessionType.includes("SPRINT") || normalizedSessionType.includes("SHOOTOUT");
@@ -36,25 +43,48 @@ export function PlaybackControls({ room, playback, busy, error, onReplay, onCont
 
   const hasStarted = playback.started_at !== null || playback.current_event_sequence > 0;
   const complete = room.status === "completed";
-  return <section className="playback-bar" data-testid="playback-controls" aria-label="Replay controls" aria-busy={busy}>
-    <div className="playback-bar__primary">
+  const submitUnlock = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const supplied = password;
+    setPassword("");
+    await onUnlock(supplied);
+  };
+  const lockControls = () => {
+    setSeekOpen(false);
+    setUnlockOpen(false);
+    setPassword("");
+    onLock();
+  };
+
+  return <section className="playback-bar" data-testid="playback-controls" aria-label="Replay controls" aria-busy={busy || unlocking}>
+    {authorized ? <div className="playback-bar__primary">
       {!hasStarted && <button className="control-button control-button--primary" data-testid="start-replay" type="button" disabled={busy} onClick={() => onReplay("start")}><span aria-hidden>▶</span> Start replay</button>}
       {hasStarted && !complete && <button className="control-button control-button--primary" data-testid="toggle-playback" type="button" disabled={busy} onClick={() => onControl({ action: playback.is_paused ? "resume" : "pause" })}>{playback.is_paused ? <><span aria-hidden>▶</span> Resume</> : <><span aria-hidden>Ⅱ</span> Pause</>}</button>}
       {hasStarted && <button className="control-button" data-testid="restart-replay" type="button" disabled={busy} onClick={() => onReplay("restart")}><span aria-hidden>↺</span> Restart</button>}
       <label className="speed-control"><span>Speed</span><select aria-label="Playback speed" disabled={busy || !hasStarted} value={playback.playback_speed} onChange={(event) => onControl({ action: "set_speed", playback_speed: Number(event.target.value) as 0.5 | 1 | 2 | 4 | 8 })}>{SPEEDS.map((speed) => <option key={speed} value={speed}>{speed}×</option>)}</select></label>
       <button className="control-button control-button--quiet" type="button" aria-expanded={seekOpen} aria-controls="replay-seek-controls" disabled={!hasStarted} onClick={toggleSeek}>Seek <span aria-hidden>{seekOpen ? "▴" : "▾"}</span></button>
-    </div>
+      <button className="control-button control-button--quiet replay-lock-button" type="button" onClick={lockControls}><span aria-hidden>⌁</span> Lock controls</button>
+    </div> : <div className="playback-lock">
+      <div className="playback-lock__message"><span aria-hidden>◉</span><p><b>Viewing shared replay state</b><small>Playback is public and read-only. Operator access is required to change it.</small></p></div>
+      {!unlockOpen ? <button className="control-button" type="button" onClick={() => setUnlockOpen(true)}>Unlock controls</button> : <form className="playback-unlock" aria-label="Unlock replay controls" onSubmit={submitUnlock}>
+        <label htmlFor="replay-operator-password">Operator password</label>
+        <input id="replay-operator-password" type="password" autoComplete="current-password" required value={password} disabled={unlocking} onChange={(event) => setPassword(event.target.value)} />
+        <button className="control-button control-button--primary" type="submit" disabled={unlocking || !password}>{unlocking ? "Verifying…" : "Unlock"}</button>
+        <button className="control-button control-button--quiet" type="button" disabled={unlocking} onClick={() => { setUnlockOpen(false); setPassword(""); }}>Cancel</button>
+      </form>}
+    </div>}
     <div className="playback-progress" aria-label={qualifying ? `Replay in ${room.current_phase ?? "the qualifying session"}` : playback.current_lap == null ? "Replay progress is not available yet" : `Replay at lap ${playback.current_lap}`}>
       <span className="playback-progress__fill" style={{ width: `${qualifying ? Math.max(0, (phases.indexOf(room.current_phase ?? "") + 1) / phases.length * 100) : room.total_laps && playback.current_lap ? Math.min(100, playback.current_lap / room.total_laps * 100) : 0}%` }} />
     </div>
     <div className="playback-bar__readout" aria-live="polite">{qualifying ? <span>Phase <b>{room.current_phase ?? "Session"}</b></span> : <span>{playback.current_lap == null ? "Lap data pending" : <>Lap <b>{playback.current_lap}</b>{room.total_laps ? ` / ${room.total_laps}` : ""}</>}</span>}<span className={`playback-state playback-state--${playback.is_paused ? "paused" : "running"}`} data-testid="playback-status">{complete ? "Replay complete" : playback.is_paused ? "Paused" : "Running"}</span></div>
-    {seekOpen && <div id="replay-seek-controls" className="playback-seek">
+    {authorized && seekOpen && <div id="replay-seek-controls" className="playback-seek">
       {qualifying ? <>
         <div className="phase-seek" aria-label="Qualifying phases">{phases.map((phase) => <button className="control-button" type="button" disabled={busy || room.phase_boundaries_available === false} onClick={() => onControl({ action: "seek_to_phase", phase })} key={phase}>{phase}</button>)}</div>
         <label><span>Session time (seconds)</span><input type="number" min="0" value={sessionTimeTarget} onChange={(event) => setSessionTimeTarget(event.target.value)} /></label><button className="control-button" type="button" disabled={busy || !sessionTimeTarget} onClick={() => onControl({ action: "seek_to_session_time", session_time: Number(sessionTimeTarget) })}>Go to time</button>
       </> : <><label><span>Lap</span><input type="number" min="1" max={room.total_laps ?? undefined} value={lapTarget} onChange={(event) => setLapTarget(event.target.value)} /></label><button className="control-button" type="button" disabled={busy || !lapTarget} onClick={() => onControl({ action: "seek_to_lap", lap_number: Number(lapTarget) })}>Go to lap</button></>}
       <label><span>Event sequence</span><input type="number" min="0" value={sequenceTarget} onChange={(event) => setSequenceTarget(event.target.value)} /></label><button className="control-button" type="button" disabled={busy || !sequenceTarget} onClick={() => onControl({ action: "seek_to_sequence", sequence: Number(sequenceTarget) })}>Go to event</button>
     </div>}
+    {unlockError && <p className="control-error" role="alert">{unlockError}</p>}
     {error && <p className="control-error" role="alert">{error}</p>}
   </section>;
 }

@@ -12,7 +12,7 @@ import { LiveCommandCenter } from "@/components/race-rooms/live-command-center";
 import { MessageTimeline } from "@/components/race-rooms/message-timeline";
 import { PlaybackControls } from "@/components/race-rooms/playback-controls";
 import { RoomContext } from "@/components/race-rooms/room-context";
-import { getRaceRoom, getRoomMessages, roomStreamUrl, startRoomReplay, updateRoomPlayback } from "@/lib/api";
+import { getRaceRoom, getRoomMessages, roomStreamUrl, startRoomReplay, updateRoomPlayback, verifyReplayOperator } from "@/lib/api";
 import { appRoutes } from "@/lib/app-paths";
 import { mergeRoomMessages } from "@/lib/room-state";
 import type { MessageTopic, MessageType, PlaybackAction, RaceRoomDetailResponse, ReplayAction, RoomMessage, RoomMode, RoomPlayback, RoomStatus } from "@/lib/types";
@@ -61,6 +61,13 @@ function isFiniteInteger(value: unknown, minimum = 0): value is number {
 
 function isNullableString(value: unknown): value is string | null {
   return value === null || typeof value === "string";
+}
+
+function httpStatus(reason: unknown): number | null {
+  if (reason !== null && typeof reason === "object" && "status" in reason && typeof reason.status === "number") {
+    return reason.status;
+  }
+  return null;
 }
 
 function hasMatchingOptionalIdentity(payload: StreamRecord, roomId: string, sessionKey: string | null): boolean {
@@ -144,13 +151,29 @@ export function RoomExperience({ slug }: { slug: string }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [controlError, setControlError] = useState<string | null>(null);
-  const [controlBusy, setControlBusy] = useState(false);
+  const [controlBusySlug, setControlBusySlug] = useState<string | null>(null);
+  const [operatorSlug, setOperatorSlug] = useState<string | null>(null);
+  const [operatorUnlockingSlug, setOperatorUnlockingSlug] = useState<string | null>(null);
+  const [operatorError, setOperatorError] = useState<{ slug: string; message: string } | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
   const [streamGeneration, setStreamGeneration] = useState(0);
   const [terminalReconciliation, setTerminalReconciliation] = useState(false);
   const lastSequenceRef = useRef(0);
   const roomUpdateRef = useRef(0);
   const sessionKeyRef = useRef<string | null>(null);
+  const currentSlugRef = useRef(slug);
+  const operatorCredentialRef = useRef<{ slug: string; password: string } | null>(null);
+
+  const lockOperatorControls = useCallback(() => {
+    operatorCredentialRef.current = null;
+    setOperatorSlug(null);
+    setOperatorError(null);
+  }, []);
+
+  useEffect(() => {
+    currentSlugRef.current = slug;
+    operatorCredentialRef.current = null;
+  }, [slug]);
 
   useEffect(() => {
     sessionKeyRef.current = detail?.room.session_key ?? null;
@@ -302,20 +325,30 @@ export function RoomExperience({ slug }: { slug: string }) {
   }, [mergeMessages, roomId, slug, streamGeneration]);
 
   const runControl = useCallback(async (action: PlaybackAction) => {
-    setControlBusy(true); setControlError(null);
+    const credential = operatorCredentialRef.current;
+    if (!credential || credential.slug !== slug) return;
+    setControlBusySlug(slug); setControlError(null);
     try {
-      const response = await updateRoomPlayback(slug, action);
+      const response = await updateRoomPlayback(slug, action, credential.password);
+      if (currentSlugRef.current !== slug) return;
       setPlayback(response.playback);
       setDetail((current) => current ? { ...current, room: response.room } : current);
-    } catch {
+    } catch (reason) {
+      if (currentSlugRef.current !== slug) return;
+      if (httpStatus(reason) === 401) lockOperatorControls();
       setControlError("That replay control didn’t respond. Your current position has been preserved.");
-    } finally { setControlBusy(false); }
-  }, [slug]);
+    } finally {
+      if (currentSlugRef.current === slug) setControlBusySlug(null);
+    }
+  }, [lockOperatorControls, slug]);
 
   const runReplay = useCallback(async (action: ReplayAction) => {
-    setControlBusy(true); setControlError(null);
+    const credential = operatorCredentialRef.current;
+    if (!credential || credential.slug !== slug) return;
+    setControlBusySlug(slug); setControlError(null);
     try {
-      const response = await startRoomReplay(slug, action);
+      const response = await startRoomReplay(slug, action, credential.password);
+      if (currentSlugRef.current !== slug) return;
       if (action === "restart") {
         setMessages([]);
         setNextCursor(null);
@@ -324,9 +357,36 @@ export function RoomExperience({ slug }: { slug: string }) {
       }
       setPlayback(response.playback);
       setDetail((current) => current ? { ...current, room: response.room } : current);
-    } catch {
+    } catch (reason) {
+      if (currentSlugRef.current !== slug) return;
+      if (httpStatus(reason) === 401) lockOperatorControls();
       setControlError("The replay couldn’t start yet. Wait a moment and try again.");
-    } finally { setControlBusy(false); }
+    } finally {
+      if (currentSlugRef.current === slug) setControlBusySlug(null);
+    }
+  }, [lockOperatorControls, slug]);
+
+  const unlockOperatorControls = useCallback(async (password: string) => {
+    setOperatorUnlockingSlug(slug);
+    setOperatorError(null);
+    try {
+      await verifyReplayOperator(password);
+      if (currentSlugRef.current !== slug) return;
+      operatorCredentialRef.current = { slug, password };
+      setOperatorSlug(slug);
+    } catch (reason) {
+      if (currentSlugRef.current !== slug) return;
+      operatorCredentialRef.current = null;
+      setOperatorSlug(null);
+      setOperatorError({
+        slug,
+        message: httpStatus(reason) === 503
+          ? "Replay operator access is not configured for this deployment."
+          : "That operator password wasn’t accepted.",
+      });
+    } finally {
+      if (currentSlugRef.current === slug) setOperatorUnlockingSlug(null);
+    }
   }, [slug]);
 
   const loadMore = useCallback(async () => {
@@ -357,7 +417,7 @@ export function RoomExperience({ slug }: { slug: string }) {
     <Link className="room-breadcrumb" href={appRoutes.rooms}><span aria-hidden>←</span> All Race Rooms</Link>
     <header className="room-header"><div><div className="room-header__meta"><span>Round {room.round_number ?? "—"}</span><span>{room.session_type.replaceAll("_", " ")}</span><span className={`status status--${room.status}`}>{room.status}</span></div><h1>{room.race_name}</h1><p>{room.circuit_name} · {room.country}</p></div><CircuitOutline circuitName={room.circuit_name} eventName={room.race_name} /><div className="session-progress"><span>{progressLabel}</span><b>{progressValue}</b>{!qualifying && room.total_laps != null && <small>/ {room.total_laps}</small>}</div></header>
     {connection !== "live" && <div className={styles.connectionNotice} role="status"><span aria-hidden /> <b>{connection === "degraded" ? "Live updates are delayed" : "Reconnecting to live updates"}</b><p>The conversation already loaded remains available while the connection recovers.</p></div>}
-    <div className="sticky-playback"><PlaybackControls room={room} playback={playback} busy={controlBusy} error={controlError} onReplay={runReplay} onControl={runControl} /></div>
+    <div className="sticky-playback"><PlaybackControls key={slug} room={room} playback={playback} busy={controlBusySlug === slug} error={controlError} authorized={operatorSlug === slug} unlocking={operatorUnlockingSlug === slug} unlockError={operatorError?.slug === slug ? operatorError.message : null} onUnlock={unlockOperatorControls} onLock={lockOperatorControls} onReplay={runReplay} onControl={runControl} /></div>
     <LiveCommandCenter sessionKey={room.session_key} circuitName={room.circuit_name} eventName={room.race_name} playbackSequence={playback.current_event_sequence} sessionClock={playback.session_clock} selectedDriver={selectedDriver} onSelectDriver={setSelectedDriver} initialIntelligence={detail.intelligence} sourceAvailability={room.source_availability} locationDataMode={room.mode === "live" && room.status === "live" ? "mutable" : "immutable"} />
     {latestSignal && <aside className={styles.raceSignal} aria-label="Latest important room update"><span>{latestSignal.session_phase ?? (latestSignal.lap_number == null ? "Session update" : `Lap ${latestSignal.lap_number}`)}</span><div><b>{latestSignal.topic.replaceAll("_", " ")}</b><p>{latestSignal.content}</p></div><a href="#timeline-title">Open conversation <span aria-hidden>↓</span></a></aside>}
     <AgentRoster agents={agents} selectedAgent={selectedAgent} onSelectAgent={setSelectedAgent} />

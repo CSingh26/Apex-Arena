@@ -15,6 +15,7 @@ from pydantic import ValidationError
 from app.api.proxy import ProxyContextMiddleware
 from app.core import settings as settings_module
 from app.core.settings import Settings
+from app.main import create_app
 
 PROXY_TOKEN = "staging-proxy-token"
 
@@ -278,3 +279,35 @@ def test_proxy_token_comparison_uses_constant_time_primitive(settings: Settings)
 
     assert response.status_code == 403
     compare.assert_called_once_with(PROXY_TOKEN, PROXY_TOKEN)
+
+
+def test_production_api_refuses_public_replay_controls_without_operator_password(
+    settings: Settings,
+) -> None:
+    configured = _deployed(settings, app_env="production")
+
+    with pytest.raises(RuntimeError, match="ADMIN_DASHBOARD_PASSWORD"):
+        create_app(configured)
+
+
+def test_production_api_allows_disabled_public_replay_controls_without_operator_password(
+    settings: Settings,
+) -> None:
+    configured = _deployed(settings, app_env="production").model_copy(
+        update={"enable_public_replays": False}
+    )
+
+    create_app(configured)
+
+
+def test_local_api_and_production_ingestor_do_not_require_operator_password(
+    settings: Settings,
+) -> None:
+    create_app(settings)
+    configured = _deployed(
+        settings,
+        app_env="production",
+        app_process_role="ingestor",
+    )
+
+    create_app(configured)

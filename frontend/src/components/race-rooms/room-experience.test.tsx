@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-import { act, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { RoomExperience } from "@/components/race-rooms/room-experience";
@@ -10,6 +10,9 @@ const api = vi.hoisted(() => ({
   getRaceRoom: vi.fn(),
   getRoomMessages: vi.fn(),
   roomStreamUrl: vi.fn(() => "/stream"),
+  startRoomReplay: vi.fn(),
+  updateRoomPlayback: vi.fn(),
+  verifyReplayOperator: vi.fn(),
 }));
 
 vi.mock("@/lib/api", () => api);
@@ -103,6 +106,9 @@ describe("RoomExperience live bootstrap", () => {
     api.getRaceRoom.mockReset();
     api.getRoomMessages.mockReset().mockResolvedValue({ messages: [], next_cursor: null });
     api.roomStreamUrl.mockClear();
+    api.startRoomReplay.mockReset();
+    api.updateRoomPlayback.mockReset();
+    api.verifyReplayOperator.mockReset().mockResolvedValue({ authorized: true });
   });
 
   afterEach(() => {
@@ -416,5 +422,109 @@ describe("RoomExperience live bootstrap", () => {
     expect(signal.aborted).toBe(true);
     expect(FakeEventSource.instances.every((source) => source.closed)).toBe(true);
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("verifies in memory, sends the password only on replay mutations, and locks on 401", async () => {
+    const canary = "room-operator-canary";
+    api.getRaceRoom.mockResolvedValue(detail);
+    api.startRoomReplay.mockRejectedValue({ status: 401 });
+    const view = render(<RoomExperience slug="test-room" />);
+    await flushBootstrap();
+
+    fireEvent.click(screen.getByRole("button", { name: /unlock controls/i }));
+    fireEvent.change(screen.getByLabelText("Operator password"), { target: { value: canary } });
+    fireEvent.submit(screen.getByRole("form", { name: "Unlock replay controls" }));
+    await flushBootstrap();
+
+    expect(api.verifyReplayOperator).toHaveBeenCalledWith(canary);
+    expect(screen.queryByLabelText("Operator password")).not.toBeInTheDocument();
+    expect(document.body).not.toHaveTextContent(canary);
+    expect(window.location.href).not.toContain(canary);
+    expect(JSON.stringify({ ...window.localStorage })).not.toContain(canary);
+
+    fireEvent.click(screen.getByRole("button", { name: /start replay/i }));
+    await flushBootstrap();
+
+    expect(api.startRoomReplay).toHaveBeenCalledWith("test-room", "start", canary);
+    expect(screen.getByRole("form", { name: "Unlock replay controls" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: /start replay/i })).not.toBeInTheDocument();
+    expect(document.body).not.toHaveTextContent(canary);
+    view.unmount();
+  });
+
+  it("clears operator access when the room slug changes", async () => {
+    const canary = "session-change-canary";
+    api.getRaceRoom.mockResolvedValue(detail);
+    const view = render(<RoomExperience slug="first-room" />);
+    await flushBootstrap();
+
+    fireEvent.click(screen.getByRole("button", { name: /unlock controls/i }));
+    fireEvent.change(screen.getByLabelText("Operator password"), { target: { value: canary } });
+    fireEvent.submit(screen.getByRole("form", { name: "Unlock replay controls" }));
+    await flushBootstrap();
+    expect(screen.getByRole("button", { name: /start replay/i })).toBeVisible();
+
+    view.rerender(<RoomExperience slug="second-room" />);
+    await flushBootstrap();
+
+    expect(screen.getByRole("button", { name: /unlock controls/i })).toBeVisible();
+    expect(screen.queryByRole("button", { name: /start replay/i })).not.toBeInTheDocument();
+    expect(document.body).not.toHaveTextContent(canary);
+    view.unmount();
+  });
+
+  it("ignores a successful unlock that resolves after the room slug changes", async () => {
+    const verification = deferred<{ authorized: true }>();
+    api.getRaceRoom.mockResolvedValue(detail);
+    api.verifyReplayOperator.mockReturnValue(verification.promise);
+    const view = render(<RoomExperience slug="first-room" />);
+    await flushBootstrap();
+
+    fireEvent.click(screen.getByRole("button", { name: /unlock controls/i }));
+    fireEvent.change(screen.getByLabelText("Operator password"), { target: { value: "late-unlock-canary" } });
+    fireEvent.submit(screen.getByRole("form", { name: "Unlock replay controls" }));
+    view.rerender(<RoomExperience slug="second-room" />);
+    await flushBootstrap();
+    await act(async () => { verification.resolve({ authorized: true }); });
+
+    expect(screen.getByRole("button", { name: /unlock controls/i })).toBeVisible();
+    expect(screen.queryByRole("button", { name: /start replay/i })).not.toBeInTheDocument();
+    expect(document.body).not.toHaveTextContent("late-unlock-canary");
+    view.unmount();
+  });
+
+  it("ignores a successful replay mutation that resolves after the room slug changes", async () => {
+    const mutation = deferred<RaceRoomDetailResponse>();
+    const secondRoom = {
+      ...detail,
+      room: { ...detail.room, slug: "second-room", current_lap: 7 },
+      playback: { ...detail.playback, current_lap: 7 },
+    };
+    const staleResponse = {
+      ...detail,
+      room: { ...detail.room, slug: "first-room", status: "completed" as const, current_lap: 12 },
+      playback: { ...detail.playback, current_lap: 12 },
+    };
+    api.getRaceRoom.mockImplementation((requestedSlug: string) => (
+      Promise.resolve(requestedSlug === "second-room" ? secondRoom : detail)
+    ));
+    api.startRoomReplay.mockReturnValue(mutation.promise);
+    const view = render(<RoomExperience slug="first-room" />);
+    await flushBootstrap();
+
+    fireEvent.click(screen.getByRole("button", { name: /unlock controls/i }));
+    fireEvent.change(screen.getByLabelText("Operator password"), { target: { value: "late-mutation-canary" } });
+    fireEvent.submit(screen.getByRole("form", { name: "Unlock replay controls" }));
+    await flushBootstrap();
+    fireEvent.click(screen.getByRole("button", { name: /start replay/i }));
+    view.rerender(<RoomExperience slug="second-room" />);
+    await flushBootstrap();
+    await act(async () => { mutation.resolve(staleResponse); });
+
+    expect(screen.getByTestId("authoritative-room")).toHaveTextContent('"playbackLap":7');
+    expect(screen.getByTestId("authoritative-room")).not.toHaveTextContent('"status":"completed"');
+    expect(screen.getByRole("button", { name: /unlock controls/i })).toBeVisible();
+    expect(document.body).not.toHaveTextContent("late-mutation-canary");
+    view.unmount();
   });
 });

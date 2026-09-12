@@ -18,6 +18,7 @@ import type {
   PlaybackAction,
   ReplayAction,
   ReplayResponse,
+  ReplayOperatorVerification,
   RoomDiagnostics,
   DriverStandingsResponse,
   ConstructorStandingsResponse,
@@ -40,10 +41,20 @@ async function request<T>(path: string, signal?: AbortSignal): Promise<T> {
   return response.json() as Promise<T>;
 }
 
-async function mutate<T>(path: string, body?: object): Promise<T> {
+export class ApiError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
+
+async function mutate<T>(path: string, body?: object, operatorPassword?: string): Promise<T> {
+  const headers = new Headers({ Accept: "application/json" });
+  if (body) headers.set("Content-Type", "application/json");
+  if (operatorPassword) headers.set("X-Apex-Replay-Password", operatorPassword);
   const response = await fetch(apiPath(path), {
     method: "POST",
-    headers: { Accept: "application/json", "Content-Type": "application/json" },
+    headers,
     body: body ? JSON.stringify(body) : undefined,
   });
   if (!response.ok) throw await responseError(response);
@@ -54,9 +65,9 @@ async function responseError(response: Response): Promise<Error> {
   const fallback = `API request failed with HTTP ${response.status}`;
   try {
     const body = await response.json() as { detail?: string };
-    return new Error(body.detail || fallback);
+    return new ApiError(body.detail || fallback, response.status);
   } catch {
-    return new Error(fallback);
+    return new ApiError(fallback, response.status);
   }
 }
 
@@ -214,12 +225,16 @@ export function getMessageEvidence(slug: string, id: string): Promise<MessageEvi
   return request<MessageEvidenceResponse>(`/rooms/${encodeURIComponent(slug)}/messages/${id}/evidence`);
 }
 
-export function updateRoomPlayback(slug: string, body: PlaybackAction): Promise<ReplayResponse> {
-  return mutate(`/rooms/${encodeURIComponent(slug)}/playback`, body);
+export function updateRoomPlayback(slug: string, body: PlaybackAction, operatorPassword: string): Promise<ReplayResponse> {
+  return mutate(`/rooms/${encodeURIComponent(slug)}/playback`, body, operatorPassword);
 }
 
-export function startRoomReplay(slug: string, action: ReplayAction): Promise<ReplayResponse> {
-  return mutate(`/rooms/${encodeURIComponent(slug)}/replay`, { action });
+export function startRoomReplay(slug: string, action: ReplayAction, operatorPassword: string): Promise<ReplayResponse> {
+  return mutate(`/rooms/${encodeURIComponent(slug)}/replay`, { action }, operatorPassword);
+}
+
+export function verifyReplayOperator(operatorPassword: string): Promise<ReplayOperatorVerification> {
+  return mutate<ReplayOperatorVerification>("/rooms/replay-operator/verify", undefined, operatorPassword);
 }
 
 export function getRoomDiagnostics(slug: string, signal?: AbortSignal): Promise<RoomDiagnostics> {

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import { describe, expect, it } from "vitest";
 
-import { backendPath } from "@/lib/backend-proxy";
+import { backendPath, upstreamRequestHeaders } from "@/lib/backend-proxy";
 
 describe("public API translation", () => {
   it.each([
@@ -17,5 +17,24 @@ describe("public API translation", () => {
 
   it("encodes untrusted route segments", () => {
     expect(backendPath(["rooms", "spa race"])).toBe("/api/v1/race-rooms/spa%20race");
+  });
+
+  it("mints only the proxy token while forwarding an explicit replay credential", () => {
+    const incoming = new Headers({
+      "X-Apex-Proxy-Token": "visitor-forged-token",
+      "X-Apex-Replay-Password": "operator-canary",
+    });
+
+    const headers = upstreamRequestHeaders(incoming, "server-proxy-token");
+
+    expect(headers.get("X-Apex-Proxy-Token")).toBe("server-proxy-token");
+    expect(headers.get("X-Apex-Replay-Password")).toBe("operator-canary");
+  });
+
+  it("never auto-mints a replay credential for ordinary visitors", () => {
+    const headers = upstreamRequestHeaders(new Headers(), "server-proxy-token");
+
+    expect(headers.get("X-Apex-Proxy-Token")).toBe("server-proxy-token");
+    expect(headers.has("X-Apex-Replay-Password")).toBe(false);
   });
 });

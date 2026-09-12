@@ -934,6 +934,52 @@ summary:focus-visible {
   padding: 10px 12px;
 }
 
+.replay-lock-button { margin-left: auto; }
+
+.playback-lock {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  background: linear-gradient(90deg, rgb(81 229 212 / 7%), transparent 52%);
+}
+
+.playback-lock__message {
+  display: flex;
+  min-width: 230px;
+  flex: 1 1 320px;
+  align-items: center;
+  gap: 10px;
+}
+
+.playback-lock__message > span { color: var(--success); font-size: .72rem; }
+.playback-lock__message p { display: grid; gap: 3px; margin: 0; }
+.playback-lock__message b { color: var(--foreground); font-size: .72rem; }
+.playback-lock__message small { color: var(--muted); font-size: .66rem; line-height: 1.35; }
+
+.playback-unlock {
+  display: flex;
+  flex: 1 1 430px;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.playback-unlock label {
+  color: var(--muted);
+  font: 650 .64rem ui-monospace, monospace;
+}
+
+.playback-unlock input {
+  width: min(220px, 36vw);
+  min-height: 38px;
+  padding: 7px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: var(--panel-raised);
+  color: var(--foreground);
+}
+
 .speed-control,
 .playback-seek label {
   display: flex;
@@ -1848,6 +1894,8 @@ summary:focus-visible {
   .playback-state { width: 100%; margin-left: 0; }
   .playback-seek { display: grid; grid-template-columns: minmax(0, 1fr) auto; }
   .playback-seek label { justify-content: space-between; }
+  .playback-lock, .playback-unlock { align-items: stretch; flex-direction: column; }
+  .playback-unlock input { width: 100%; }
   .agent-roster { grid-template-columns: 1fr; }
   .timeline-heading { align-items: flex-start; flex-direction: column; }
   .filter-toggle { display: flex; width: 100%; align-items: center; justify-content: space-between; gap: 12px; padding: 13px; border: 0; border-bottom: 1px solid var(--line); background: var(--panel-soft); color: var(--foreground); cursor: pointer; font: 700 .65rem ui-monospace, monospace; text-align: left; text-transform: uppercase; }

@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.proxy import ProxyContextMiddleware
+from app.api.proxy import REPLAY_OPERATOR_HEADER, ProxyContextMiddleware, replay_operator_password
 from app.api.room_routes import router as room_router
 from app.api.routes import router
 from app.core.logging import configure_logging
@@ -17,6 +17,16 @@ from app.services.container import AppServices
 
 def create_app(settings_override: Settings | None = None) -> FastAPI:
     settings = settings_override or get_settings()
+    if (
+        settings.app_env == "production"
+        and settings.app_process_role in {"api", "combined", "all"}
+        and settings.enable_public_replays
+        and replay_operator_password(settings) is None
+    ):
+        raise RuntimeError(
+            "ADMIN_DASHBOARD_PASSWORD is required when production public replay controls "
+            "are enabled"
+        )
 
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
@@ -56,7 +66,12 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
         allow_origins=settings.cors_origins,
         allow_credentials=False,
         allow_methods=["GET", "POST"],
-        allow_headers=["Accept", "Content-Type", "X-Internal-API-Key"],
+        allow_headers=[
+            "Accept",
+            "Content-Type",
+            "X-Internal-API-Key",
+            REPLAY_OPERATOR_HEADER,
+        ],
     )
     application.include_router(router)
     application.include_router(room_router)
