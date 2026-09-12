@@ -51,9 +51,7 @@ class EventImportancePolicy:
         for key in [key for key in self._last_emitted if key[0] == session_key]:
             self._last_emitted.pop(key, None)
 
-    def classify(
-        self, event: NormalizedRaceEvent
-    ) -> tuple[EventImportance, float, bool]:
+    def classify(self, event: NormalizedRaceEvent) -> tuple[EventImportance, float, bool]:
         if event.event_origin.value == "DERIVED" and event.confidence_level is EventConfidence.LOW:
             return EventImportance.LOW, 0.2, False
         if event.event_type in CRITICAL_TYPES:

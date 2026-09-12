@@ -404,9 +404,7 @@ async def room_diagnostics(
     race_state = await services.race_state.get_state(session_key)
     coordinator = getattr(services, "race_intelligence", None)
     pending_overtakes = (
-        coordinator.overtakes.pending_for_session(session_key)
-        if coordinator is not None
-        else []
+        coordinator.overtakes.pending_for_session(session_key) if coordinator is not None else []
     )
     live = services.openf1_live.status()
     return RoomDiagnosticsResponse(

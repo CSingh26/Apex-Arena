@@ -54,9 +54,7 @@ def race_event(
     ],
 )
 def test_routine_samples_are_low_and_agent_ineligible(event_type: RaceEventType) -> None:
-    level, score, eligible = EventImportancePolicy().classify(
-        race_event(event_type)
-    )
+    level, score, eligible = EventImportancePolicy().classify(race_event(event_type))
     assert (level, score, eligible) == (EventImportance.LOW, 0.1, False)
 
 

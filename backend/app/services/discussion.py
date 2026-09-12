@@ -403,9 +403,8 @@ class DeterministicRoomGenerator:
             RaceEventType.BATTLE_INTENSIFIED,
             RaceEventType.DRS_RANGE_ENTERED,
         }:
-            opponent_number = (
-                event.secondary_driver_number
-                or (event.driver_numbers[1] if len(event.driver_numbers) > 1 else None)
+            opponent_number = event.secondary_driver_number or (
+                event.driver_numbers[1] if len(event.driver_numbers) > 1 else None
             )
             opponent = DriverIdentityResolver.public_label(evidence, opponent_number)
             interval = evidence.get("interval_seconds")
@@ -414,11 +413,7 @@ class DeterministicRoomGenerator:
             )
             battle = evidence.get("battle")
             trend = battle.get("trend") if isinstance(battle, dict) else None
-            trend_text = (
-                " and the recent interval trend is closing"
-                if trend == "CLOSING"
-                else ""
-            )
+            trend_text = " and the recent interval trend is closing" if trend == "CLOSING" else ""
             return self._message(
                 MessageType.ANALYSIS,
                 f"{driver} is in a sustained fight with {opponent}{interval_text}{trend_text}. "

@@ -54,7 +54,5 @@ class SqlBattleSummaryRepository:
             await session.execute(
                 delete(BattleSummaryRecord).where(BattleSummaryRecord.session_key == session_key)
             )
-            session.add_all(
-                [BattleSummaryRecord(**self._values(battle)) for battle in battles]
-            )
+            session.add_all([BattleSummaryRecord(**self._values(battle)) for battle in battles])
             await session.commit()

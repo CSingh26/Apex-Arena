@@ -98,9 +98,7 @@ class QualifyingEngine:
                         RaceEventType.QUALIFYING_CUTOFF_CHANGE,
                         driver=driver,
                         payload={
-                            "movement": (
-                                "INTO_DROP_ZONE" if is_drop else "OUT_OF_DROP_ZONE"
-                            ),
+                            "movement": ("INTO_DROP_ZONE" if is_drop else "OUT_OF_DROP_ZONE"),
                             "cutoff_position": cutoff,
                             "position_before": previous,
                             "position_after": position,

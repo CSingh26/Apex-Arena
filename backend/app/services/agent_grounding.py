@@ -105,8 +105,7 @@ class AgentEligibility:
                 and event.event_type in DERIVED_AGENT_TYPES
             )
         return (
-            IMPORTANCE_RANK[event.importance_level]
-            >= IMPORTANCE_RANK[EventImportance.IMPORTANT]
+            IMPORTANCE_RANK[event.importance_level] >= IMPORTANCE_RANK[EventImportance.IMPORTANT]
             and event.event_type in SOURCE_AGENT_TYPES
         )
 
@@ -319,8 +318,7 @@ class AgentEventEnvelope(BaseModel):
             (
                 battle
                 for battle in state.current_battles
-                if battle.lead_driver_number in numbers
-                or battle.chasing_driver_number in numbers
+                if battle.lead_driver_number in numbers or battle.chasing_driver_number in numbers
             ),
             None,
         )

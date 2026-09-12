@@ -98,9 +98,7 @@ def upgrade() -> None:
     )
     op.create_index("ix_battle_summaries_battle_key", "battle_summaries", ["battle_key"])
     op.create_index("ix_battle_summaries_session_key", "battle_summaries", ["session_key"])
-    op.create_index(
-        "ix_battle_summaries_lead_driver", "battle_summaries", ["lead_driver_number"]
-    )
+    op.create_index("ix_battle_summaries_lead_driver", "battle_summaries", ["lead_driver_number"])
     op.create_index(
         "ix_battle_summaries_chasing_driver", "battle_summaries", ["chasing_driver_number"]
     )

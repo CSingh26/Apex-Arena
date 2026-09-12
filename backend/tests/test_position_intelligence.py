@@ -58,8 +58,7 @@ def test_pair_swap_waits_for_coherent_order_before_confirming() -> None:
     changes = tracker.apply(position_event(16, 5, second=2, sequence=4), state)
 
     observed = [
-        (change.driver_number, change.position_before, change.position_after)
-        for change in changes
+        (change.driver_number, change.position_before, change.position_after) for change in changes
     ]
     assert observed == [
         (4, 5, 4),
@@ -85,9 +84,7 @@ def test_pit_transition_classifies_inherited_positions_without_overtake_semantic
     seed_pair(tracker, state)
 
     assert tracker.apply(position_event(4, 4, second=2, sequence=3), state) == []
-    changes = tracker.apply(
-        position_event(16, 5, second=2, sequence=4, in_pit=True), state
-    )
+    changes = tracker.apply(position_event(16, 5, second=2, sequence=4, in_pit=True), state)
 
     assert {change.cause for change in changes} == {PositionChangeCause.PIT_CYCLE}
 
@@ -112,9 +109,7 @@ def test_retirement_classifies_inherited_positions() -> None:
     seed_pair(tracker, state)
 
     assert tracker.apply(position_event(4, 4, second=2, sequence=3), state) == []
-    changes = tracker.apply(
-        position_event(16, 5, second=2, sequence=4, status="RETIRED"), state
-    )
+    changes = tracker.apply(position_event(16, 5, second=2, sequence=4, status="RETIRED"), state)
 
     assert {change.cause for change in changes} == {PositionChangeCause.RETIREMENT_INHERITANCE}
 
@@ -148,6 +143,4 @@ def test_qualifying_order_never_becomes_on_track_candidate() -> None:
 
     changes = tracker.apply(position_event(16, 5, second=2, sequence=4), state)
 
-    assert {change.cause for change in changes} == {
-        PositionChangeCause.PENALTY_OR_CLASSIFICATION
-    }
+    assert {change.cause for change in changes} == {PositionChangeCause.PENALTY_OR_CLASSIFICATION}

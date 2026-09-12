@@ -144,18 +144,14 @@ async def test_processor_failure_keeps_entire_poll_window_retryable(settings):
     with pytest.raises(RuntimeError):
         await r.service.run_once(now=START)
     failed_window = [
-        (endpoint, filters)
-        for endpoint, filters in r.client.reads
-        if endpoint != "sessions"
+        (endpoint, filters) for endpoint, filters in r.client.reads if endpoint != "sessions"
     ]
     assert failed_window
 
     r.client.reads.clear()
     await r.service.run_once(now=START)
     retry_window = [
-        (endpoint, filters)
-        for endpoint, filters in r.client.reads
-        if endpoint != "sessions"
+        (endpoint, filters) for endpoint, filters in r.client.reads if endpoint != "sessions"
     ]
 
     assert retry_window == failed_window

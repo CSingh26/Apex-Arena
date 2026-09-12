@@ -77,10 +77,13 @@ def test_q1_cutoff_updates_as_the_timing_feed_discovers_the_field() -> None:
 def test_phase_changes_emit_session_phase_event_without_overtake_semantics() -> None:
     service = QualifyingEngine()
     race = state("Q1")
-    assert service.apply(
-        event(RaceEventType.QUALIFYING_PHASE, second=0, sequence=1, session_phase="Q1"),
-        race,
-    ) == []
+    assert (
+        service.apply(
+            event(RaceEventType.QUALIFYING_PHASE, second=0, sequence=1, session_phase="Q1"),
+            race,
+        )
+        == []
+    )
 
     race.current_phase = "Q2"
     events = service.apply(

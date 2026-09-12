@@ -15,9 +15,7 @@ from app.services.session_semantics import is_qualifying_session
 TimingMode = Literal["race", "qualifying", "practice"]
 TyreCompound = Literal["SOFT", "MEDIUM", "HARD", "INTERMEDIATE", "WET", "UNKNOWN"]
 LocationSource = Literal["live", "historical", "unavailable"]
-BattleContextStatus = Literal[
-    "CLOSING", "UNDER_PRESSURE", "BATTLING", "CLEAR_AIR", "UNAVAILABLE"
-]
+BattleContextStatus = Literal["CLOSING", "UNDER_PRESSURE", "BATTLING", "CLEAR_AIR", "UNAVAILABLE"]
 
 
 class DriverBattleContext(BaseModel):
