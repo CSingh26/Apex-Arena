@@ -192,11 +192,13 @@ filters; the durable marker only moves it through the fair ordering. This
 differs from `backfill_completed_rooms`, whose repository query explicitly
 excludes `RoomStatus.LIVE` before invoking backfill.
 
-The reconciler inspects provider endpoint availability first. It binds a
-confident provider identity but leaves the room pending when drivers/timing are
-not yet usable. Automatic work excludes high-frequency `car_data` and
-`location`, resumes completed non-empty checkpoints, and retries empty or
-failed endpoints.
+The reconciler inspects provider endpoint availability first. When
+drivers/timing are not yet usable, it binds confident provider keys and returns
+the reconciliation outcome `awaiting_historical_data` without changing the
+room's status. The existing status, including `RoomStatus.LIVE`, is retained
+while ingestion remains incomplete. Automatic work excludes high-frequency
+`car_data` and `location`, resumes completed non-empty checkpoints, and retries
+empty or failed endpoints.
 
 ## Durable verification
 
