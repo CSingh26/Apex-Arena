@@ -21,9 +21,26 @@ jobs:
     runs-on: ubuntu-latest
     env:
       APP_ENV: test
-      DATABASE_URL: postgresql://apex:test-password@localhost:5432/apex_arena
-      POSTGRES_PASSWORD: test-password
+      DATABASE_URL: postgresql://apex:task24-synthetic@localhost:5432/apex_e2e_ci
+      POSTGRES_PASSWORD: task24-synthetic
       REDIS_URL: redis://localhost:6379/15
+      TEST_REPLAY_POSTGRES_URL: postgresql+asyncpg://apex:task24-synthetic@localhost:5432/apex_e2e_ci
+      TEST_INGESTION_POSTGRES_URL: postgresql+asyncpg://apex:task24-synthetic@localhost:5432/apex_e2e_ci
+      TEST_E2E_DATABASE_URL: postgresql://apex:task24-synthetic@localhost:5432/apex_e2e_ci
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: apex_e2e_ci
+          POSTGRES_USER: apex
+          POSTGRES_PASSWORD: task24-synthetic
+        ports:
+          - "5432:5432"
+        options: >-
+          --health-cmd "pg_isready -U apex -d apex_e2e_ci"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 30
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
@@ -168,6 +185,9 @@ jobs:
         working-directory: backend
         run: python -m pip install --upgrade pip && python -m pip install -e '.[dev]'
 
+      - name: Validate release workflow invariants
+        run: scripts/test-release-workflow.sh .github/workflows/release.yml
+
       - name: Validate Railway manifests
         run: |
           python - <<'PY'
@@ -196,7 +216,10 @@ jobs:
 
           # Neon's copy button emits libpq params that asyncpg cannot consume.
           neon = Settings(
+              _env_file=None,
               app_env="staging",
+              app_process_role="api",
+              apex_arena_proxy_token="apex-ci-synthetic-proxy-token",
               database_url=(
                   "postgresql://u:p@ep-x.neon.tech/apex"
                   "?sslmode=require&channel_binding=require"
@@ -226,18 +249,18 @@ jobs:
           base = dict(
               app_env="production",
               app_process_role="api",
+              apex_arena_proxy_token="apex-ci-synthetic-proxy-token",
               database_url="postgresql://u:p@h/apex?ssl=require",
               redis_url="rediss://default:t@h:6379",
               postgres_password=None,
               openf1_live_auto_connect=False,
               debug_ingestion_enabled=False,
-              development_fixture_enabled=False,
               room_diagnostics_enabled=False,
           )
 
           def rejected(match: str, **overrides: object) -> None:
               try:
-                  Settings(**{**base, **overrides})
+                  Settings(_env_file=None, **{**base, **overrides})
               except ValidationError as exc:
                   assert match in str(exc), f"expected {match!r} in {exc}"
                   return
@@ -248,7 +271,6 @@ jobs:
           rejected("must use rediss", redis_url="redis://h:6379")
           rejected("must require TLS", database_url="postgresql://u:p@h/apex")
           rejected("DEBUG_INGESTION_ENABLED", debug_ingestion_enabled=True)
-          rejected("DEVELOPMENT_FIXTURE_ENABLED", development_fixture_enabled=True)
           rejected("ROOM_DIAGNOSTICS_ENABLED", room_diagnostics_enabled=True)
           print("production guards OK")
           PY
@@ -263,8 +285,10 @@ jobs:
 
           def settings(role: str) -> Settings:
               return Settings(
+                  _env_file=None,
                   app_env="staging",
                   app_process_role=role,
+                  apex_arena_proxy_token="apex-ci-synthetic-proxy-token",
                   database_url="postgresql://u:p@pooler/apex?ssl=require",
                   # Ingesting roles require the direct endpoint for the lease.
                   database_migration_url="postgresql://u:p@direct/apex?ssl=require",
@@ -367,7 +391,7 @@ jobs:
         include:
           - component: backend
             context: backend
-            dockerfile: Dockerfile
+            dockerfile: backend/Dockerfile
             image: ghcr.io/csingh26/apex-arena-backend
             build_args: ""
           - component: frontend

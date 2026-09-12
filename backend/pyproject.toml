@@ -26,6 +26,7 @@ dependencies = [
 dev = [
   "pytest>=8.4,<9",
   "pytest-asyncio>=1.1,<2",
+  "PyYAML>=6.0,<7",
   "respx>=0.22,<1",
   "ruff>=0.12,<1",
 ]
