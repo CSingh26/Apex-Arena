@@ -31,6 +31,17 @@ function friendlyRoomError(reason: unknown): string {
   return "This room is temporarily unavailable. Try again in a moment.";
 }
 
+function streamPayload<T>(event: Event): T | null {
+  try {
+    const payload = JSON.parse((event as MessageEvent).data) as unknown;
+    return payload !== null && typeof payload === "object" && !Array.isArray(payload)
+      ? payload as T
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 function RoomLoadingState() {
   return <main id="main-content" className={`room-page track-grid ${styles.room}`}><div className={styles.roomSkeleton} role="status" aria-label="Joining the race room"><span className={styles.skeletonEyebrow} /><span className={styles.skeletonTitle} /><span className={styles.skeletonControls} /><div aria-hidden><span /><span /></div><p>Joining the race room…</p></div></main>;
 }
@@ -52,6 +63,7 @@ export function RoomExperience({ slug }: { slug: string }) {
   const [reloadKey, setReloadKey] = useState(0);
   const [streamGeneration, setStreamGeneration] = useState(0);
   const lastSequenceRef = useRef(0);
+  const roomUpdateRef = useRef(0);
 
   const mergeMessages = useCallback((incoming: RoomMessage[]) => {
     if (incoming.length) lastSequenceRef.current = Math.max(lastSequenceRef.current, ...incoming.map((message) => message.sequence));
@@ -79,6 +91,44 @@ export function RoomExperience({ slug }: { slug: string }) {
   }, [mergeMessages, reloadKey, slug]);
 
   const roomId = detail?.room.id;
+  const liveRoom = detail?.room.status === "live";
+  useEffect(() => {
+    if (!liveRoom || !roomId) return;
+    const controller = new AbortController();
+    let disposed = false;
+    let timer: number | null = null;
+    const refresh = async () => {
+      const requestRoomUpdate = roomUpdateRef.current;
+      try {
+        const latest = await getRaceRoom(slug, controller.signal);
+        if (!disposed) {
+          setDetail((current) => {
+            if (!current || current.room.id !== roomId) return current;
+            if (roomUpdateRef.current === requestRoomUpdate) return latest;
+            return {
+              ...latest,
+              room: {
+                ...latest.room,
+                status: current.room.status,
+                current_lap: current.room.current_lap,
+              },
+            };
+          });
+        }
+      } catch {
+        // Keep last known data while the shared backend ingestion reconnects.
+      } finally {
+        if (!disposed) timer = window.setTimeout(refresh, 15_000);
+      }
+    };
+    timer = window.setTimeout(refresh, 15_000);
+    return () => {
+      disposed = true;
+      controller.abort();
+      if (timer !== null) window.clearTimeout(timer);
+    };
+  }, [liveRoom, roomId, slug]);
+
   useEffect(() => {
     if (!roomId) return;
     let disposed = false;
@@ -88,28 +138,46 @@ export function RoomExperience({ slug }: { slug: string }) {
 
     const connect = () => {
       if (disposed) return;
+      retryTimer = null;
       setConnection(retryAttempt ? "reconnecting" : "connecting");
-      source = new EventSource(roomStreamUrl(slug, lastSequenceRef.current));
-      source.addEventListener("open", () => { retryAttempt = 0; setConnection("live"); });
-      source.addEventListener("room_message", (event) => {
-        const message = JSON.parse((event as MessageEvent).data) as RoomMessage;
+      const nextSource = new EventSource(roomStreamUrl(slug, lastSequenceRef.current));
+      source = nextSource;
+      const isCurrent = () => !disposed && source === nextSource;
+      nextSource.addEventListener("open", () => {
+        if (!isCurrent()) return;
+        retryAttempt = 0;
+        setConnection("live");
+      });
+      nextSource.addEventListener("room_message", (event) => {
+        if (!isCurrent()) return;
+        const message = streamPayload<RoomMessage>(event);
+        if (!message) return;
         mergeMessages([message]);
       });
-      source.addEventListener("playback_state", (event) => {
-        setPlayback(JSON.parse((event as MessageEvent).data) as RoomPlayback);
+      nextSource.addEventListener("playback_state", (event) => {
+        if (!isCurrent()) return;
+        const nextPlayback = streamPayload<RoomPlayback>(event);
+        if (nextPlayback) setPlayback(nextPlayback);
       });
-      source.addEventListener("room_status", (event) => {
-        const payload = JSON.parse((event as MessageEvent).data) as Record<string, unknown>;
+      nextSource.addEventListener("room_status", (event) => {
+        if (!isCurrent()) return;
+        const payload = streamPayload<Record<string, unknown>>(event);
+        if (!payload) return;
         const nextStatus = String(payload.status ?? "");
+        if (!ROOM_STATUSES.has(nextStatus as RoomStatus)) return;
+        roomUpdateRef.current += 1;
         setDetail((current) => current && ROOM_STATUSES.has(nextStatus as RoomStatus) ? { ...current, room: { ...current.room, status: nextStatus as RoomStatus, current_lap: typeof payload.current_lap === "number" ? payload.current_lap : current.room.current_lap } } : current);
       });
-      source.addEventListener("connection_status", (event) => {
-        const payload = JSON.parse((event as MessageEvent).data) as { status?: string };
+      nextSource.addEventListener("connection_status", (event) => {
+        if (!isCurrent()) return;
+        const payload = streamPayload<{ status?: string }>(event);
+        if (!payload) return;
         if (payload.status === "degraded") setConnection("degraded");
       });
-      source.addEventListener("error", () => {
-        source?.close();
-        if (disposed) return;
+      nextSource.addEventListener("error", () => {
+        if (!isCurrent()) return;
+        nextSource.close();
+        source = null;
         retryAttempt += 1;
         setConnection(retryAttempt > 3 ? "degraded" : "reconnecting");
         retryTimer = window.setTimeout(connect, Math.min(8000, 750 * 2 ** Math.min(retryAttempt, 4)));

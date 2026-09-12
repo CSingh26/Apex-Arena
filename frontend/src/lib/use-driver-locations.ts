@@ -36,6 +36,7 @@ const WINDOW_LOOKBEHIND_MS = 10_000;
 const WINDOW_LOOKAHEAD_MS = 30_000;
 const SERIES_RETENTION_MS = 180_000;
 const MAX_REPLAY_RATE = 16;
+const TRACK_REFRESH_MS = 10_000;
 
 type ClockAnchor = { target: number; anchorTarget: number; anchorPerf: number; rate: number };
 
@@ -118,6 +119,12 @@ export function useDriverLocations({
 }: Options): DriverLocationsResult {
   const [loadState, setLoadState] = useState<LoadState>(EMPTY_LOAD);
   const cacheRef = useRef<SessionCache>(emptyCache(null));
+  const lastTrackRefreshRef = useRef<{ sessionKey: string | null; at: number }>({ sessionKey: null, at: 0 });
+  const liveSamplesRef = useRef<{
+    sessionKey: string | null;
+    samples: readonly DriverLocationSample[] | undefined;
+  }>({ sessionKey: null, samples: undefined });
+  const trackRequestRef = useRef(0);
 
   // Stale state from a previous session is ignored rather than cleared, so no
   // render ever depends on a reset having already happened.
@@ -149,13 +156,64 @@ export function useDriverLocations({
     if (!sessionKey || !enabled) return;
     cacheFor(sessionKey);
     const controller = new AbortController();
+    let cancelled = false;
+    const request = ++trackRequestRef.current;
     getSessionTrack(sessionKey, controller.signal)
-      .then((response) => update(sessionKey, () => ({ track: response.track })))
+      .then((response) => {
+        if (cancelled) return;
+        update(sessionKey, (previous) => {
+          const staleUnavailable = request !== trackRequestRef.current && !response.track.available;
+          const wouldLoseGeometry = previous.track?.available && !response.track.available;
+          return staleUnavailable || wouldLoseGeometry ? {} : { track: response.track };
+        });
+      })
       .catch((reason: Error) => {
-        if (reason.name !== "AbortError") update(sessionKey, () => ({ status: "error" }));
+        if (!cancelled && request === trackRequestRef.current && reason.name !== "AbortError") {
+          update(sessionKey, (previous) => (
+            previous.status === "ready" ? {} : { status: "error" }
+          ));
+        }
       });
-    return () => controller.abort();
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
   }, [cacheFor, enabled, sessionKey, update]);
+
+  // A room can open before the provider has emitted enough fixes to derive a
+  // circuit trace. Refresh once fixes begin, with a bound for frequent state
+  // frames, so the map can recover without remounting the room.
+  useEffect(() => {
+    if (!sessionKey || !enabled || !liveSamples?.length) return;
+    if (current.track?.available || current.track?.path.length) return;
+    const now = Date.now();
+    const last = lastTrackRefreshRef.current;
+    if (last.sessionKey === sessionKey && now - last.at < TRACK_REFRESH_MS) return;
+    lastTrackRefreshRef.current = { sessionKey, at: now };
+    const controller = new AbortController();
+    let cancelled = false;
+    const request = ++trackRequestRef.current;
+    getSessionTrack(sessionKey, controller.signal)
+      .then((response) => {
+        if (cancelled) return;
+        update(sessionKey, (previous) => {
+          const staleUnavailable = request !== trackRequestRef.current && !response.track.available;
+          const wouldLoseGeometry = previous.track?.available && !response.track.available;
+          return staleUnavailable || wouldLoseGeometry ? {} : { track: response.track };
+        });
+      })
+      .catch((reason: Error) => {
+        if (!cancelled && request === trackRequestRef.current && reason.name !== "AbortError") {
+          update(sessionKey, (previous) => (
+            previous.status === "ready" ? {} : { status: "error" }
+          ));
+        }
+      });
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [current.track, enabled, liveSamples, sessionKey, update]);
 
   const targetMs = useMemo(() => {
     const parsed = clockIso ? Date.parse(clockIso) : Number.NaN;
@@ -221,11 +279,14 @@ export function useDriverLocations({
             controller.signal,
           );
           if (cancelled) return;
-          cache.loadedKeys.add(key);
+          // The active and lookahead windows may still be receiving provider
+          // rows. Seal only past windows; advancing live clocks will retry the
+          // rest and append newly published samples by timestamp.
+          if (index < windowIndex(targetMs)) cache.loadedKeys.add(key);
           cache.series = appendSamples(cache.series, response.locations.samples);
           loadedAny = true;
         } catch (reason) {
-          if ((reason as Error).name === "AbortError") return;
+          if (cancelled || (reason as Error).name === "AbortError") return;
           update(sessionKey, (previous) =>
             previous.status === "ready" ? {} : { status: "error" },
           );
@@ -255,7 +316,11 @@ export function useDriverLocations({
 
   // Live fixes go into the same series, so live and replay render identically.
   useEffect(() => {
-    if (!liveSamples?.length) return;
+    const previousInput = liveSamplesRef.current;
+    const belongsToPreviousSession = previousInput.sessionKey !== sessionKey
+      && previousInput.samples === liveSamples;
+    liveSamplesRef.current = { sessionKey, samples: liveSamples };
+    if (!sessionKey || !enabled || !liveSamples?.length || belongsToPreviousSession) return;
     const cache = cacheFor(sessionKey);
     cache.series = appendSamples(cache.series, liveSamples);
     const numbers = [...cache.series.keys()].sort((left, right) => left - right);
@@ -266,7 +331,7 @@ export function useDriverLocations({
       loadedSamples: seriesSampleCount(cache.series),
       status: numbers.length ? "ready" : previous.status,
     }));
-  }, [cacheFor, liveSamples, sessionKey, update]);
+  }, [cacheFor, enabled, liveSamples, sessionKey, update]);
 
   // Derived, not stored: geometry reporting zero fixes settles whether this
   // session has positions at all, without another round trip.
