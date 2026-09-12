@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 from __future__ import annotations
 
+import base64
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -148,7 +149,8 @@ def replay_settings(
 
 
 def operator_headers(password: str = REPLAY_OPERATOR_PASSWORD) -> dict[str, str]:
-    return {REPLAY_OPERATOR_HEADER: password}
+    wire_value = base64.b64encode(password.encode("utf-8")).decode("ascii")
+    return {REPLAY_OPERATOR_HEADER: wire_value}
 
 
 @pytest.mark.asyncio
@@ -520,7 +522,8 @@ async def test_playback_route_maps_unavailable_seek_to_conflict() -> None:
     [
         {},
         {REPLAY_OPERATOR_HEADER: ""},
-        {REPLAY_OPERATOR_HEADER: "wrong-password"},
+        operator_headers("wrong-password"),
+        {REPLAY_OPERATOR_HEADER: "%%%not-base64%%%"},
         {"X-Apex-Proxy-Token": "proxy-token-is-not-operator-access"},
     ],
 )
@@ -548,8 +551,8 @@ def test_replay_operator_verification_rejects_duplicate_headers(settings: Settin
         response = client.post(
             "/api/v1/race-rooms/replay-operator/verify",
             headers=[
-                (REPLAY_OPERATOR_HEADER, REPLAY_OPERATOR_PASSWORD),
-                (REPLAY_OPERATOR_HEADER, REPLAY_OPERATOR_PASSWORD),
+                (REPLAY_OPERATOR_HEADER, operator_headers()[REPLAY_OPERATOR_HEADER]),
+                (REPLAY_OPERATOR_HEADER, operator_headers()[REPLAY_OPERATOR_HEADER]),
             ],
         )
 
@@ -598,19 +601,23 @@ def test_replay_operator_verification_uses_constant_time_exact_comparison(
 
     assert response.status_code == 200
     assert response.json() == {"authorized": True}
-    encoded = REPLAY_OPERATOR_PASSWORD.encode()
+    encoded = base64.b64encode(REPLAY_OPERATOR_PASSWORD.encode("utf-8"))
     assert compared == [(encoded, encoded)]
 
 
 @pytest.mark.parametrize(
     ("configured_password", "supplied_password", "expected_status"),
     [
+        (REPLAY_OPERATOR_PASSWORD, REPLAY_OPERATOR_PASSWORD, 200),
         ("opérateur-🏎", "opérateur-🏎", 200),
+        ("🔒", "🔒", 200),
+        ("  padded operator password  ", "  padded operator password  ", 200),
+        ("  padded operator password  ", "padded operator password", 401),
         (REPLAY_OPERATOR_PASSWORD, "mot-de-passe-🔒", 401),
         ("mot-de-passe-🔒", REPLAY_OPERATOR_PASSWORD, 401),
     ],
 )
-def test_replay_operator_verification_handles_non_ascii_credentials_without_server_error(
+def test_replay_operator_verification_preserves_exact_utf8_credentials_across_headers(
     settings: Settings,
     configured_password: str,
     supplied_password: str,
@@ -623,9 +630,7 @@ def test_replay_operator_verification_handles_non_ascii_credentials_without_serv
         attach_route_services(app, configured, api_room())
         response = client.post(
             "/api/v1/race-rooms/replay-operator/verify",
-            headers=[
-                (REPLAY_OPERATOR_HEADER.encode("ascii"), supplied_password.encode("utf-8")),
-            ],
+            headers=operator_headers(supplied_password),
         )
 
     assert response.status_code == expected_status

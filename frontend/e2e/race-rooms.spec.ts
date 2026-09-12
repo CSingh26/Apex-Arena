@@ -8,7 +8,7 @@ const REPLAY_OPERATOR_PASSWORD = process.env.E2E_REPLAY_OPERATOR_PASSWORD;
 
 function replayOperatorHeaders(): Record<string, string> | undefined {
   return REPLAY_OPERATOR_PASSWORD
-    ? { "X-Apex-Replay-Password": REPLAY_OPERATOR_PASSWORD }
+    ? { "X-Apex-Replay-Password": Buffer.from(REPLAY_OPERATOR_PASSWORD, "utf-8").toString("base64") }
     : undefined;
 }
 

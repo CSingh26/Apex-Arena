@@ -48,10 +48,20 @@ export class ApiError extends Error {
   }
 }
 
+function replayOperatorWireValue(password: string): string {
+  const binary = Array.from(
+    new TextEncoder().encode(password),
+    (byte) => String.fromCharCode(byte),
+  ).join("");
+  return btoa(binary);
+}
+
 async function mutate<T>(path: string, body?: object, operatorPassword?: string): Promise<T> {
   const headers = new Headers({ Accept: "application/json" });
   if (body) headers.set("Content-Type", "application/json");
-  if (operatorPassword) headers.set("X-Apex-Replay-Password", operatorPassword);
+  if (operatorPassword) {
+    headers.set("X-Apex-Replay-Password", replayOperatorWireValue(operatorPassword));
+  }
   const response = await fetch(apiPath(path), {
     method: "POST",
     headers,

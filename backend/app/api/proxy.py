@@ -14,6 +14,7 @@ and it must be able to reject traffic that did not come through the proxy.
 
 from __future__ import annotations
 
+import base64
 import hmac
 import logging
 import uuid
@@ -64,11 +65,8 @@ def require_replay_operator(request: Request) -> None:
         value for name, value in request.scope["headers"] if name.lower() == header_name
     ]
     supplied = supplied_values[0] if len(supplied_values) == 1 else None
-    if (
-        supplied is None
-        or not supplied.strip()
-        or not hmac.compare_digest(supplied, configured.encode("utf-8"))
-    ):
+    expected = base64.b64encode(configured.encode("utf-8"))
+    if supplied is None or not supplied.strip() or not hmac.compare_digest(supplied, expected):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid replay operator credential",

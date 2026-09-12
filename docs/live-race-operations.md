@@ -84,8 +84,10 @@ Production API roles now fail closed if proxy enforcement lacks
 `ADMIN_DASHBOARD_PASSWORD`. The proxy token authenticates only the deployment
 hop. Replay start, restart, resume, pause, speed, and seek additionally require
 the operator-entered `X-Apex-Replay-Password`; public room reads and streams do
-not. The browser keeps that credential in component memory for the current room
-and clears it after a 401 or room change.
+not. The header carries canonical Base64 of the exact UTF-8 password so Unicode
+and surrounding spaces survive the HTTP header boundary; Base64 is transport
+encoding, not authorization. The browser keeps the original credential in
+component memory for the current room and clears it after a 401 or room change.
 
 ## Health interpretation
 

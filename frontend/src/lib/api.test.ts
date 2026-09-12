@@ -27,9 +27,32 @@ describe("replay operator client", () => {
     for (const [url, options] of fetchMock.mock.calls as [string, RequestInit][]) {
       expect(url).not.toContain(canary);
       expect(String(options.body ?? "")).not.toContain(canary);
-      expect(new Headers(options.headers).get("X-Apex-Replay-Password")).toBe(canary);
+      expect(new Headers(options.headers).get("X-Apex-Replay-Password")).toBe(
+        Buffer.from(canary, "utf-8").toString("base64"),
+      );
     }
     expect(fetchMock.mock.calls[0][1].body).toBeUndefined();
+  });
+
+  it.each([
+    "plain-ascii-password",
+    "opérateur-password",
+    "operator-🔒-password",
+    "  exact padded password  ",
+  ])("encodes the exact UTF-8 password into an ASCII-safe Headers value: %s", async (password) => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(
+      JSON.stringify({ authorized: true }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    ));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await verifyReplayOperator(password);
+
+    const headers = new Headers(fetchMock.mock.calls[0][1].headers);
+    const wireValue = headers.get("X-Apex-Replay-Password");
+    expect(wireValue).toBe(Buffer.from(password, "utf-8").toString("base64"));
+    expect(wireValue).toMatch(/^[A-Za-z0-9+/]+={0,2}$/);
+    expect(wireValue).not.toContain(password);
   });
 
   it("does not attach operator credentials to public reads", async () => {
@@ -49,6 +72,7 @@ describe("replay operator client", () => {
 
   it("returns an error with HTTP status without reflecting a rejected secret", async () => {
     const canary = "rejected-operator-canary";
+    const wireCanary = Buffer.from(canary, "utf-8").toString("base64");
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(
       JSON.stringify({ detail: "Invalid replay operator credential" }),
       { status: 401, headers: { "Content-Type": "application/json" } },
@@ -59,5 +83,6 @@ describe("replay operator client", () => {
       message: "Invalid replay operator credential",
     });
     await expect(verifyReplayOperator(canary)).rejects.not.toHaveProperty("message", expect.stringContaining(canary));
+    await expect(verifyReplayOperator(canary)).rejects.not.toHaveProperty("message", expect.stringContaining(wireCanary));
   });
 });

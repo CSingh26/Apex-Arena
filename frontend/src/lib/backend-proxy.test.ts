@@ -22,13 +22,13 @@ describe("public API translation", () => {
   it("mints only the proxy token while forwarding an explicit replay credential", () => {
     const incoming = new Headers({
       "X-Apex-Proxy-Token": "visitor-forged-token",
-      "X-Apex-Replay-Password": "operator-canary",
+      "X-Apex-Replay-Password": "b3BlcmF0b3ItY2FuYXJ5",
     });
 
     const headers = upstreamRequestHeaders(incoming, "server-proxy-token");
 
     expect(headers.get("X-Apex-Proxy-Token")).toBe("server-proxy-token");
-    expect(headers.get("X-Apex-Replay-Password")).toBe("operator-canary");
+    expect(headers.get("X-Apex-Replay-Password")).toBe("b3BlcmF0b3ItY2FuYXJ5");
   });
 
   it("never auto-mints a replay credential for ordinary visitors", () => {
