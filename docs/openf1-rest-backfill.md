@@ -1,127 +1,189 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-only -->
 # OpenF1 historical REST backfill
 
-Apex Arena uses OpenF1 REST to recover completed sessions when live MQTT is unavailable or when
-OpenF1 publishes data after a delay. Full-season historical recovery is explicit and resumable;
-application startup never launches a full-season backfill. Recent-session reconciliation may, when
-enabled, run a single narrow backfill for a recently completed competitive session.
+This runbook describes the implementation committed through
+`35666c0b0653701fcf9ea0f91e46f989f73dfadf` on `sprints`. It is tested as part
+of the Task 1–18 foundation artifacts and pushed to `origin/sprints`, but it is
+not a record of a production deployment.
 
-## Data flow
+Apex Arena uses OpenF1 REST to recover completed Practice 1/2/3, Sprint
+Qualifying, Sprint, Qualifying, and Race sessions. Startup never launches a
+full-season backfill. There are three separate paths:
 
-Every provider row follows the same path as live ingestion:
+- `app.cli.backfill_openf1` handles exactly one completed room or provider
+  session.
+- `app.cli.backfill_completed_rooms` handles a bounded or full set of
+  incomplete completed-room candidates, practice included.
+- recent-session reconciliation optionally selects at most the configured
+  number of recently completed rooms per pass and invokes resumable backfill.
+
+`OPENF1_REST_BACKFILL_ENABLED` is currently a configuration/status guard; it
+does not schedule either CLI. Keep it `false` for normal services and invoke
+historical work explicitly.
+
+## Data and finalization path
 
 ```text
 OpenF1 REST payload
-  -> RawEventInput
-  -> RawProviderEventService (durable deterministic deduplication)
-  -> RaceEventProcessor
-  -> OpenF1EventNormalizer
-  -> ordered normalized_race_events
-  -> race-state snapshots + Redis event publication + grounded room discussion
-  -> stored-data room finalization
+  -> RawEventInput -> durable raw provider event
+  -> canonical normalizer -> ordered normalized_race_events
+  -> persisted race state / replay source facts
+  -> room finalization from stored endpoint counts
   -> public Race Rooms API
 ```
 
-No REST response is inserted directly into replay or discussion tables. A room becomes replayable
-only when persisted session metadata, drivers, timing data, and a non-empty normalized sequence
-exist.
+The CLI disables live consumers while rebuilding history, so it does not fan
+thousands of archived rows into Redis or generate conversation synchronously.
+Historical chat generation is a separate explicit job over persisted
+normalized events.
 
-## Production settings
+A room is replayable only when the finalizer finds stored timing context and a
+non-empty normalized sequence. Results availability comes from persisted
+classification rows. Optional endpoint failures produce a `partial` result
+without deleting successful endpoint work or downgrading a better existing
+availability state.
 
-`main` is the canonical deployment source branch. The intended single-service backend role is:
+## Preconditions
 
-```dotenv
-APP_ENV=production
-APP_PROCESS_ROLE=combined
-OPENF1_LIVE_AUTO_CONNECT=false
-OPENF1_INGESTION_MODE=rest
-OPENF1_REST_BACKFILL_ENABLED=false
-OPENF1_REST_BACKFILL_SEASON=2026
-OPENF1_REST_BACKFILL_MAX_SESSIONS=1
-OPENF1_REST_MAX_CONCURRENT_REQUESTS=2
-OPENF1_REST_CURSOR_OVERLAP_SECONDS=2
-OPENF1_REST_INCLUDE_HIGH_FREQUENCY=false
-RECENT_SESSION_RECONCILIATION_ENABLED=true
-RECENT_SESSION_AUTO_BACKFILL_ENABLED=true
-RECENT_SESSION_RECONCILIATION_LOOKBACK_DAYS=14
-RECENT_SESSION_PROVIDER_GRACE_MINUTES=15
-RECENT_SESSION_RECONCILIATION_INTERVAL_SECONDS=900
-RECENT_SESSION_AUTO_BACKFILL_MAX_SESSIONS=1
-RECENT_SESSION_AUTO_BACKFILL_MAX_CONCURRENT=1
+Do not run these commands against production from the current Task 19 artifact.
+The production proxy/replay protections, restart reconciliation, release seed,
+release dependency graph, formatting gate, and full foundation verification
+remain pending in Tasks 20–27.
+
+For a later approved rollout:
+
+1. Use an ingesting execution context. Both CLIs construct
+   `APP_PROCESS_ROLE=ingestor` and therefore select the direct database DSN.
+2. Configure `DATABASE_URL`, `DATABASE_MIGRATION_URL`, and `REDIS_URL` only in
+   the secret store. Staging/production ingesting roles require the direct,
+   non-pooler `DATABASE_MIGRATION_URL`.
+3. Configure `OPENF1_USERNAME` and `OPENF1_PASSWORD` when the provider requires
+   OAuth. REST starts public, retries a 401 through OAuth, and fails safely when
+   required credentials are absent or invalid. MQTT credentials are irrelevant
+   to the CLI unless the same worker also runs MQTT.
+4. Confirm the single Alembic head is `20260911_0015` and that the target
+   database reports the same revision. Migration 0015 adds the durable recent
+   reconciliation-attempt marker used for fair candidate ordering.
+5. Take a recoverable database backup/branch and stop competing recovery work.
+
+Read-only checks:
+
+```bash
+cd backend
+./.venv/bin/alembic heads
+python -m app.cli.database_status --json-summary
+cd ..
+scripts/run-production-migrations.sh --check
 ```
 
-`OPENF1_REST_BACKFILL_ENABLED=false` is intentional: the full historical CLI is explicit and does
-not run during startup. Recent-session reconciliation is disabled by default and limited by the
-separate `RECENT_SESSION_*` settings. The API role cannot enable or execute worker duties. Keep
-both Neon URLs configured; worker roles use the direct URL for session advisory locks.
+Never paste DSNs, passwords, OAuth tokens, or internal API keys into command
+history or reports.
 
-Recent automatic recovery:
+## One-session canary
 
-- starts only in `ingestor` or `combined`;
-- never touches future or practice sessions;
-- examines completed Qualifying, Sprint Qualifying, Sprint, and Race rooms only;
-- defaults to a 14-day lookback and 15-minute provider grace period;
-- queues at most one session per pass by default;
-- excludes high-frequency `car_data` and `location`;
-- preserves endpoint checkpoints and normalized-event deduplication;
-- leaves the room `provider_pending` when provider metadata or core data is still missing.
+Run from the backend container/working directory after an approved compatible
+application and schema rollout. Substitute a real completed room slug; the
+examples use a repository-format placeholder and do not assert that provider
+data is currently published.
 
-MQTT is disabled operationally because the provider broker currently refuses both native TLS and
-WebSocket connections. OAuth and historical REST remain independent and functional. Re-enable
-MQTT only after a broker connectivity probe succeeds, then set `OPENF1_INGESTION_MODE=auto` and
-`OPENF1_LIVE_AUTO_CONNECT=true` on the single ingestor replica.
-
-## One-session rollout: Spa Qualifying or Race
-
-Run from a Railway ingestor shell after migrations reach head.
-
-Dry run (no database writes):
+Dry run (provider resolution only, no database writes):
 
 ```bash
 python -m app.cli.backfill_openf1 \
   --season 2026 \
-  --room-slug 2026-belgian-grand-prix-qualifying \
+  --room-slug 2026-example-grand-prix-qualifying \
   --dry-run \
   --json-summary
 ```
 
-Core endpoint backfill:
+Qualifying core endpoints:
 
 ```bash
 python -m app.cli.backfill_openf1 \
   --season 2026 \
-  --room-slug 2026-belgian-grand-prix-qualifying \
+  --room-slug 2026-example-grand-prix-qualifying \
   --endpoints drivers,laps,position,race_control,weather,session_result,starting_grid \
   --json-summary
 ```
 
-For a race room, use the race endpoint allowlist:
+Race/practice/sprint core endpoints:
 
 ```bash
 python -m app.cli.backfill_openf1 \
   --season 2026 \
-  --room-slug 2026-belgian-grand-prix-race \
+  --room-slug 2026-example-grand-prix-race \
   --endpoints drivers,laps,position,intervals,pit,stints,race_control,weather,session_result,starting_grid \
   --json-summary
 ```
 
-Resume a failed job without re-fetching completed endpoints:
+Resume skips only endpoints with durable non-empty completion checkpoints.
+Empty responses remain retryable:
 
 ```bash
 python -m app.cli.backfill_openf1 \
   --season 2026 \
-  --room-slug 2026-belgian-grand-prix-qualifying \
+  --room-slug 2026-example-grand-prix-qualifying \
   --resume \
   --force-retry-failed \
   --json-summary
 ```
 
-The command accepts exactly one `--room-slug` or `--session-key`; `--max-sessions` must remain `1`.
-It rejects future, unresolved, and ambiguous sessions. A second worker for the same season/session
-exits cleanly when it cannot acquire the advisory lock.
+The command requires exactly one of `--room-slug` or `--session-key` and
+requires `--max-sessions=1` (the default). It rejects round ranges, unresolved
+or ambiguous matches, and provider sessions whose `date_end` is missing or in
+the future. A worker that cannot acquire the per-season/session advisory lock
+returns `locked` without writing.
 
-## Verification
+## Completed-room batch
 
-Inspect durable progress:
+Inspect and bound the candidate set before broad recovery. The batch covers all
+seven session types, not just competitive sessions:
+
+```bash
+python -m app.cli.backfill_completed_rooms \
+  --season 2026 \
+  --max-rooms 1 \
+  --dry-run \
+  --json-summary
+```
+
+Then remove `--dry-run` for the approved canary. Use `--room-slug` to pin one
+room, `--resume` to preserve successful non-empty checkpoints,
+`--force-retry-failed` to retry failed endpoints, and `--fail-fast` when an
+operator wants the batch to stop at the first error. The default is to continue
+and return a nonzero exit code if any room remains failed or partial.
+
+The checked-in `backend/scripts/build_2026_rooms_and_chats.sh` is a broader,
+production-only orchestration: it runs migrations, reports database status,
+syncs the catalog, runs completed-room backfill, and then generates chats. Do
+not use it as the initial backfill canary.
+
+## Automatic recent recovery
+
+Automatic recovery is off by default and requires both:
+
+```dotenv
+RECENT_SESSION_RECONCILIATION_ENABLED=true
+RECENT_SESSION_AUTO_BACKFILL_ENABLED=true
+```
+
+It runs only in `ingestor` or `combined`, never selects a future/live session,
+and covers Practice 1/2/3, Sprint Qualifying, Sprint, Qualifying, and Race. The
+defaults are a 14-day lookback, 15-minute provider grace, 900-second interval,
+and one selected room per pass. Selected rooms are processed sequentially.
+`RECENT_SESSION_AUTO_BACKFILL_MAX_CONCURRENT` is declared and validated but is
+not consumed by this reconciler. Durable least-recently-attempted ordering
+prevents permanent starvation across restarts.
+
+The reconciler inspects provider endpoint availability first. It binds a
+confident provider identity but leaves the room pending when drivers/timing are
+not yet usable. Automatic work excludes high-frequency `car_data` and
+`location`, resumes completed non-empty checkpoints, and retries empty or
+failed endpoints.
+
+## Durable verification
+
+Inspect job progress without exposing `last_error_message` in routine reports:
 
 ```sql
 SELECT season, meeting_key, session_key, room_slug, status,
@@ -129,124 +191,78 @@ SELECT season, meeting_key, session_key, room_slug, status,
        rows_fetched, rows_processed, rows_inserted, rows_deduplicated,
        last_error_code, updated_at, completed_at
 FROM openf1_backfill_jobs
-WHERE room_slug = '2026-belgian-grand-prix-qualifying';
+WHERE room_slug = '2026-example-grand-prix-qualifying';
 ```
 
-Verify the public room state:
+Inspect public room facts:
 
 ```sql
-SELECT slug, meeting_key, session_key, status, mode, ingestion_status,
-       source_availability, replay_available, results_available,
-       eligibility_status, last_event_at
+SELECT slug, meeting_key, session_key, session_type, status, mode,
+       ingestion_status, source_availability, replay_available,
+       results_available, eligibility_status,
+       reconciliation_attempted_at, last_event_at
 FROM race_rooms
-WHERE slug = '2026-belgian-grand-prix-qualifying';
+WHERE slug = '2026-example-grand-prix-qualifying';
 ```
 
-Verify real normalized events:
+Verify that normalized facts exist:
 
 ```sql
 SELECT count(*) AS normalized_event_count
 FROM normalized_race_events
 WHERE session_key = (
   SELECT session_key FROM race_rooms
-  WHERE slug = '2026-belgian-grand-prix-qualifying'
+  WHERE slug = '2026-example-grand-prix-qualifying'
 );
 ```
 
-The internal `GET /api/v1/internal/openf1/backfill-status` endpoint requires
-`X-Internal-API-Key` and returns only safe state and counters.
+`GET /api/v1/internal/openf1/backfill-status` requires
+`X-Internal-API-Key` and reports only safe state, counters, role-aware provider
+status, recent-reconciliation state, lease ownership, and Redis diagnostics.
+Do not confuse an API process's local SSE client count with a cluster total.
 
-Then call the production weekends API and confirm the recovered session has a non-null room slug,
-`already_exists` or `eligible_historical`, `limited_telemetry` or `telemetry`, and
-`replay_available=true`. Future sessions must remain `future_read_only` with a null room slug.
+After a successful canary, verify the public room/session response has the
+expected slug, confident identity, availability, and replay/result flags. Run
+the same command with `--resume`; completed non-empty endpoints should be
+skipped and durable deduplication should prevent duplicate normalized events.
 
-Run the same CLI command again. Completed endpoints are skipped and cumulative deduplication/job
-counters remain stable; normalized events, messages, and evidence must not increase from duplicates.
+## Availability and high-frequency data
 
-## Availability and rollback
+- `telemetry`: at least 100 stored `car_data`/`location` facts plus replay
+  timing context.
+- `limited_telemetry`: drivers, timing, and a non-empty normalized replay
+  sequence.
+- `timing_only`: timing exists but the fuller replay threshold is incomplete.
+- `results_only`: classification data exists without replay timing.
+- `unavailable`: insufficient stored provider data; the room remains pending or
+  unavailable rather than fabricating values.
 
-- `telemetry`: meaningful high-frequency `car_data`/`location` plus replay timing context.
-- `limited_telemetry`: metadata, drivers, timing, and a non-empty normalized replay sequence.
-- `timing_only`: timing exists but the replay threshold is incomplete.
-- `results_only`: real classification/grid data without replay timing.
-- `unavailable`: insufficient stored provider data; the room remains non-openable.
-
-High-frequency endpoints are always opt-in:
+High-frequency endpoints are opt-in and require both the endpoint selection and
+the guard flag:
 
 ```bash
-python -m app.cli.backfill_openf1 ... \
+python -m app.cli.backfill_openf1 \
+  --season 2026 \
+  --room-slug 2026-example-grand-prix-race \
   --include-high-frequency \
-  --endpoints car_data,location
-```
-
-Use them for one session first and monitor Neon storage and request volume. Do not start a
-full-season batch automatically.
-
-Rollback is operational: stop the CLI, set `OPENF1_LIVE_AUTO_CONNECT=false`, leave
-`OPENF1_REST_BACKFILL_ENABLED=false`, and inspect the durable job. Resume later. Do not downgrade
-the migration or delete provider events; finalization never replaces a better availability state
-with a worse one.
-
-## Production race-room chat build
-
-Historical chat generation is now an explicit database job. The frontend reads persisted
-`room_messages` only; normal page requests do not generate conversations. This keeps production
-traffic predictable and makes every replay resumable.
-
-Railway deployment is repository-driven now. The API service uses
-`/backend/deploy/railway/api.toml`; the finite historical job uses
-`/backend/deploy/railway/chat-build.toml`. See [Railway deployment](railway-deployment.md) before
-running the production job.
-
-Recommended operator sequence:
-
-```bash
-python -m app.cli.database_status --json-summary
-python -m app.cli.build_race_rooms --season 2026 --completed-only --json-summary --force-refresh
-python -m app.cli.generate_room_chats \
-  --season 2026 \
-  --room-slug 2026-australian-grand-prix-race \
-  --completed-only \
-  --dry-run \
+  --endpoints car_data,location \
   --json-summary
 ```
 
-If the single-room dry run looks correct and the room already has normalized OpenF1 events, run it
-for real:
+Test one session and monitor provider request volume and PostgreSQL growth
+before expanding. GPS is stored through the dedicated time-indexed pipeline and
+downsampled according to `LOCATION_SAMPLE_INTERVAL_MS`; do not claim complete
+historical high-frequency telemetry unless the provider and stored counts prove
+it.
 
-```bash
-python -m app.cli.generate_room_chats \
-  --season 2026 \
-  --room-slug 2026-australian-grand-prix-race \
-  --completed-only \
-  --json-summary
-```
+## Stop and recover
 
-Only after verifying that room through the public API should the full-season script be used:
+Stop the CLI or worker, disable both recent-session settings, and set
+`LIVE_MODE_ENABLED=false` if live intake must also stop. Leave durable jobs and
+provider facts intact, inspect the last safe error category/status, and resume
+later. Do not downgrade migrations, delete events, or clear endpoint
+checkpoints as a routine rollback.
 
-```bash
-backend/scripts/build_2026_rooms_and_chats.sh
-```
-
-Safety properties:
-
-- requires `APP_ENV=production`, `DATABASE_URL`, and `DATABASE_MIGRATION_URL`;
-- refuses obvious local database URLs;
-- runs migrations before generating chats;
-- creates rooms only through the reviewed room-catalog service;
-- selects completed competitive sessions only when `--completed-only` is present;
-- generates from persisted `normalized_race_events`, not from frontend page views;
-- stores a deterministic `generation_key` per room/event/agent/version so reruns are idempotent;
-- soft-archives generated messages for the selected version when `--force-regenerate` is used,
-  preserving evidence and non-generated content.
-
-Useful status query:
-
-```sql
-SELECT slug, session_type, status, ingestion_status, replay_available,
-       chat_generation_status, generated_message_count,
-       last_generated_sequence, generation_version, generation_error
-FROM race_rooms
-WHERE season = 2026
-ORDER BY scheduled_start, session_type;
-```
+Production rollout remains pending. The historical Italian GP evidence and the
+current tested/deployed boundary are recorded in
+[`italian-gp-live-room-repair-report.md`](italian-gp-live-room-repair-report.md).
