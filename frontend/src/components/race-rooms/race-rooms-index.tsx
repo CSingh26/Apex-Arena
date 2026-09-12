@@ -55,13 +55,19 @@ function availabilityLabel(session: EventSessionSummary): string {
   if (session.data_availability === "limited_telemetry") return "Some timing data missing";
   if (session.data_availability === "timing_only") return "Timing data only";
   if (session.data_availability === "telemetry") return "Telemetry available";
+  if (session.provider_status === "PROVIDER_UNAVAILABLE") return "Live data provider unavailable";
+  if (session.provider_status === "FETCH_FAILED") return "Provider data could not be fetched";
+  if (session.provider_status === "FETCHING") return "Session data is being prepared";
+  if (session.provider_status === "NOT_YET_PUBLISHED") return "Provider data not published yet";
   if (
     session.data_availability === "unavailable" &&
     ["scheduled", "upcoming"].includes(session.status)
   ) {
     return "Race Room opens when session data becomes available";
   }
-  if (session.data_availability === "unavailable" && session.status === "completed") return "Provider data not published yet";
+  if (session.data_availability === "unavailable" && session.status === "completed") {
+    return session.provider_status ? "Session data is unavailable" : "Provider data not published yet";
+  }
   if (session.data_availability === "unavailable") return "Waiting for the live provider feed";
   if (session.status === "ingesting" || session.status === "provider_pending") return "Session data is being prepared";
   return "Schedule confirmed";
@@ -95,14 +101,16 @@ function isPublicEvent(event: RaceRoomEvent): boolean {
   return Boolean(event.event_slug);
 }
 
-function hasReplayReadySession(event: RaceRoomEvent): boolean {
-  return event.sessions.some((session) => Boolean(session.room_slug) && session.replay_available);
+function weekendTime(event: RaceRoomEvent): number {
+  const time = new Date(event.weekend_start).getTime();
+  return Number.isFinite(time) ? time : Number.POSITIVE_INFINITY;
 }
 
 function orderCategoryEvents(events: RaceRoomEvent[], status: EventWeekendStatus): RaceRoomEvent[] {
   const grouped = events.filter((event) => event.weekend_status === status);
   if (status !== "completed") return grouped;
-  return [...grouped].sort((a, b) => Number(hasReplayReadySession(b)) - Number(hasReplayReadySession(a)));
+  // Completed weekends read as a season timeline: first raced to most recent.
+  return [...grouped].sort((a, b) => weekendTime(a) - weekendTime(b) || a.round - b.round);
 }
 
 type OpenPreview = (event: RaceRoomEvent, session?: EventSessionSummary) => void;
@@ -110,16 +118,18 @@ type OpenPreview = (event: RaceRoomEvent, session?: EventSessionSummary) => void
 function SessionAction({ event, session, onPreview }: { event: RaceRoomEvent; session: EventSessionSummary; onPreview: OpenPreview }) {
   const readOnly = event.weekend_status === "upcoming" || session.eligibility === "future_read_only" || session.status === "scheduled";
   const canOpenRoom = Boolean(session.room_slug) && !readOnly;
+  const availability = availabilityLabel(session);
+  const availabilityId = `event-${event.event_id}-${session.session_type}-availability`;
   const content = <>
     <span className="event-session__identity"><b>{session.display_name}</b><small>{formatDate(session.scheduled_start, true)}</small></span>
-    <span className="event-session__state"><span className={`session-status session-status--${session.status}`}>{friendlyStatus(session.status)}</span><small>{availabilityLabel(session)}</small></span>
+    <span className="event-session__state"><span className={`session-status session-status--${session.status}`}>{friendlyStatus(session.status)}</span><small id={availabilityId}>{availability}</small></span>
     <span className="event-session__arrow" aria-hidden>{canOpenRoom ? "→" : "⌁"}</span>
   </>;
 
   if (canOpenRoom && session.room_slug) {
-    return <Link className="event-session" href={appRoutes.room(session.room_slug)} aria-label={`Open ${event.event_name} ${session.display_name}`}>{content}</Link>;
+    return <Link className="event-session" href={appRoutes.room(session.room_slug)} aria-label={`Open ${event.event_name} ${session.display_name}`} aria-describedby={availabilityId}>{content}</Link>;
   }
-  return <button className="event-session event-session--preview" type="button" onClick={() => onPreview(event, session)} aria-label={`View schedule for ${event.event_name} ${session.display_name}`}>{content}</button>;
+  return <button className="event-session event-session--preview" type="button" onClick={() => onPreview(event, session)} aria-label={`View schedule for ${event.event_name} ${session.display_name}`} aria-describedby={availabilityId}>{content}</button>;
 }
 
 function EventCard({ event, onPreview }: { event: RaceRoomEvent; onPreview: OpenPreview }) {

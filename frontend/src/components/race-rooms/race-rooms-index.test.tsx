@@ -72,7 +72,7 @@ describe("RaceRoomsIndex", () => {
     expect(screen.getByRole("status", { name: "Mapping the 2026 race grid" })).toBeVisible();
   });
 
-  it("renders three grouped categories and concise session actions", async () => {
+  it("renders three grouped categories in chronological order with concise session actions", async () => {
     render(<RaceRoomsIndex />);
     expect(document.querySelector("main")).toHaveAttribute("id", "main-content");
     expect(screen.getByRole("heading", { name: "Race Rooms" })).toBeVisible();
@@ -86,7 +86,7 @@ describe("RaceRoomsIndex", () => {
     const completed = screen.getByRole("heading", { name: "Completed Events" }).closest("section");
     expect(completed).not.toBeNull();
     const headings = within(completed as HTMLElement).getAllByRole("heading", { level: 3 });
-    expect(headings.map((heading) => heading.textContent)).toEqual(["Japanese Grand Prix", "Australian Grand Prix", "Dutch Grand Prix"]);
+    expect(headings.map((heading) => heading.textContent)).toEqual(["Australian Grand Prix", "Japanese Grand Prix", "Dutch Grand Prix"]);
     expect(within(completed as HTMLElement).getByRole("link", { name: /Open Australian Grand Prix Qualifying/ })).toHaveAttribute("href", "/rooms/australian-grand-prix-qualifying");
     expect(within(completed as HTMLElement).getByRole("img", { name: "Australian Grand Prix 2026 circuit layout" })).toBeVisible();
 
@@ -137,7 +137,11 @@ describe("RaceRoomsIndex", () => {
     const user = userEvent.setup();
     render(<RaceRoomsIndex />);
     await screen.findByRole("heading", { name: "Completed Events" });
-    await user.click(screen.getByRole("button", { name: /All events/ }));
+    const filterToggle = screen.getByRole("button", { name: /All events/ });
+    expect(filterToggle).toHaveAttribute("aria-controls", "event-filter-fields");
+    expect(filterToggle).toHaveAttribute("aria-expanded", "false");
+    await user.click(filterToggle);
+    expect(filterToggle).toHaveAttribute("aria-expanded", "true");
     await user.type(screen.getByPlaceholderText("Grand Prix, circuit or country"), "Spa");
     await user.selectOptions(screen.getByLabelText("Category"), "upcoming");
     await user.selectOptions(screen.getByLabelText("Session"), "SPRINT");
@@ -150,5 +154,128 @@ describe("RaceRoomsIndex", () => {
       expect(params.get("session_type")).toBe("SPRINT");
       expect(params.get("is_sprint_weekend")).toBe("true");
     });
+  });
+
+  it("uses provider status to distinguish unavailable data from data not published yet", async () => {
+    getRaceRoomEvents.mockResolvedValue({
+      events: [weekend({ sessions: [session({
+        room_slug: null,
+        replay_available: false,
+        results_available: false,
+        data_availability: "unavailable",
+        provider_status: "PROVIDER_UNAVAILABLE",
+      })] })],
+      total: 1,
+      limit: 100,
+      offset: 0,
+    });
+
+    render(<RaceRoomsIndex />);
+
+    expect(await screen.findByText("Live data provider unavailable")).toBeVisible();
+    expect(screen.queryByText("Provider data not published yet")).not.toBeInTheDocument();
+  });
+
+  it("does not mask a provider failure behind scheduled-session copy", async () => {
+    getRaceRoomEvents.mockResolvedValue({
+      events: [weekend({
+        weekend_status: "live",
+        sessions: [session({
+          actual_start: null,
+          status: "scheduled",
+          room_slug: null,
+          room_eligible: false,
+          eligibility: "provider_pending",
+          data_availability: "unavailable",
+          replay_available: false,
+          results_available: false,
+          provider_status: "FETCH_FAILED",
+        })],
+      })],
+      total: 1,
+      limit: 100,
+      offset: 0,
+    });
+
+    render(<RaceRoomsIndex />);
+
+    expect(await screen.findByText("Provider data could not be fetched")).toBeVisible();
+    expect(screen.getByRole("button", { name: "View schedule for Australian Grand Prix Race" }))
+      .toHaveAccessibleDescription("Provider data could not be fetched");
+    expect(screen.queryByText("Race Room opens when session data becomes available")).not.toBeInTheDocument();
+  });
+
+  it("keeps legacy completed copy when provider status is omitted and falls back safely for unknown values", async () => {
+    getRaceRoomEvents.mockResolvedValue({
+      events: [
+        weekend({
+          event_id: "legacy-2026",
+          event_slug: "legacy-grand-prix-2026",
+          event_name: "Legacy Grand Prix",
+          sessions: [session({
+            room_slug: null,
+            room_eligible: false,
+            eligibility: "provider_pending",
+            data_availability: "unavailable",
+            replay_available: false,
+            results_available: false,
+            provider_status: undefined,
+          })],
+        }),
+        weekend({
+          event_id: "future-provider-2026",
+          event_slug: "future-provider-grand-prix-2026",
+          event_name: "Future Provider Grand Prix",
+          round: 2,
+          sessions: [session({
+            room_slug: null,
+            room_eligible: false,
+            eligibility: "provider_pending",
+            data_availability: "unavailable",
+            replay_available: false,
+            results_available: false,
+            provider_status: "FUTURE_PROVIDER_STATE",
+          })],
+        }),
+      ],
+      total: 2,
+      limit: 100,
+      offset: 0,
+    });
+
+    render(<RaceRoomsIndex />);
+
+    expect(await screen.findByText("Provider data not published yet")).toBeVisible();
+    expect(screen.getByText("Session data is unavailable")).toBeVisible();
+  });
+
+  it("places completed weekends with invalid dates after the chronological timeline", async () => {
+    getRaceRoomEvents.mockResolvedValue({
+      events: [
+        weekend({
+          event_id: "invalid-date-2026",
+          event_slug: "invalid-date-grand-prix-2026",
+          event_name: "Invalid Date Grand Prix",
+          round: 2,
+          weekend_start: "not-a-date",
+        }),
+        completedLater,
+        weekend(),
+      ],
+      total: 3,
+      limit: 100,
+      offset: 0,
+    });
+
+    render(<RaceRoomsIndex />);
+
+    const completed = await screen.findByRole("heading", { name: "Completed Events" });
+    const headings = within(completed.closest("section") as HTMLElement).getAllByRole("heading", { level: 3 });
+    expect(headings.map((heading) => heading.textContent)).toEqual([
+      "Australian Grand Prix",
+      "Japanese Grand Prix",
+      "Invalid Date Grand Prix",
+    ]);
+    expect(screen.getByText("Schedule pending")).toBeVisible();
   });
 });

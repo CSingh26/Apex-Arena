@@ -178,6 +178,7 @@ export type EventSessionSummary = {
   data_availability: SourceAvailability;
   replay_available: boolean;
   results_available: boolean;
+  provider_status?: "NOT_REQUESTED" | "FETCHING" | "NOT_YET_PUBLISHED" | "PROVIDER_UNAVAILABLE" | "FETCH_FAILED" | "PARTIAL" | "AVAILABLE" | "ARCHIVED" | string;
 };
 
 export type CapabilityStatus = "available" | "partial" | "unavailable" | "unknown";

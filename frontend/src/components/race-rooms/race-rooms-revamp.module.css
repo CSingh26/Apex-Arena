@@ -155,7 +155,8 @@
   background: color-mix(in srgb, var(--apex-cyan) 7%, transparent);
 }
 
-.index :global(.weekend-countdown) {
+/* :where keeps this at class-level specificity so [data-theme="light"] .weekend-countdown in globals.css still wins. */
+.index :global(:where(.weekend-countdown)) {
   border-radius: var(--rr-radius-lg);
   background:
     radial-gradient(circle at 96% 0, rgb(255 93 120 / 20%), transparent 26rem),

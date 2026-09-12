@@ -17,6 +17,7 @@ type SessionSummary = {
 type EventWeekend = {
   event_slug: string;
   event_name: string;
+  round: number;
   weekend_start: string;
   weekend_status: "live" | "completed" | "upcoming";
   is_sprint_weekend: boolean;
@@ -25,6 +26,7 @@ type EventWeekend = {
 
 type EventResponse = { events: EventWeekend[]; total: number };
 type RoomListResponse = { total: number };
+type RoomDetailResponse = { room: { ingestion_status: string } };
 
 function collectBrowserErrors(page: Page): string[] {
   const errors: string[] = [];
@@ -61,14 +63,24 @@ async function raceLikeReplayRoom(
 ): Promise<{ event: EventWeekend; session: SessionSummary }> {
   const catalog = await eventCatalog(request);
   for (const event of catalog.events) {
+    if (event.weekend_status !== "completed") continue;
     const session = event.sessions.find((item) => (
       item.room_slug
       && item.replay_available
-      && (item.session_type === "RACE" || item.session_type === "SPRINT")
+      // This smoke test asserts pit-stop history; a Sprint can legitimately
+      // have none, so use an archived Grand Prix race.
+      && item.session_type === "RACE"
     ));
-    if (session) return { event, session };
+    if (session) {
+      const detail = await request.get(`${API_BASE_URL}/api/v1/race-rooms/${session.room_slug}`);
+      expect(detail.ok(), `room detail returned HTTP ${detail.status()}`).toBeTruthy();
+      const { room } = await detail.json() as RoomDetailResponse;
+      // This scenario asserts historical battle and pit coverage at a fixed
+      // lap. A newly completed partial live capture is tested separately.
+      if (room.ingestion_status === "ready") return { event, session };
+    }
   }
-  throw new Error("The Sprint 3 smoke test needs a completed race-like replay session");
+  throw new Error("The Sprint 3 smoke test needs a ready completed Grand Prix race replay");
 }
 
 async function expectNoHorizontalOverflow(page: Page): Promise<void> {
@@ -79,10 +91,6 @@ async function expectNoHorizontalOverflow(page: Page): Promise<void> {
 
 function expectAscending(values: number[]): void {
   expect(values).toEqual([...values].sort((left, right) => left - right));
-}
-
-function expectDescending(values: number[]): void {
-  expect(values).toEqual([...values].sort((left, right) => right - left));
 }
 
 test.describe.configure({ mode: "serial" });
@@ -120,7 +128,7 @@ test("groups real standard and Sprint weekends in chronological public categorie
   const sprint = catalog.events.find((event) => event.is_sprint_weekend);
 
   expect(catalog.events.length).toBeGreaterThan(0);
-  expectDescending(completed.map((event) => Date.parse(event.weekend_start)));
+  expect(completed.length, "the 2026 calendar should contain completed weekends").toBeGreaterThan(0);
   expectAscending(upcoming.map((event) => Date.parse(event.weekend_start)));
   expect(standard?.sessions.map((session) => session.session_type)).toEqual([
     "PRACTICE_1",
@@ -144,6 +152,11 @@ test("groups real standard and Sprint weekends in chronological public categorie
   await expect(page.getByRole("heading", { name: "Live This Weekend" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Completed Events" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Upcoming Events" })).toBeVisible();
+  const completedNames = [...completed]
+    .sort((left, right) => Date.parse(left.weekend_start) - Date.parse(right.weekend_start) || left.round - right.round)
+    .map((event) => event.event_name);
+  await expect(page.locator('section[aria-labelledby="completed-events-title"]').getByRole("heading", { level: 3 }))
+    .toHaveText(completedNames);
   if (sprint) {
     await expect(page.locator(".event-card").filter({ hasText: sprint.event_name }).getByText("Sprint weekend")).toBeVisible();
   }
