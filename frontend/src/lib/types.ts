@@ -539,7 +539,7 @@ export type SessionLocationSamplesResponse = { locations: SessionLocationSamples
 export type SessionTrackResponse = { track: SessionTrackState };
 
 export type RoomStatus = "pending" | "ingesting" | "ready" | "live" | "replaying" | "paused" | "completed" | "failed" | "unavailable";
-export type RoomMode = "live" | "replay" | "archived" | "development";
+export type RoomMode = "live" | "replay" | "archived";
 export type SourceAvailability = "telemetry" | "limited_telemetry" | "timing_only" | "results_only" | "unavailable";
 export type MessageTopic = "strategy" | "pace" | "racecraft" | "incident" | "race_control" | "weather" | "pit_stop" | "tyres" | "championship" | "summary" | "session";
 export type MessageType = "observation" | "analysis" | "question" | "reply" | "agreement" | "disagreement" | "correction" | "summary" | "uncertainty_notice";

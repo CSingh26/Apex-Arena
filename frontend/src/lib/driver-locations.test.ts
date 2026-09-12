@@ -148,6 +148,19 @@ describe("pruneSeries", () => {
     expect(kept.length).toBe(2);
     expect(selectLocationsAt(pruned, BASE + 12_000)[0].x).toBe(10);
   });
+
+  it("evicts drivers whose entire series is older than the retained horizon", () => {
+    const series = seriesOf(
+      sample(1, 0, 0, 0),
+      sample(1, 10, 10, 0),
+      sample(4, 190, 20, 0),
+    );
+
+    const pruned = pruneSeries(series, BASE + 180_000);
+
+    expect([...pruned.keys()]).toEqual([4]);
+    expect(seriesSampleCount(pruned)).toBe(1);
+  });
 });
 
 describe("statesFromLatest", () => {

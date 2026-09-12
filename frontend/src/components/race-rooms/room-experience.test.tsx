@@ -231,6 +231,8 @@ describe("RoomExperience live bootstrap", () => {
     ["empty", {}],
     ["missing event cursor", { ...detail.playback, current_event_sequence: undefined, current_lap: 9 }],
     ["non-numeric message cursor", { ...detail.playback, current_message_sequence: "NaN", current_lap: 9 }],
+    ["playback speed below the backend minimum", { ...detail.playback, playback_speed: 0.25, current_lap: 9 }],
+    ["playback speed above the backend maximum", { ...detail.playback, playback_speed: 9, current_lap: 9 }],
     ["foreign room", { ...detail.playback, room_id: "00000000-0000-0000-0000-000000000099", current_lap: 9 }],
   ])("rejects a %s playback state", async (_label, payload) => {
     api.getRaceRoom.mockResolvedValue(roomDetail("race-1"));
@@ -248,6 +250,7 @@ describe("RoomExperience live bootstrap", () => {
 
   it.each([
     ["invalid mode", { status: "completed", mode: "finished" }],
+    ["retired development mode", { status: "completed", mode: "development" }],
     ["non-numeric lap", { status: "completed", mode: "archived", current_lap: "NaN" }],
     ["foreign room", { status: "completed", mode: "archived", room_id: "00000000-0000-0000-0000-000000000099" }],
     ["foreign session", { status: "completed", mode: "archived", session_key: "race-2" }],
@@ -353,6 +356,45 @@ describe("RoomExperience live bootstrap", () => {
 
     await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
     expect(api.getRaceRoom).toHaveBeenCalledTimes(3);
+    view.unmount();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("hydrates terminal playback when polling observes completion before the stream", async () => {
+    const initial = roomDetail("race-live");
+    const terminal: RaceRoomDetailResponse = {
+      ...initial,
+      room: {
+        ...initial.room,
+        status: "completed",
+        mode: "archived",
+        source_availability: "telemetry",
+        replay_available: true,
+        results_available: true,
+      },
+      playback: {
+        ...initial.playback,
+        current_event_sequence: 321,
+        current_message_sequence: 87,
+        current_lap: 53,
+        playback_speed: 8,
+        is_paused: false,
+      },
+    };
+    api.getRaceRoom
+      .mockResolvedValueOnce(initial)
+      .mockResolvedValue(terminal);
+    const view = render(<RoomExperience slug="test-room" />);
+    await flushBootstrap();
+    expect(screen.getByTestId("authoritative-room")).toHaveTextContent('"playbackLap":0');
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(15_000); });
+
+    expect(screen.getByText("completed")).toBeVisible();
+    expect(screen.getByTestId("location-data-mode")).toHaveTextContent("immutable");
+    expect(screen.getByTestId("authoritative-room")).toHaveTextContent('"playbackLap":53');
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+    expect(api.getRaceRoom).toHaveBeenCalledTimes(2);
     view.unmount();
     expect(vi.getTimerCount()).toBe(0);
   });

@@ -21,7 +21,8 @@ import styles from "./race-rooms-revamp.module.css";
 
 type ConnectionState = "connecting" | "live" | "reconnecting" | "degraded";
 const ROOM_STATUSES = new Set<RoomStatus>(["pending", "ingesting", "ready", "live", "replaying", "paused", "completed", "failed", "unavailable"]);
-const ROOM_MODES = new Set<RoomMode>(["live", "replay", "archived", "development"]);
+const ROOM_MODES = new Set<RoomMode>(["live", "replay", "archived"]);
+const TERMINAL_ROOM_STATUSES = new Set<RoomStatus>(["completed", "failed", "unavailable"]);
 const MESSAGE_TOPICS = new Set<MessageTopic>(["strategy", "pace", "racecraft", "incident", "race_control", "weather", "pit_stop", "tyres", "championship", "summary", "session"]);
 const MESSAGE_TYPES = new Set<MessageType>(["observation", "analysis", "question", "reply", "agreement", "disagreement", "correction", "summary", "uncertainty_notice"]);
 const MESSAGE_CONFIDENCE = new Set(["low", "medium", "high"]);
@@ -104,7 +105,7 @@ function playbackPayload(event: Event, roomId: string, sessionKey: string | null
     || !isFiniteInteger(payload.current_event_sequence)
     || !isFiniteInteger(payload.current_message_sequence)
     || !(payload.current_lap === null || isFiniteInteger(payload.current_lap))
-    || !(typeof payload.playback_speed === "number" && Number.isFinite(payload.playback_speed) && payload.playback_speed > 0)
+    || !(typeof payload.playback_speed === "number" && Number.isFinite(payload.playback_speed) && payload.playback_speed >= 0.5 && payload.playback_speed <= 8)
     || typeof payload.is_paused !== "boolean"
     || !isNullableString(payload.started_at)
     || typeof payload.updated_at !== "string"
@@ -202,10 +203,13 @@ export function RoomExperience({ slug }: { slug: string }) {
             setDetail((current) => current?.room.id === roomId ? latest : current);
             setPlayback(latest.playback);
             setTerminalReconciliation(false);
+          } else if (!terminalReconciliation && roomUpdateRef.current === requestRoomUpdate) {
+            reconciledTerminal = TERMINAL_ROOM_STATUSES.has(latest.room.status);
+            setDetail((current) => current?.room.id === roomId ? latest : current);
+            if (reconciledTerminal) setPlayback(latest.playback);
           } else {
             setDetail((current) => {
               if (!current || current.room.id !== roomId) return current;
-              if (!terminalReconciliation && roomUpdateRef.current === requestRoomUpdate) return latest;
               return {
                 ...latest,
                 room: {

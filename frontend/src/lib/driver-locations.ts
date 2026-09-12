@@ -106,6 +106,7 @@ export function pruneSeries(series: SampleSeries, keepFromMs: number): SampleSer
   const next: SampleSeries = new Map();
   for (const [driverNumber, list] of series) {
     const index = list.findIndex((sample) => sampleTime(sample) >= keepFromMs);
+    if (index < 0) continue;
     // Keep one fix before the cut so a driver still has a position to hold.
     const start = index <= 0 ? 0 : index - 1;
     next.set(driverNumber, start === 0 ? list : list.slice(start));

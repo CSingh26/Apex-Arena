@@ -102,6 +102,17 @@ function nowPerf(): number {
   return typeof performance !== "undefined" ? performance.now() : Date.now();
 }
 
+function pruneLoadedWindows(cache: SessionCache, targetMs: number): void {
+  const firstRetained = windowIndex(targetMs - SERIES_RETENTION_MS) - 1;
+  const lastRetained = windowIndex(targetMs + WINDOW_LOOKAHEAD_MS);
+  for (const key of cache.loadedKeys) {
+    const index = Number(key.slice(key.lastIndexOf(":") + 1));
+    if (!Number.isInteger(index) || index < firstRetained || index > lastRetained) {
+      cache.loadedKeys.delete(key);
+    }
+  }
+}
+
 function emptyCache(sessionKey: string | null, dataMode: LocationDataMode): SessionCache {
   return {
     sessionKey,
@@ -319,6 +330,7 @@ export function useDriverLocations({
         if (isStale() || !loadedAny) return;
         const latestTarget = cache.clock?.target ?? targetMs;
         cache.series = pruneSeries(cache.series, latestTarget - SERIES_RETENTION_MS);
+        pruneLoadedWindows(cache, latestTarget);
         const numbers = [...cache.series.keys()].sort((left, right) => left - right);
         update(sessionKey, (previous) => ({
           driverNumbers: sameNumbers(previous.driverNumbers, numbers)
