@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
@@ -65,6 +66,10 @@ class HistoricalIngestionError(RuntimeError):
     """Safe aggregate failure that never embeds provider response content."""
 
 
+class HistoricalRunOwnershipLostError(HistoricalIngestionError):
+    """The durable run row stopped accepting writes from this worker."""
+
+
 class HistoricalStageResult(BaseModel):
     name: str
     status: IngestionStatus
@@ -99,7 +104,11 @@ class IngestionRunRepository(Protocol):
         result: PipelineResult,
         last_event_at: datetime | None,
         last_error: str | None = None,
-    ) -> None: ...
+    ) -> bool: ...
+
+    async def heartbeat(self, run_id: UUID) -> bool: ...
+
+    async def fail_running_before(self, cutoff: datetime, *, reason: str) -> int: ...
 
     async def latest(self) -> IngestionRunSummary | None: ...
 
@@ -155,14 +164,54 @@ class HistoricalOpenF1Adapter:
         snapshots: SnapshotCounter,
         max_records_per_endpoint: int,
         room_availability: RoomAvailabilityUpdater | None = None,
+        run_heartbeat_seconds: float = 60.0,
     ) -> None:
+        if run_heartbeat_seconds <= 0:
+            raise ValueError("Historical run heartbeat interval must be positive")
         self.client = client
         self.processor = processor
         self.runs = runs
         self.snapshots = snapshots
         self.max_records_per_endpoint = max_records_per_endpoint
         self.room_availability = room_availability
+        self.run_heartbeat_seconds = run_heartbeat_seconds
         self.identity_resolver = DriverIdentityResolver()
+
+    async def reconcile_stale_runs(self, *, now: datetime, stale_after: timedelta) -> int:
+        """Mark historical runs without a fresh owner heartbeat as retryable failures."""
+        return await self.runs.fail_running_before(
+            now - stale_after,
+            reason="worker interrupted",
+        )
+
+    async def _maintain_run_heartbeat(
+        self,
+        run_id: UUID,
+        owner: asyncio.Task[object],
+        stopping: asyncio.Event,
+        ownership_lost: asyncio.Event,
+    ) -> None:
+        try:
+            while True:
+                await asyncio.sleep(self.run_heartbeat_seconds)
+                if stopping.is_set():
+                    return
+                if not await self.runs.heartbeat(run_id):
+                    break
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "Historical run heartbeat failed run=%s error=%s",
+                run_id,
+                type(exc).__name__,
+            )
+        # Do not mask cancellation already requested by the caller. When this
+        # task requests cancellation itself, the owner removes exactly this one
+        # request before translating it into an ordinary retryable failure.
+        if not stopping.is_set() and not owner.done() and owner.cancelling() == 0:
+            ownership_lost.set()
+            owner.cancel()
 
     async def ingest_session(
         self,
@@ -184,7 +233,15 @@ class HistoricalOpenF1Adapter:
                 "stages": [name for name, _ in selected_stages],
             },
         )
-        before_snapshots = await self.snapshots.count(session_key)
+        owner = asyncio.current_task()
+        assert owner is not None
+        stopping = asyncio.Event()
+        ownership_lost = asyncio.Event()
+        heartbeat = asyncio.create_task(
+            self._maintain_run_heartbeat(run_id, owner, stopping, ownership_lost),
+            name=f"historical-run-heartbeat:{run_id}",
+        )
+        before_snapshots = 0
         received_at = datetime.now(UTC)
         endpoint_counts: dict[str, int] = dict(availability_baseline or {})
         run_endpoint_counts: dict[str, int] = {}
@@ -194,8 +251,9 @@ class HistoricalOpenF1Adapter:
         all_records: list[RawEventInput] = []
         driver_registry: dict[int, DriverIdentity] = {}
         normalized_session_type: str | None = session_type_hint
-        high_frequency_from = await self._high_frequency_window_start(session_key, selected)
         try:
+            before_snapshots = await self.snapshots.count(session_key)
+            high_frequency_from = await self._high_frequency_window_start(session_key, selected)
             for stage_name, stage_endpoints in selected_stages:
                 stage_records: list[RawEventInput] = []
                 stage_failures: list[str] = []
@@ -287,13 +345,80 @@ class HistoricalOpenF1Adapter:
                 (event.event_time for event in all_records if event.event_time is not None),
                 default=None,
             )
+            snapshot_count = await self.snapshots.count(session_key) - before_snapshots
+            stopping.set()
+            if (
+                await self.runs.finish(
+                    run_id,
+                    status="partial" if failed_endpoints else "completed",
+                    result=result,
+                    last_event_at=last_event_at,
+                )
+                is False
+            ):
+                raise HistoricalRunOwnershipLostError(
+                    "Historical ingestion run ownership was lost; retry the session"
+                )
+            logger.info(
+                "Historical OpenF1 ingestion completed session=%s fetched=%s inserted=%s",
+                session_key,
+                sum(run_endpoint_counts.values()),
+                result.normalized_inserted,
+            )
+            return HistoricalIngestionResult(
+                run_id=run_id,
+                session_key=session_key,
+                endpoints=selected,
+                fetched_records=sum(run_endpoint_counts.values()),
+                raw_inserted=result.raw_inserted,
+                duplicates=result.raw_duplicates + result.normalized_duplicates,
+                normalized_inserted=result.normalized_inserted,
+                normalized_duplicates=result.normalized_duplicates,
+                snapshots=max(0, snapshot_count),
+                status=ingestion_status,
+                data_availability=data_availability,
+                endpoint_counts=endpoint_counts,
+                failed_endpoints=failed_endpoints,
+                stages=stages,
+            )
+        except asyncio.CancelledError:
+            stopping.set()
+            if ownership_lost.is_set():
+                remaining_cancellations = owner.uncancel()
+                if remaining_cancellations == 0:
+                    await self.runs.finish(
+                        run_id,
+                        status="failed",
+                        result=result,
+                        last_event_at=max(
+                            (
+                                event.event_time
+                                for event in all_records
+                                if event.event_time is not None
+                            ),
+                            default=None,
+                        ),
+                        last_error="HistoricalRunOwnershipLostError",
+                    )
+                    raise HistoricalRunOwnershipLostError(
+                        "Historical ingestion run ownership was lost; retry the session"
+                    ) from None
             await self.runs.finish(
                 run_id,
-                status="partial" if failed_endpoints else "completed",
+                status="failed",
                 result=result,
-                last_event_at=last_event_at,
+                last_event_at=max(
+                    (event.event_time for event in all_records if event.event_time is not None),
+                    default=None,
+                ),
+                last_error="CancelledError",
             )
+            logger.warning("Historical OpenF1 ingestion cancelled session=%s", session_key)
+            raise
+        except HistoricalRunOwnershipLostError:
+            raise
         except Exception as exc:
+            stopping.set()
             safe_error = type(exc).__name__
             if update_room and self.room_availability is not None:
                 try:
@@ -314,8 +439,11 @@ class HistoricalOpenF1Adapter:
             await self.runs.finish(
                 run_id,
                 status="failed",
-                result=PipelineResult(),
-                last_event_at=None,
+                result=result,
+                last_event_at=max(
+                    (event.event_time for event in all_records if event.event_time is not None),
+                    default=None,
+                ),
                 last_error=safe_error,
             )
             logger.error(
@@ -324,30 +452,10 @@ class HistoricalOpenF1Adapter:
                 safe_error,
             )
             raise
-
-        snapshot_count = await self.snapshots.count(session_key) - before_snapshots
-        logger.info(
-            "Historical OpenF1 ingestion completed session=%s fetched=%s inserted=%s",
-            session_key,
-            sum(run_endpoint_counts.values()),
-            result.normalized_inserted,
-        )
-        return HistoricalIngestionResult(
-            run_id=run_id,
-            session_key=session_key,
-            endpoints=selected,
-            fetched_records=sum(run_endpoint_counts.values()),
-            raw_inserted=result.raw_inserted,
-            duplicates=result.raw_duplicates + result.normalized_duplicates,
-            normalized_inserted=result.normalized_inserted,
-            normalized_duplicates=result.normalized_duplicates,
-            snapshots=max(0, snapshot_count),
-            status=ingestion_status,
-            data_availability=data_availability,
-            endpoint_counts=endpoint_counts,
-            failed_endpoints=failed_endpoints,
-            stages=stages,
-        )
+        finally:
+            stopping.set()
+            heartbeat.cancel()
+            await asyncio.gather(heartbeat, return_exceptions=True)
 
     async def retry_failed_session(
         self,

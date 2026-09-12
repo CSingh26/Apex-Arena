@@ -224,6 +224,9 @@ class IngestionRunRecord(Base):
     session_key: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
     status: Mapped[str] = mapped_column(String(30), index=True)
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    heartbeat_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, server_default=func.now()
+    )
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_event_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_error: Mapped[str | None] = mapped_column(String(500), nullable=True)

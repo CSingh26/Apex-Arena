@@ -90,22 +90,76 @@ class SqlIngestionRunRepository:
         result: PipelineResult,
         last_event_at: datetime | None,
         last_error: str | None = None,
-    ) -> None:
+    ) -> bool:
         async with self.database.session_factory() as session:
-            await session.execute(
-                update(IngestionRunRecord)
-                .where(IngestionRunRecord.id == run_id)
-                .values(
-                    status=status,
-                    ended_at=datetime.now(UTC),
-                    last_event_at=last_event_at,
-                    last_error=last_error,
-                    raw_inserted=result.raw_inserted,
-                    duplicates=result.raw_duplicates + result.normalized_duplicates,
-                    normalized_inserted=result.normalized_inserted,
+            finished = (
+                await session.execute(
+                    update(IngestionRunRecord)
+                    .where(
+                        IngestionRunRecord.id == run_id,
+                        IngestionRunRecord.status == "running",
+                    )
+                    .values(
+                        status=status,
+                        ended_at=datetime.now(UTC),
+                        last_event_at=last_event_at,
+                        last_error=last_error,
+                        raw_inserted=result.raw_inserted,
+                        duplicates=result.raw_duplicates + result.normalized_duplicates,
+                        normalized_inserted=result.normalized_inserted,
+                    )
+                    .returning(IngestionRunRecord.id)
                 )
+            ).scalar_one_or_none()
+            await session.commit()
+            return finished is not None
+
+    async def heartbeat(self, run_id: UUID) -> bool:
+        async with self.database.session_factory() as session:
+            renewed = (
+                await session.execute(
+                    update(IngestionRunRecord)
+                    .where(
+                        IngestionRunRecord.id == run_id,
+                        IngestionRunRecord.status == "running",
+                    )
+                    .values(heartbeat_at=datetime.now(UTC))
+                    .returning(IngestionRunRecord.id)
+                )
+            ).scalar_one_or_none()
+            await session.commit()
+            return renewed is not None
+
+    async def fail_running_before(self, cutoff: datetime, *, reason: str) -> int:
+        freshness = func.coalesce(
+            IngestionRunRecord.heartbeat_at,
+            IngestionRunRecord.started_at,
+        )
+        async with self.database.session_factory() as session:
+            failed = (
+                (
+                    await session.execute(
+                        update(IngestionRunRecord)
+                        .where(
+                            IngestionRunRecord.status == "running",
+                            IngestionRunRecord.provider == "openf1",
+                            IngestionRunRecord.run_metadata["adapter"].as_string()
+                            == "historical_rest",
+                            freshness < cutoff,
+                        )
+                        .values(
+                            status="failed",
+                            ended_at=datetime.now(UTC),
+                            last_error=reason,
+                        )
+                        .returning(IngestionRunRecord.id)
+                    )
+                )
+                .scalars()
+                .all()
             )
             await session.commit()
+            return len(failed)
 
     async def latest(self) -> IngestionRunSummary | None:
         statement = (

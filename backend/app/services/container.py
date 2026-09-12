@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from contextlib import suppress
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from app.core.settings import Settings
 from app.domain.intelligence import RaceIntelligenceConfig
@@ -54,6 +54,7 @@ from app.storage.repositories import (
 from app.storage.room_repository import SqlRaceRoomRepository
 
 logger = logging.getLogger(__name__)
+INGESTION_RUN_STALE_AFTER = timedelta(minutes=30)
 
 
 class AppServices:
@@ -230,6 +231,13 @@ class AppServices:
             self._replay_reconciliation_task = asyncio.create_task(
                 self._deferred_replay_recovery(), name="replay-startup-recovery"
             )
+
+    async def reconcile_interrupted_ingestion_runs(self) -> int:
+        """Run the single age-bounded startup sweep for historical ingestion."""
+        return await self.historical.reconcile_stale_runs(
+            now=datetime.now(UTC),
+            stale_after=INGESTION_RUN_STALE_AFTER,
+        )
 
     async def _deferred_replay_recovery(self) -> None:
         # A dead peer can still hold a fresh lease during the initial sweep.

@@ -9,12 +9,21 @@ from app.core.settings import Settings
 @pytest.fixture
 def no_replay_startup_io(monkeypatch):
     """Route-only tests isolate SQL; lifecycle/recovery tests exercise real startup."""
+    from app.storage.repositories import SqlIngestionRunRepository
     from app.storage.room_repository import SqlRaceRoomRepository
 
     async def recover(_repository):
         return 0
 
+    async def recover_ingestion(_repository, _cutoff, *, reason):
+        return 0
+
     monkeypatch.setattr(SqlRaceRoomRepository, "pause_orphaned_running_rows", recover)
+    monkeypatch.setattr(
+        SqlIngestionRunRepository,
+        "fail_running_before",
+        recover_ingestion,
+    )
 
 
 @pytest.fixture

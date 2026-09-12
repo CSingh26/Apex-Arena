@@ -42,6 +42,7 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
                 if not await services.database.acquire_ingestor_lease():
                     raise RuntimeError("Another Apex Arena ingestor owns the singleton lease")
             if settings.app_process_role in {"api", "combined", "all"}:
+                await services.reconcile_interrupted_ingestion_runs()
                 await services.start_replay_recovery()
             if settings.app_process_role in {"combined", "all"}:
                 if settings.live_worker_enabled:

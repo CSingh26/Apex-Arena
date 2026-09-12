@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock
 
 import pytest
@@ -10,7 +11,16 @@ from app.main import create_app
 from app.services.container import AppServices
 from app.services.race_state import RaceState
 from app.storage.redis import EventBus
+from app.storage.repositories import SqlIngestionRunRepository
 from app.storage.room_repository import SqlRaceRoomRepository
+
+
+@pytest.fixture(autouse=True)
+def no_ingestion_startup_io(monkeypatch):
+    async def recover(_repository, _cutoff, *, reason):
+        return 0
+
+    monkeypatch.setattr(SqlIngestionRunRepository, "fail_running_before", recover)
 
 
 @pytest.mark.parametrize("role", ["api", "combined", "all"])
@@ -82,6 +92,28 @@ async def test_startup_failure_always_closes_services(settings, monkeypatch):
         async with application.router.lifespan_context(application):
             raise AssertionError("startup should fail")
     assert closed == [True]
+
+
+async def test_api_lifespan_reconciles_interrupted_ingestion_once(settings, monkeypatch):
+    recovered = []
+
+    async def recover_replays(_repository):
+        return 0
+
+    async def recover_ingestion(_repository, cutoff, *, reason):
+        recovered.append((cutoff, reason))
+        return 1
+
+    monkeypatch.setattr(SqlRaceRoomRepository, "pause_orphaned_running_rows", recover_replays)
+    monkeypatch.setattr(SqlIngestionRunRepository, "fail_running_before", recover_ingestion)
+    application = create_app(settings.model_copy(update={"app_process_role": "api"}))
+
+    async with application.router.lifespan_context(application):
+        assert len(recovered) == 1
+
+    cutoff, reason = recovered[0]
+    assert reason == "worker interrupted"
+    assert 29 * 60 <= (datetime.now(UTC) - cutoff).total_seconds() <= 31 * 60
 
 
 @pytest.mark.asyncio

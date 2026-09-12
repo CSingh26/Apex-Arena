@@ -288,7 +288,11 @@ async def test_lifespan_deferred_sweep_recovers_recently_dead_owner(
         self.room_replay.rooms = repository
         self.room_replay.lease_seconds = 0.15
 
+    async def reconcile_ingestion(_self):
+        return 0
+
     monkeypatch.setattr(AppServices, "__init__", initialize)
+    monkeypatch.setattr(AppServices, "reconcile_interrupted_ingestion_runs", reconcile_ingestion)
     application = create_app(settings.model_copy(update={"app_process_role": "api"}))
     async with application.router.lifespan_context(application):
         playback, stored_room = await records(repository, room)

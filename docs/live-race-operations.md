@@ -159,9 +159,10 @@ on a process-local snapshot.
 
 Replay start/resume rebuilds race state through the persisted sequence before
 continuing. Seek operations rebuild replay state and emit replay-marked copies;
-they do not rewrite captured source events. Startup reconciliation for an
-orphaned `running` replay row is still pending Task 22, and stale ingestion-run
-repair is still pending Task 23.
+they do not rewrite captured source events. Startup reconciliation pauses
+orphaned replay rows and marks historical ingestion runs without a fresh
+heartbeat as retryable failures. Follow `docs/ingestion-run-recovery.md` for
+the first rollout's legacy-worker drain.
 
 Live and replay GPS share the same rendering path but use different cache
 semantics. Live windows remain mutable and accept streamed fixes; replay and

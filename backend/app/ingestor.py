@@ -27,6 +27,7 @@ def create_ingestor_app(settings_override: Settings | None = None) -> FastAPI:
         try:
             if not await services.database.acquire_ingestor_lease():
                 raise RuntimeError("Another Apex Arena ingestor owns the singleton lease")
+            await services.reconcile_interrupted_ingestion_runs()
             if settings.live_worker_enabled:
                 await services.start_live_services()
             await services.start_recent_reconciliation()

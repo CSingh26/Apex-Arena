@@ -119,6 +119,11 @@ def test_ingestor_role_owns_live_startup_and_health(settings: Settings) -> None:
             return_value=True,
         ),
         patch("app.ingestor.AppServices.start_live_services", new_callable=AsyncMock) as start,
+        patch(
+            "app.ingestor.AppServices.reconcile_interrupted_ingestion_runs",
+            new_callable=AsyncMock,
+            create=True,
+        ) as recover_ingestion,
     ):
         with TestClient(create_ingestor_app(ingestor_settings)) as client:
             response = client.get("/health/live")
@@ -126,6 +131,7 @@ def test_ingestor_role_owns_live_startup_and_health(settings: Settings) -> None:
     assert response.status_code == 200
     assert response.json()["role"] == "ingestor"
     start.assert_awaited_once()
+    recover_ingestion.assert_awaited_once()
 
 
 def test_rest_mode_starts_live_worker_without_mqtt_autoconnect(settings: Settings) -> None:
