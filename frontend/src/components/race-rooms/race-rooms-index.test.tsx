@@ -205,29 +205,36 @@ describe("RaceRoomsIndex", () => {
     expect(screen.queryByText("Race Room opens when session data becomes available")).not.toBeInTheDocument();
   });
 
-  it("keeps legacy completed copy when provider status is omitted and falls back safely for unknown values", async () => {
+  it("keeps legacy completed copy when provider status is omitted", async () => {
     getRaceRoomEvents.mockResolvedValue({
-      events: [
-        weekend({
-          event_id: "legacy-2026",
-          event_slug: "legacy-grand-prix-2026",
-          event_name: "Legacy Grand Prix",
+      events: [weekend({ sessions: [session({
+        room_slug: null,
+        room_eligible: false,
+        eligibility: "provider_pending",
+        data_availability: "unavailable",
+        replay_available: false,
+        results_available: false,
+        provider_status: undefined,
+      })] })],
+      total: 1,
+      limit: 100,
+      offset: 0,
+    });
+
+    render(<RaceRoomsIndex />);
+
+    expect(await screen.findByText("Provider data not published yet")).toBeVisible();
+  });
+
+  it.each(["scheduled", "upcoming", "live", "completed"])(
+    "uses neutral copy for an unknown provider status on a %s session",
+    async (status) => {
+      getRaceRoomEvents.mockResolvedValue({
+        events: [weekend({
+          weekend_status: status === "completed" ? "completed" : status === "upcoming" ? "upcoming" : "live",
           sessions: [session({
-            room_slug: null,
-            room_eligible: false,
-            eligibility: "provider_pending",
-            data_availability: "unavailable",
-            replay_available: false,
-            results_available: false,
-            provider_status: undefined,
-          })],
-        }),
-        weekend({
-          event_id: "future-provider-2026",
-          event_slug: "future-provider-grand-prix-2026",
-          event_name: "Future Provider Grand Prix",
-          round: 2,
-          sessions: [session({
+            actual_start: status === "scheduled" || status === "upcoming" ? null : "2026-03-08T04:00:00Z",
+            status,
             room_slug: null,
             room_eligible: false,
             eligibility: "provider_pending",
@@ -236,33 +243,55 @@ describe("RaceRoomsIndex", () => {
             results_available: false,
             provider_status: "FUTURE_PROVIDER_STATE",
           })],
-        }),
-      ],
-      total: 2,
-      limit: 100,
-      offset: 0,
-    });
+        })],
+        total: 1,
+        limit: 100,
+        offset: 0,
+      });
 
-    render(<RaceRoomsIndex />);
+      render(<RaceRoomsIndex />);
 
-    expect(await screen.findByText("Provider data not published yet")).toBeVisible();
-    expect(screen.getByText("Session data is unavailable")).toBeVisible();
-  });
+      expect(await screen.findByText("Session data is unavailable")).toBeVisible();
+      expect(screen.queryByText("Race Room opens when session data becomes available")).not.toBeInTheDocument();
+      expect(screen.queryByText("Waiting for the live provider feed")).not.toBeInTheDocument();
+      expect(screen.queryByText("Provider data not published yet")).not.toBeInTheDocument();
+    },
+  );
 
-  it("places completed weekends with invalid dates after the chronological timeline", async () => {
+  it("orders completed weekends by valid date, then round, with invalid dates last", async () => {
     getRaceRoomEvents.mockResolvedValue({
       events: [
         weekend({
-          event_id: "invalid-date-2026",
-          event_slug: "invalid-date-grand-prix-2026",
-          event_name: "Invalid Date Grand Prix",
-          round: 2,
+          event_id: "invalid-five-2026",
+          event_slug: "invalid-five-grand-prix-2026",
+          event_name: "Invalid Five Grand Prix",
+          round: 5,
           weekend_start: "not-a-date",
         }),
-        completedLater,
+        weekend({
+          event_id: "equal-four-2026",
+          event_slug: "equal-four-grand-prix-2026",
+          event_name: "Equal Four Grand Prix",
+          round: 4,
+          weekend_start: "2026-03-27T02:00:00Z",
+        }),
         weekend(),
+        weekend({
+          event_id: "invalid-two-2026",
+          event_slug: "invalid-two-grand-prix-2026",
+          event_name: "Invalid Two Grand Prix",
+          round: 2,
+          weekend_start: "still-not-a-date",
+        }),
+        weekend({
+          event_id: "equal-two-2026",
+          event_slug: "equal-two-grand-prix-2026",
+          event_name: "Equal Two Grand Prix",
+          round: 2,
+          weekend_start: "2026-03-27T02:00:00Z",
+        }),
       ],
-      total: 3,
+      total: 5,
       limit: 100,
       offset: 0,
     });
@@ -273,9 +302,11 @@ describe("RaceRoomsIndex", () => {
     const headings = within(completed.closest("section") as HTMLElement).getAllByRole("heading", { level: 3 });
     expect(headings.map((heading) => heading.textContent)).toEqual([
       "Australian Grand Prix",
-      "Japanese Grand Prix",
-      "Invalid Date Grand Prix",
+      "Equal Two Grand Prix",
+      "Equal Four Grand Prix",
+      "Invalid Two Grand Prix",
+      "Invalid Five Grand Prix",
     ]);
-    expect(screen.getByText("Schedule pending")).toBeVisible();
+    expect(screen.getAllByText("Schedule pending")).toHaveLength(2);
   });
 });

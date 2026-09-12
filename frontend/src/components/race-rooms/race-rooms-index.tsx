@@ -23,6 +23,17 @@ const SESSION_ORDER = [
   "RACE",
 ];
 
+const PROVIDER_STATUSES = new Set([
+  "NOT_REQUESTED",
+  "FETCHING",
+  "NOT_YET_PUBLISHED",
+  "PROVIDER_UNAVAILABLE",
+  "FETCH_FAILED",
+  "PARTIAL",
+  "AVAILABLE",
+  "ARCHIVED",
+]);
+
 function formatDate(value: string, includeTime = false): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "Schedule pending";
@@ -59,6 +70,7 @@ function availabilityLabel(session: EventSessionSummary): string {
   if (session.provider_status === "FETCH_FAILED") return "Provider data could not be fetched";
   if (session.provider_status === "FETCHING") return "Session data is being prepared";
   if (session.provider_status === "NOT_YET_PUBLISHED") return "Provider data not published yet";
+  if (session.provider_status && !PROVIDER_STATUSES.has(session.provider_status)) return "Session data is unavailable";
   if (
     session.data_availability === "unavailable" &&
     ["scheduled", "upcoming"].includes(session.status)

@@ -3,6 +3,7 @@ import { expect, test, type APIRequestContext, type Page } from "@playwright/tes
 
 const API_BASE_URL = process.env.E2E_API_URL ?? "http://localhost:8764";
 const VIEWPORT_WIDTHS = [1440, 1280, 1024, 768, 390, 320] as const;
+const RACE_SCENARIO_CANDIDATE_LIMIT = 5;
 
 type SessionSummary = {
   session_type: string;
@@ -26,7 +27,16 @@ type EventWeekend = {
 
 type EventResponse = { events: EventWeekend[]; total: number };
 type RoomListResponse = { total: number };
-type RoomDetailResponse = { room: { ingestion_status: string } };
+type ScenarioRoom = { ingestion_status: string; session_key: string | null };
+type RoomDetailResponse = {
+  room: ScenarioRoom;
+  intelligence: { current_battles: unknown[] };
+};
+type PlaybackResponse = {
+  room: ScenarioRoom;
+  playback: { current_event_sequence: number };
+};
+type EventFactsResponse = { count: number };
 
 function collectBrowserErrors(page: Page): string[] {
   const errors: string[] = [];
@@ -62,25 +72,51 @@ async function raceLikeReplayRoom(
   request: APIRequestContext,
 ): Promise<{ event: EventWeekend; session: SessionSummary }> {
   const catalog = await eventCatalog(request);
-  for (const event of catalog.events) {
-    if (event.weekend_status !== "completed") continue;
-    const session = event.sessions.find((item) => (
-      item.room_slug
-      && item.replay_available
-      // This smoke test asserts pit-stop history; a Sprint can legitimately
-      // have none, so use an archived Grand Prix race.
-      && item.session_type === "RACE"
-    ));
-    if (session) {
-      const detail = await request.get(`${API_BASE_URL}/api/v1/race-rooms/${session.room_slug}`);
-      expect(detail.ok(), `room detail returned HTTP ${detail.status()}`).toBeTruthy();
-      const { room } = await detail.json() as RoomDetailResponse;
-      // This scenario asserts historical battle and pit coverage at a fixed
-      // lap. A newly completed partial live capture is tested separately.
-      if (room.ingestion_status === "ready") return { event, session };
-    }
+  const candidates = [...catalog.events]
+    .filter((event) => event.weekend_status === "completed")
+    .sort((left, right) => compareWeekendChronology(left, right) || left.event_slug.localeCompare(right.event_slug))
+    .flatMap((event) => event.sessions
+      .filter((session) => session.room_slug && session.replay_available && session.session_type === "RACE")
+      .map((session) => ({ event, session })))
+    .slice(0, RACE_SCENARIO_CANDIDATE_LIMIT);
+
+  for (const candidate of candidates) {
+    const { event, session } = candidate;
+    if (!session.room_slug) continue;
+    const detailUrl = `${API_BASE_URL}/api/v1/race-rooms/${session.room_slug}`;
+    const initialDetail = await request.get(detailUrl);
+    if (!initialDetail.ok()) continue;
+    const initial = await initialDetail.json() as RoomDetailResponse;
+    if (initial.room.ingestion_status !== "ready" || !initial.room.session_key) continue;
+
+    const seek = await request.post(`${detailUrl}/playback`, {
+      data: { action: "seek_to_lap", lap_number: 6 },
+    });
+    if (!seek.ok()) continue;
+    const sought = await seek.json() as PlaybackResponse;
+    const cursor = sought.playback.current_event_sequence;
+    if (!Number.isSafeInteger(cursor) || cursor <= 0) continue;
+
+    const lapSixDetail = await request.get(detailUrl);
+    if (!lapSixDetail.ok()) continue;
+    const lapSix = await lapSixDetail.json() as RoomDetailResponse;
+    if (!lapSix.intelligence.current_battles.length) continue;
+
+    const params = new URLSearchParams({
+      category: "PITS",
+      limit: "1",
+      before_sequence_number: String(cursor),
+    });
+    const pits = await request.get(
+      `${API_BASE_URL}/api/v1/sessions/${encodeURIComponent(initial.room.session_key)}/events?${params}`,
+    );
+    if (!pits.ok()) continue;
+    const pitFacts = await pits.json() as EventFactsResponse;
+    if (pitFacts.count > 0) return { event, session };
   }
-  throw new Error("The Sprint 3 smoke test needs a ready completed Grand Prix race replay");
+  throw new Error(
+    `The Sprint 3 smoke test needs a ready completed Grand Prix race with lap-six battles and pit history; checked at most ${RACE_SCENARIO_CANDIDATE_LIMIT} candidates`,
+  );
 }
 
 async function expectNoHorizontalOverflow(page: Page): Promise<void> {
@@ -93,7 +129,89 @@ function expectAscending(values: number[]): void {
   expect(values).toEqual([...values].sort((left, right) => left - right));
 }
 
+function weekendTime(event: Pick<EventWeekend, "weekend_start">): number {
+  const time = new Date(event.weekend_start).getTime();
+  return Number.isFinite(time) ? time : Number.POSITIVE_INFINITY;
+}
+
+// Keep this identical to the catalog's completed-weekend comparator.
+function compareWeekendChronology(
+  left: Pick<EventWeekend, "weekend_start" | "round">,
+  right: Pick<EventWeekend, "weekend_start" | "round">,
+): number {
+  return weekendTime(left) - weekendTime(right) || left.round - right.round;
+}
+
 test.describe.configure({ mode: "serial" });
+
+test("normalizes completed chronology for invalid dates and equal timestamps", () => {
+  const events = [
+    { event_name: "Invalid Five", weekend_start: "not-a-date", round: 5 },
+    { event_name: "Equal Four", weekend_start: "2026-03-27T02:00:00Z", round: 4 },
+    { event_name: "Earlier", weekend_start: "2026-03-06T01:00:00Z", round: 1 },
+    { event_name: "Invalid Two", weekend_start: "still-not-a-date", round: 2 },
+    { event_name: "Equal Two", weekend_start: "2026-03-27T02:00:00Z", round: 2 },
+  ];
+
+  const names = [...events]
+    .sort(compareWeekendChronology)
+    .map((event) => event.event_name);
+
+  expect(names).toEqual(["Earlier", "Equal Two", "Equal Four", "Invalid Two", "Invalid Five"]);
+});
+
+test("selects a bounded replay candidate with lap-six battles and pit history", async () => {
+  const events = ["no-facts", "with-facts"].map((slug, index) => ({
+    event_slug: `${slug}-event`,
+    event_name: `${slug} Grand Prix`,
+    round: index + 1,
+    weekend_start: `2026-03-0${index + 1}T00:00:00Z`,
+    weekend_status: "completed" as const,
+    is_sprint_weekend: false,
+    sessions: [{
+      session_type: "RACE",
+      display_name: "Race",
+      scheduled_start: `2026-03-0${index + 1}T12:00:00Z`,
+      status: "completed",
+      room_slug: slug,
+      eligibility: "already_exists",
+      replay_available: true,
+    }],
+  }));
+  const calls: string[] = [];
+  const response = (body: unknown) => ({
+    ok: () => true,
+    status: () => 200,
+    json: async () => body,
+  });
+  const request = {
+    get: async (url: string) => {
+      calls.push(`GET ${url}`);
+      if (url.includes("/sessions/with-facts-session/events")) return response({ count: 1, events: [{ event_type: "PIT_STOP" }] });
+      if (url.includes("/race-rooms/events?")) return response({ events, total: events.length });
+      const slug = url.endsWith("/with-facts") ? "with-facts" : "no-facts";
+      return response({
+        room: { ingestion_status: "ready", session_key: `${slug}-session` },
+        intelligence: { current_battles: slug === "with-facts" ? [{ id: "battle" }] : [] },
+      });
+    },
+    post: async (url: string, options: { data?: unknown }) => {
+      calls.push(`POST ${url} ${JSON.stringify(options.data)}`);
+      const slug = url.includes("with-facts") ? "with-facts" : "no-facts";
+      return response({
+        room: { ingestion_status: "ready", session_key: `${slug}-session` },
+        playback: { current_event_sequence: 60 },
+      });
+    },
+  } as unknown as APIRequestContext;
+
+  const selected = await raceLikeReplayRoom(request);
+
+  expect(selected.session.room_slug).toBe("with-facts");
+  expect(calls).toContain(`POST ${API_BASE_URL}/api/v1/race-rooms/with-facts/playback {"action":"seek_to_lap","lap_number":6}`);
+  expect(calls.some((call) => call.includes("category=PITS") && call.includes("before_sequence_number=60"))).toBe(true);
+  expect(calls.length).toBeLessThanOrEqual(9);
+});
 
 test("introduces Apex Arena on a responsive, theme-aware landing page", async ({ page }) => {
   const browserErrors = collectBrowserErrors(page);
@@ -153,7 +271,7 @@ test("groups real standard and Sprint weekends in chronological public categorie
   await expect(page.getByRole("heading", { name: "Completed Events" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Upcoming Events" })).toBeVisible();
   const completedNames = [...completed]
-    .sort((left, right) => Date.parse(left.weekend_start) - Date.parse(right.weekend_start) || left.round - right.round)
+    .sort(compareWeekendChronology)
     .map((event) => event.event_name);
   await expect(page.locator('section[aria-labelledby="completed-events-title"]').getByRole("heading", { level: 3 }))
     .toHaveText(completedNames);
