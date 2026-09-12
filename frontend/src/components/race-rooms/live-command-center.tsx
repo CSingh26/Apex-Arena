@@ -20,6 +20,7 @@ import type {
   NormalizedRaceEvent,
   RaceState,
   SessionIntelligenceState,
+  SourceAvailability,
   TyreCompound,
 } from "@/lib/types";
 
@@ -32,7 +33,7 @@ const CONNECTION_PRESENTATION: Record<Connection, { label: string; announcement:
   live: { label: "LIVE", announcement: "Live timing connected" },
   reconnecting: { label: "RECONNECTING", announcement: "Reconnecting to live timing" },
   waiting: { label: "WAITING FOR DATA", announcement: "Waiting for timing data" },
-  delayed: { label: "DELAYED", announcement: "Live timing updates delayed" },
+  delayed: { label: "DEGRADED", announcement: "Live timing updates degraded" },
   historical: { label: "REPLAY", announcement: "Historical replay data" },
   unavailable: { label: "UNAVAILABLE", announcement: "Live timing provider unavailable" },
 };
@@ -51,13 +52,25 @@ function parseStreamPayload<T>(event: Event): T | null {
 }
 
 function providerConnection(status: ProviderConnectionStatus): Connection {
-  switch (status.connection_state) {
+  const providerState = typeof status.connection_state === "string"
+    ? status.connection_state.toUpperCase()
+    : undefined;
+  switch (providerState) {
+    case "CONNECTED":
     case "LIVE": return "live";
+    case "DEGRADED":
     case "STALE": return "delayed";
+    case "DISABLED":
+    case "DISCONNECTED":
+    case "ERROR":
+    case "MISSING_CREDENTIALS":
     case "PROVIDER_UNAVAILABLE": return "unavailable";
     case "SESSION_COMPLETE": return "historical";
     case "WAITING_FOR_PROVIDER":
     case "WAITING_FOR_SESSION_KEY": return "waiting";
+    case "AUTHENTICATING":
+    case "CONNECTING":
+    case "RECONNECTING":
     default: return "reconnecting";
   }
 }
@@ -105,6 +118,7 @@ type LiveCommandCenterProps = {
   selectedDriver: number | null;
   onSelectDriver: (driver: number) => void;
   initialIntelligence?: SessionIntelligenceState;
+  sourceAvailability?: SourceAvailability;
 };
 
 function driverNumber(value: string, driver: DriverRaceState): number {
@@ -269,6 +283,7 @@ export function LiveCommandCenter({
   selectedDriver,
   onSelectDriver,
   initialIntelligence,
+  sourceAvailability = "telemetry",
 }: LiveCommandCenterProps) {
   const [state, setState] = useState<RaceState | null>(null);
   const [connection, setConnection] = useState<Connection>("reconnecting");
@@ -280,12 +295,16 @@ export function LiveCommandCenter({
   const [loadingMoreEvents, setLoadingMoreEvents] = useState(false);
   const lastSequenceRef = useRef(0);
   const eventPageCursorRef = useRef(0);
+  const eventPageControllerRef = useRef<AbortController | null>(null);
   const sessionRef = useRef<string | null>(null);
+  const streamGenerationRef = useRef(0);
   const { mode, setMode } = useRaceRoomMode();
   const { panel: debugLocation, raw: debugRawPoints } = useLocationDebugFlags();
 
   useEffect(() => {
     if (sessionRef.current !== sessionKey) {
+      eventPageControllerRef.current?.abort();
+      eventPageControllerRef.current = null;
       sessionRef.current = sessionKey;
       lastSequenceRef.current = 0;
       eventPageCursorRef.current = 0;
@@ -308,6 +327,9 @@ export function LiveCommandCenter({
     // from a clean cursor so the next state fetch bounds the event feed again.
     lastSequenceRef.current = 0;
     eventPageCursorRef.current = 0;
+    eventPageControllerRef.current?.abort();
+    eventPageControllerRef.current = null;
+    setLoadingMoreEvents(false);
     setState(null);
     setEvents([]);
     setConnection("reconnecting");
@@ -315,6 +337,7 @@ export function LiveCommandCenter({
   }, [playbackSequence, sessionKey]);
 
   useEffect(() => {
+    const effectGeneration = ++streamGenerationRef.current;
     if (!sessionKey) return;
     const controller = new AbortController();
     let source: EventSource | null = null;
@@ -323,8 +346,14 @@ export function LiveCommandCenter({
     let disposed = false;
     let historical = false;
     let hasAppliedState = false;
+    let sourceGeneration = 0;
+    const isCurrentEffect = () => (
+      !disposed
+      && streamGenerationRef.current === effectGeneration
+      && sessionRef.current === sessionKey
+    );
     const setNewest = (next: RaceState) => {
-      if (disposed || !isSessionState(next, sessionKey)) return;
+      if (!isCurrentEffect() || !isSessionState(next, sessionKey)) return;
       if (next.sequence_number < lastSequenceRef.current) return;
       if (hasAppliedState && next.sequence_number === lastSequenceRef.current) return;
       hasAppliedState = true;
@@ -335,7 +364,7 @@ export function LiveCommandCenter({
     };
     getSessionState(sessionKey, controller.signal)
       .then(({ state: initial }) => {
-        if (disposed || !isSessionState(initial, sessionKey)) return;
+        if (!isCurrentEffect() || !isSessionState(initial, sessionKey)) return;
         setNewest(initial);
         return getSessionEvents(
           sessionKey,
@@ -346,31 +375,44 @@ export function LiveCommandCenter({
           },
           controller.signal,
         ).then((response) => {
-          if (disposed) return;
+          if (!isCurrentEffect()) return;
           const incoming = response.events.filter((event) => isSessionEvent(event, sessionKey));
           eventPageCursorRef.current = incoming.at(-1)?.sequence_number ?? 0;
           setEvents((current) => mergeEvents(current, incoming));
           setHasMoreEvents(response.count === 100);
         }).catch(() => undefined);
       })
-      .catch(() => { if (!disposed && !hasAppliedState) setConnection("unavailable"); });
+      .catch(() => { if (isCurrentEffect() && !hasAppliedState) setConnection("unavailable"); });
     const connect = () => {
-      if (disposed) return;
-      source = new EventSource(sessionStreamUrl(sessionKey, lastSequenceRef.current));
+      if (!isCurrentEffect()) return;
+      const currentSourceGeneration = ++sourceGeneration;
+      const nextSource = new EventSource(sessionStreamUrl(sessionKey, lastSequenceRef.current));
+      source = nextSource;
+      const isCurrentSource = () => (
+        isCurrentEffect()
+        && sourceGeneration === currentSourceGeneration
+        && source === nextSource
+      );
       let reconnectScheduled = false;
-      source.addEventListener("open", () => { retry = 0; });
-      source.addEventListener("state", (event) => {
+      nextSource.addEventListener("open", () => {
+        if (!isCurrentSource()) return;
+        retry = 0;
+      });
+      nextSource.addEventListener("state", (event) => {
+        if (!isCurrentSource()) return;
         const next = parseStreamPayload<RaceState>(event);
         if (isSessionState(next, sessionKey)) setNewest(next);
       });
-      source.addEventListener("event", (event) => {
+      nextSource.addEventListener("event", (event) => {
+        if (!isCurrentSource()) return;
         const next = parseStreamPayload<NormalizedRaceEvent>(event);
         if (!isSessionEvent(next, sessionKey)) return;
         if (next.importance_level !== "LOW") {
           setEvents((current) => mergeEvents(current, [next]));
         }
       });
-      source.addEventListener("connection_status", (event) => {
+      nextSource.addEventListener("connection_status", (event) => {
+        if (!isCurrentSource()) return;
         const status = parseStreamPayload<ProviderConnectionStatus>(event);
         if (!status) return;
         if (status.current_session_key && status.current_session_key !== sessionKey) return;
@@ -381,11 +423,15 @@ export function LiveCommandCenter({
         if (requiresMatchingSession && status.current_session_key !== sessionKey) return;
         setConnection(historical ? "historical" : nextConnection);
       });
-      source.addEventListener("stream_status", () => setConnection("delayed"));
-      source.addEventListener("error", () => {
-        if (reconnectScheduled || disposed) return;
+      nextSource.addEventListener("stream_status", () => {
+        if (!isCurrentSource()) return;
+        setConnection("delayed");
+      });
+      nextSource.addEventListener("error", () => {
+        if (reconnectScheduled || !isCurrentSource()) return;
         reconnectScheduled = true;
-        source?.close();
+        sourceGeneration += 1;
+        nextSource.close();
         retry += 1;
         setConnection(retry > 3 ? "delayed" : "reconnecting");
         timer = window.setTimeout(connect, Math.min(8_000, 500 * 2 ** retry));
@@ -394,11 +440,18 @@ export function LiveCommandCenter({
     connect();
     return () => {
       disposed = true;
+      sourceGeneration += 1;
+      if (streamGenerationRef.current === effectGeneration) streamGenerationRef.current += 1;
       controller.abort();
       source?.close();
       if (timer != null) window.clearTimeout(timer);
     };
   }, [sessionKey, streamEpoch]);
+
+  useEffect(() => () => {
+    eventPageControllerRef.current?.abort();
+    eventPageControllerRef.current = null;
+  }, []);
 
   const rows = useMemo(() => state ? rowsFromState(state) : [], [state]);
   const battles = useMemo(
@@ -451,6 +504,9 @@ export function LiveCommandCenter({
   const loadMoreEvents = async () => {
     if (!sessionKey || loadingMoreEvents) return;
     const requestedSession = sessionKey;
+    const controller = new AbortController();
+    eventPageControllerRef.current?.abort();
+    eventPageControllerRef.current = controller;
     setLoadingMoreEvents(true);
     try {
       const after = eventPageCursorRef.current;
@@ -459,25 +515,38 @@ export function LiveCommandCenter({
         beforeSequenceNumber: replaySequence ?? undefined,
         limit: 100,
         minimumImportance: "NORMAL",
-      });
-      if (sessionRef.current !== requestedSession) return;
+      }, controller.signal);
+      if (controller.signal.aborted || sessionRef.current !== requestedSession) return;
       const incoming = response.events.filter((event) => isSessionEvent(event, requestedSession));
       eventPageCursorRef.current = incoming.at(-1)?.sequence_number ?? after;
       setEvents((current) => mergeEvents(current, incoming));
       setHasMoreEvents(response.count === 100);
+    } catch {
+      // Keep the current event page when cancellation or recovery fails.
     } finally {
-      setLoadingMoreEvents(false);
+      if (eventPageControllerRef.current === controller) {
+        eventPageControllerRef.current = null;
+        setLoadingMoreEvents(false);
+      }
     }
   };
   const locatedLabel = locations.status === "ready"
     ? `${locations.driverNumbers.length} cars`
     : locations.status === "loading" ? "Loading" : "No positions";
   const connectionPresentation = CONNECTION_PRESENTATION[connection];
-  const telemetryUnavailable = state?.is_replay || state?.status === "finished"
-    ? "Car telemetry was not recorded for this session."
-    : connection === "unavailable"
-      ? "Car telemetry is currently unavailable from the timing provider."
-      : "Car telemetry has not been published for this session yet.";
+  const telemetryUnavailable = sourceAvailability === "timing_only"
+    ? "Timing data is available, but this session has no car telemetry."
+    : sourceAvailability === "results_only"
+      ? "Only session results are available; timing and car telemetry were not recorded."
+      : sourceAvailability === "unavailable"
+        ? "Timing and car telemetry are unavailable for this session."
+        : sourceAvailability === "limited_telemetry"
+          ? "Car telemetry coverage is limited for this session."
+          : state?.is_replay || state?.status === "finished"
+            ? "Car telemetry was not recorded for this session."
+            : connection === "unavailable"
+              ? "Car telemetry is currently unavailable from the timing provider."
+              : "Car telemetry has not been published for this session yet.";
 
   return <>
     <section className={styles.commandCenter} aria-label="Live session command center" data-mode={mode.toLowerCase()}>

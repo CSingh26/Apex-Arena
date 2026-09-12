@@ -213,6 +213,7 @@ describe("LiveCommandCenter", () => {
         limit: 100,
         minimumImportance: "NORMAL",
       },
+      expect.any(AbortSignal),
     ));
   });
 
@@ -455,6 +456,136 @@ describe("LiveCommandCenter", () => {
     expect(previous.closed).toBe(true);
     expect(screen.queryByRole("button", { name: /George Russell, position 1/i })).not.toBeInTheDocument();
     await screen.findByRole("button", { name: /George Russell, position 2/i });
+  });
+
+  it("ignores queued event and provider frames from a closed previous-session source", async () => {
+    api.getSessionState.mockImplementation((sessionKey: string) => Promise.resolve({
+      state: sessionKey === "race-1"
+        ? { ...state(10, 1, 0), is_replay: false }
+        : { ...state(1, 2, 1.221), session_key: "race-2", is_replay: false },
+    }));
+    const { rerender } = render(<LiveCommandCenter sessionKey="race-1" circuitName="Circuit" eventName="Grand Prix" playbackSequence={10} sessionClock={null} selectedDriver={null} onSelectDriver={vi.fn()} />);
+    await screen.findByRole("button", { name: /George Russell, position 1/i });
+    const previous = FakeEventSource.instances[0];
+
+    rerender(<LiveCommandCenter sessionKey="race-2" circuitName="Circuit" eventName="Grand Prix" playbackSequence={1} sessionClock={null} selectedDriver={null} onSelectDriver={vi.fn()} />);
+    await screen.findByRole("button", { name: /George Russell, position 2/i });
+    const current = FakeEventSource.instances.at(-1)!;
+    act(() => current.emit("connection_status", JSON.stringify({
+      connection_state: "LIVE",
+      current_session_key: "race-2",
+    })));
+
+    act(() => {
+      previous.emit("event", JSON.stringify(event("closed-source-event", 11)));
+      previous.emit("connection_status", JSON.stringify({
+        connection_state: "PROVIDER_UNAVAILABLE",
+        current_session_key: "race-1",
+      }));
+    });
+
+    expect(previous.closed).toBe(true);
+    expect(screen.getByRole("status", { name: "Live timing connected" })).toHaveTextContent("LIVE");
+    const feed = screen.getByRole("heading", { name: "Important events" }).closest("section");
+    expect(feed).not.toBeNull();
+    expect(within(feed!).queryAllByRole("listitem")).toHaveLength(0);
+  });
+
+  it.each([
+    ["CONNECTED", "Live timing connected", "LIVE"],
+    ["LIVE", "Live timing connected", "LIVE"],
+    ["DEGRADED", "Live timing updates degraded", "DEGRADED"],
+    ["STALE", "Live timing updates degraded", "DEGRADED"],
+    ["ERROR", "Live timing provider unavailable", "UNAVAILABLE"],
+    ["DISCONNECTED", "Live timing provider unavailable", "UNAVAILABLE"],
+    ["MISSING_CREDENTIALS", "Live timing provider unavailable", "UNAVAILABLE"],
+    ["DISABLED", "Live timing provider unavailable", "UNAVAILABLE"],
+    ["RECONNECTING", "Reconnecting to live timing", "RECONNECTING"],
+    ["CONNECTING", "Reconnecting to live timing", "RECONNECTING"],
+    ["AUTHENTICATING", "Reconnecting to live timing", "RECONNECTING"],
+    ["PROVIDER_UNAVAILABLE", "Live timing provider unavailable", "UNAVAILABLE"],
+    ["WAITING_FOR_PROVIDER", "Waiting for timing data", "WAITING FOR DATA"],
+    ["WAITING_FOR_SESSION_KEY", "Waiting for timing data", "WAITING FOR DATA"],
+    ["SESSION_COMPLETE", "Historical replay data", "REPLAY"],
+  ])("maps provider state %s to its accurate UI state", async (providerState, announcement, label) => {
+    api.getSessionState.mockResolvedValue({ state: { ...state(4, 1, 0), is_replay: false } });
+    const { unmount } = render(<LiveCommandCenter sessionKey="race-1" circuitName="Circuit" eventName="Grand Prix" playbackSequence={4} sessionClock={null} selectedDriver={null} onSelectDriver={vi.fn()} />);
+    await screen.findByRole("button", { name: /George Russell, position 1/i });
+
+    act(() => FakeEventSource.instances.at(-1)!.emit("connection_status", JSON.stringify({
+      connection_state: providerState,
+      current_session_key: "race-1",
+    })));
+
+    expect(screen.getByRole("status", { name: announcement })).toHaveTextContent(label);
+    unmount();
+  });
+
+  it("updates missing-telemetry copy when room source availability changes", async () => {
+    api.getSessionState.mockResolvedValue({ state: { ...state(4, 1, 0), is_replay: false } });
+    const props = {
+      sessionKey: "race-1",
+      circuitName: "Circuit",
+      eventName: "Grand Prix",
+      playbackSequence: 4,
+      sessionClock: null,
+      selectedDriver: 63,
+      onSelectDriver: vi.fn(),
+    } as const;
+    const { rerender } = render(<LiveCommandCenter {...props} sourceAvailability="timing_only" />);
+    await screen.findByRole("button", { name: /George Russell, position 1/i });
+    await userEvent.click(screen.getByRole("button", { name: "Analyst" }));
+    expect(screen.getByText("Timing data is available, but this session has no car telemetry.")).toBeVisible();
+
+    rerender(<LiveCommandCenter {...props} sourceAvailability="unavailable" />);
+    expect(screen.getByText("Timing and car telemetry are unavailable for this session.")).toBeVisible();
+
+    rerender(<LiveCommandCenter {...props} sourceAvailability="telemetry" />);
+    expect(screen.getByText("Car telemetry has not been published for this session yet.")).toBeVisible();
+  });
+
+  it("aborts paginated event requests on session replacement and unmount", async () => {
+    const firstPage = deferred<{ session_key: string; after_sequence_number: number; count: number; events: NormalizedRaceEvent[] }>();
+    const secondPage = deferred<{ session_key: string; after_sequence_number: number; count: number; events: NormalizedRaceEvent[] }>();
+    api.getSessionState.mockImplementation((sessionKey: string) => Promise.resolve({
+      state: sessionKey === "race-1"
+        ? state(10, 1, 0)
+        : { ...state(10, 2, 1.221), session_key: "race-2" },
+    }));
+    api.getSessionEvents
+      .mockResolvedValueOnce({ session_key: "race-1", after_sequence_number: 0, count: 100, events: [event("race-1-visible", 1)] })
+      .mockReturnValueOnce(firstPage.promise)
+      .mockResolvedValueOnce({ session_key: "race-2", after_sequence_number: 0, count: 100, events: [{ ...event("race-2-visible", 1), session_key: "race-2" }] })
+      .mockReturnValueOnce(secondPage.promise);
+    const view = render(<LiveCommandCenter sessionKey="race-1" circuitName="Circuit" eventName="Grand Prix" playbackSequence={10} sessionClock={null} selectedDriver={null} onSelectDriver={vi.fn()} />);
+    await userEvent.click(await screen.findByRole("button", { name: "Load more events" }));
+    const firstSignal = api.getSessionEvents.mock.calls[1]?.[2] as AbortSignal | undefined;
+    expect(firstSignal).toBeInstanceOf(AbortSignal);
+
+    view.rerender(<LiveCommandCenter sessionKey="race-2" circuitName="Circuit" eventName="Grand Prix" playbackSequence={10} sessionClock={null} selectedDriver={null} onSelectDriver={vi.fn()} />);
+    expect(firstSignal?.aborted).toBe(true);
+    await act(async () => firstPage.resolve({
+      session_key: "race-1",
+      after_sequence_number: 1,
+      count: 1,
+      events: [event("late-race-1-page", 2)],
+    }));
+    await screen.findByRole("button", { name: /George Russell, position 2/i });
+    const feed = screen.getByRole("heading", { name: "Important events" }).closest("section");
+    expect(feed).not.toBeNull();
+    expect(within(feed!).getAllByRole("listitem")).toHaveLength(1);
+
+    await userEvent.click(await screen.findByRole("button", { name: "Load more events" }));
+    const secondSignal = api.getSessionEvents.mock.calls[3]?.[2] as AbortSignal | undefined;
+    expect(secondSignal).toBeInstanceOf(AbortSignal);
+    view.unmount();
+    expect(secondSignal?.aborted).toBe(true);
+    await act(async () => secondPage.resolve({
+      session_key: "race-2",
+      after_sequence_number: 1,
+      count: 0,
+      events: [],
+    }));
   });
 
   it("schedules one bounded reconnect and cancels it on unmount", () => {
