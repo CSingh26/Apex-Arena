@@ -300,3 +300,197 @@ async def test_lifespan_deferred_sweep_recovers_recently_dead_owner(
         assert stored_room.status == "paused"
         assert playback.current_event_sequence == 17
         assert playback.current_message_sequence == 9
+
+
+@pytest.mark.parametrize("operation", ["claim", "reconcile"])
+@pytest.mark.parametrize("healthy", [True, False])
+async def test_room_contention_does_not_hold_playback_or_starve_healthy_owner(
+    sql_replay, operation, healthy
+):
+    repository, room = sql_replay
+    token = uuid4()
+    if healthy:
+        assert await repository.claim_replay(room.id, token, lease_seconds=0.5)
+    async with repository.database.session_factory() as holder:
+        await holder.execute(
+            select(RaceRoomRecord).where(RaceRoomRecord.id == room.id).with_for_update()
+        )
+        action = (
+            repository.claim_replay(room.id, uuid4(), lease_seconds=30)
+            if operation == "claim"
+            else repository.pause_orphaned_running_rows()
+        )
+        result = await asyncio.wait_for(action, 0.2)
+        assert result == 0
+        if healthy:
+            assert await asyncio.wait_for(
+                repository.renew_replay(room.id, token, lease_seconds=0.5), 0.2
+            )
+        await holder.rollback()
+    playback, stored_room = await records(repository, room)
+    assert playback.current_event_sequence == 17
+    assert playback.is_paused is False
+    assert stored_room.status == "replaying"
+    assert playback.replay_owner_token == (token if healthy else None)
+
+
+async def replay_mutation(repository, room, token, operation):
+    if operation == "paired":
+        return await repository.update_playback(
+            room.id,
+            current_event_sequence=99,
+            current_message_sequence=99,
+            current_lap=99,
+            is_paused=True,
+            room_status=RoomStatus.COMPLETED,
+            owner_token=token,
+        )
+    if operation == "status":
+        return await repository.update_room_status(
+            room.id,
+            RoomStatus.FAILED,
+            current_lap=99,
+            owner_token=token,
+        )
+    return await repository.reset_discussion(room.id, owner_token=token)
+
+
+async def assert_original_replay(repository, room):
+    playback, stored_room = await records(repository, room)
+    assert playback.current_event_sequence == 17
+    assert playback.current_message_sequence == 9
+    assert playback.current_lap == 4
+    assert playback.is_paused is False
+    assert stored_room.status == "replaying"
+    assert stored_room.current_lap == 4
+    assert stored_room.last_event_at == datetime(2026, 7, 17, 12, 4, tzinfo=UTC)
+
+
+@pytest.mark.parametrize("operation", ["paired", "status", "reset"])
+async def test_replay_mutations_decline_locked_room_without_starving_renewal(sql_replay, operation):
+    from app.storage.room_repository import ReplayWriteBusyError
+
+    repository, room = sql_replay
+    token = uuid4()
+    assert await repository.claim_replay(room.id, token, lease_seconds=0.5)
+    async with repository.database.session_factory() as holder:
+        await holder.execute(
+            select(RaceRoomRecord).where(RaceRoomRecord.id == room.id).with_for_update()
+        )
+        with pytest.raises(ReplayWriteBusyError, match="retry"):
+            await asyncio.wait_for(replay_mutation(repository, room, token, operation), 0.2)
+        assert await repository.renew_replay(room.id, token, lease_seconds=0.5)
+        await holder.rollback()
+    await assert_original_replay(repository, room)
+    # A valid retry remains available after contention clears.
+    await replay_mutation(repository, room, token, operation)
+
+
+@pytest.mark.parametrize("operation", ["paired", "status", "reset"])
+async def test_expiry_during_later_mutation_rolls_back_entire_transaction(sql_replay, operation):
+    from app.storage.room_repository import ReplayOwnershipLostError
+
+    repository, room = sql_replay
+    token = uuid4()
+    assert await repository.claim_replay(room.id, token, lease_seconds=0.5)
+    async with repository.database.session_factory() as session:
+        schema = session.bind.get_execution_options()["schema_translate_map"][None]
+        await session.execute(
+            text(f'''
+            CREATE FUNCTION "{schema}".delay_room_write() RETURNS trigger
+            LANGUAGE plpgsql AS $$
+            BEGIN PERFORM pg_sleep(0.55); RETURN NEW; END;
+            $$
+        ''')
+        )
+        await session.execute(
+            text(f'''
+            CREATE TRIGGER delay_room_write BEFORE UPDATE ON "{schema}".race_rooms
+            FOR EACH ROW EXECUTE FUNCTION "{schema}".delay_room_write()
+        ''')
+        )
+        await session.commit()
+    with pytest.raises(ReplayOwnershipLostError, match="retry"):
+        await replay_mutation(repository, room, token, operation)
+    assert not await repository.renew_replay(room.id, token, lease_seconds=30)
+    await assert_original_replay(repository, room)
+
+
+async def test_reset_later_message_lock_is_bounded_and_rolls_back(sql_replay):
+    from app.storage.room_repository import ReplayWriteBusyError
+
+    repository, room = sql_replay
+    token = uuid4()
+    assert await repository.claim_replay(room.id, token, lease_seconds=0.5)
+    async with repository.database.session_factory() as holder:
+        schema = holder.bind.get_execution_options()["schema_translate_map"][None]
+        await holder.execute(text(f'LOCK TABLE "{schema}".room_messages IN ACCESS EXCLUSIVE MODE'))
+        with pytest.raises(ReplayWriteBusyError, match="retry"):
+            await asyncio.wait_for(repository.reset_discussion(room.id, owner_token=token), 0.3)
+        assert await repository.renew_replay(room.id, token, lease_seconds=0.5)
+        await holder.rollback()
+    await assert_original_replay(repository, room)
+
+
+async def test_worker_retries_busy_sql_without_reconsuming_event_while_heartbeat_renews(sql_replay):
+    from tests.test_room_replay import coordinator, replay_event
+
+    repository, room = sql_replay
+    service, _, _, discussion, _, _ = coordinator(room, [replay_event(18, 5)])
+    service.rooms = repository
+    service.lease_seconds = 0.5
+    discussion.block_on_sequence = 18
+    try:
+        await service.resume(room)
+        await asyncio.wait_for(discussion.consume_started.wait(), 1)
+        async with repository.database.session_factory() as holder:
+            await holder.execute(
+                select(RaceRoomRecord).where(RaceRoomRecord.id == room.id).with_for_update()
+            )
+            discussion.consume_release.set()
+            await asyncio.sleep(0.6)
+            assert not service._tasks[room.id].done()
+            playback, stored_room = await records(repository, room)
+            assert playback.current_event_sequence == 17
+            assert stored_room.status == "replaying"
+            assert discussion.consumed == [18]
+            assert not await repository.claim_replay(room.id, uuid4(), lease_seconds=30)
+            await holder.rollback()
+        await asyncio.wait_for(service._tasks[room.id], 2)
+        playback, stored_room = await records(repository, room)
+        assert playback.current_event_sequence == 18
+        assert stored_room.status == "completed"
+        assert discussion.consumed == [18]
+    finally:
+        await service.close()
+
+
+@pytest.mark.parametrize("operation", ["claim", "reconcile"])
+async def test_room_table_contention_is_also_bounded(sql_replay, operation):
+    repository, room = sql_replay
+    async with repository.database.session_factory() as holder:
+        schema = holder.bind.get_execution_options()["schema_translate_map"][None]
+        await holder.execute(text(f'LOCK TABLE "{schema}".race_rooms IN ACCESS EXCLUSIVE MODE'))
+        if operation == "claim":
+            action = repository.claim_replay(room.id, uuid4(), lease_seconds=30)
+        else:
+            action = repository.pause_orphaned_running_rows()
+        assert await asyncio.wait_for(action, 0.3) == 0
+        await holder.rollback()
+
+
+async def test_missing_playback_claim_does_not_wait_indefinitely_on_room_fk(sql_replay):
+    repository, room = sql_replay
+    async with repository.database.session_factory() as session:
+        await session.delete(await session.get(RoomPlaybackStateRecord, room.id))
+        await session.commit()
+    async with repository.database.session_factory() as holder:
+        await holder.execute(
+            select(RaceRoomRecord).where(RaceRoomRecord.id == room.id).with_for_update()
+        )
+        assert not await asyncio.wait_for(
+            repository.claim_replay(room.id, uuid4(), lease_seconds=30), 0.3
+        )
+        await holder.rollback()
+    playback, _ = await records(repository, room)
+    assert playback is None

@@ -577,6 +577,25 @@ async def test_resume_waits_for_retiring_worker_then_claims_new_lifetime():
         await service.close()
 
 
+async def test_temporary_storage_contention_becomes_safe_control_conflict():
+    from app.storage.room_repository import ReplayWriteBusyError
+
+    room = replay_room()
+    service, rooms, _, _, _, _ = coordinator(room, [])
+
+    async def busy(*args, **kwargs):
+        raise ReplayWriteBusyError("Replay room is busy; retry the control request")
+
+    rooms.update_playback = busy
+    try:
+        with pytest.raises(ReplayUnavailableError, match="retry"):
+            await service.pause(room)
+        assert rooms.owner_token is None
+        assert rooms.status_updates == []
+    finally:
+        await service.close()
+
+
 @pytest.mark.asyncio
 async def test_live_capture_is_reset_and_marked_replay_without_deleting_discussion() -> None:
     room = replay_room()

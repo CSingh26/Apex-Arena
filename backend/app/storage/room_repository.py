@@ -1,12 +1,15 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import and_, case, delete, func, or_, select, update
+from sqlalchemy import and_, case, delete, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.rooms import (
@@ -51,6 +54,10 @@ COMPLETED_BACKFILL_SESSION_TYPES: tuple[SessionType, ...] = (
 
 class ReplayOwnershipLostError(RuntimeError):
     """The replay lease expired or another worker now owns the playback row."""
+
+
+class ReplayWriteBusyError(RuntimeError):
+    """A transaction was rolled back so its worker's heartbeat can keep renewing."""
 
 
 class SqlRaceRoomRepository:
@@ -782,28 +789,86 @@ class SqlRaceRoomRepository:
             raise ReplayOwnershipLostError("Replay ownership expired; retry the control request")
         return record
 
+    async def _try_lock_replay_room(self, session: AsyncSession, room_id: UUID):
+        # Never wait on a second row while holding playback: its heartbeat needs
+        # that first lock. The caller rolls back/defer-retries if room is busy.
+        await session.execute(text("SET LOCAL lock_timeout = '100ms'"))
+        try:
+            return (
+                await session.execute(
+                    select(RaceRoomRecord)
+                    .where(RaceRoomRecord.id == room_id)
+                    .with_for_update(skip_locked=True)
+                )
+            ).scalar_one_or_none()
+        except DBAPIError as exc:
+            if getattr(exc.orig, "sqlstate", None) == "55P03":
+                # SKIP LOCKED handles row locks, not an exclusive table lock.
+                # Every caller exits/rolls back when this returns None.
+                return None
+            raise
+
+    @asynccontextmanager
+    async def _replay_mutation(
+        self, room_id: UUID, owner_token: UUID | None, *, lock_room: bool
+    ) -> AsyncIterator[AsyncSession]:
+        async with self.database.session_factory() as session:
+            try:
+                if owner_token is not None:
+                    await self._require_replay_owner(session, room_id, owner_token)
+                    if lock_room:
+                        if await self._try_lock_replay_room(session, room_id) is None:
+                            raise ReplayWriteBusyError(
+                                "Replay room is busy; retry the control request"
+                            )
+                        await self._require_replay_owner(session, room_id, owner_token)
+                    # Message/evidence writes can meet further locks. Bound each
+                    # wait, roll back the whole transaction, and let renewal run.
+                    await session.execute(text("SET LOCAL lock_timeout = '100ms'"))
+                yield session
+                if owner_token is not None:
+                    await session.flush()
+                    # Earlier validation cannot authorize a transaction that
+                    # expired during a subsequent UPDATE/DELETE/trigger await.
+                    await self._require_replay_owner(session, room_id, owner_token)
+                await session.commit()
+            except DBAPIError as exc:
+                if getattr(exc.orig, "sqlstate", None) == "55P03":
+                    raise ReplayWriteBusyError(
+                        "Replay storage is busy; retry the control request"
+                    ) from exc
+                raise
+
     async def claim_replay(self, room_id: UUID, owner_token: UUID, *, lease_seconds: float) -> bool:
         async with self.database.session_factory() as session:
-            await session.execute(
-                insert(RoomPlaybackStateRecord)
-                .values(room_id=room_id)
-                .on_conflict_do_nothing(index_elements=["room_id"])
-            )
             record = await self._lock_replay(session, room_id)
-            room = (
-                await session.execute(
-                    select(RaceRoomRecord).where(RaceRoomRecord.id == room_id).with_for_update()
-                )
-            ).scalar_one()
+            if record is None:
+                # Creating playback can wait on the room FK before the row
+                # exists. Bound that case too, without shortening the initial
+                # lock wait for an existing playback row.
+                await session.execute(text("SET LOCAL lock_timeout = '100ms'"))
+                try:
+                    await session.execute(
+                        insert(RoomPlaybackStateRecord)
+                        .values(room_id=room_id)
+                        .on_conflict_do_nothing(index_elements=["room_id"])
+                    )
+                    record = await self._lock_replay(session, room_id)
+                except DBAPIError as exc:
+                    if getattr(exc.orig, "sqlstate", None) == "55P03":
+                        return False
+                    raise
             now = await session.scalar(select(func.clock_timestamp()))
-            if room.mode not in {RoomMode.REPLAY.value, RoomMode.ARCHIVED.value}:
-                return False
             if (
                 record.replay_owner_token is not None
                 and record.replay_owner_expires_at is not None
                 and record.replay_owner_expires_at > now
             ):
                 return False
+            room = await self._try_lock_replay_room(session, room_id)
+            if room is None or room.mode not in {RoomMode.REPLAY.value, RoomMode.ARCHIVED.value}:
+                return False
+            now = await session.scalar(select(func.clock_timestamp()))
             record.replay_owner_token = owner_token
             record.replay_owner_expires_at = now + timedelta(seconds=lease_seconds)
             await session.commit()
@@ -834,41 +899,48 @@ class SqlRaceRoomRepository:
     async def pause_orphaned_running_rows(self) -> int:
         """Pause existing orphan rows; callers must first drain pre-lease workers."""
         async with self.database.session_factory() as session:
-            candidates = (
-                await session.scalars(
-                    select(RoomPlaybackStateRecord.room_id)
-                    .join(RaceRoomRecord, RaceRoomRecord.id == RoomPlaybackStateRecord.room_id)
-                    .where(
-                        RoomPlaybackStateRecord.is_paused.is_(False),
-                        RaceRoomRecord.status == RoomStatus.REPLAYING.value,
-                        RaceRoomRecord.mode.in_([RoomMode.REPLAY.value, RoomMode.ARCHIVED.value]),
+            await session.execute(text("SET LOCAL lock_timeout = '100ms'"))
+            try:
+                candidates = (
+                    await session.scalars(
+                        select(RoomPlaybackStateRecord.room_id)
+                        .join(RaceRoomRecord, RaceRoomRecord.id == RoomPlaybackStateRecord.room_id)
+                        .where(
+                            RoomPlaybackStateRecord.is_paused.is_(False),
+                            RaceRoomRecord.status == RoomStatus.REPLAYING.value,
+                            RaceRoomRecord.mode.in_(
+                                [RoomMode.REPLAY.value, RoomMode.ARCHIVED.value]
+                            ),
+                        )
+                        .order_by(RoomPlaybackStateRecord.room_id)
                     )
-                    .order_by(RoomPlaybackStateRecord.room_id)
-                )
-            ).all()
+                ).all()
+            except DBAPIError as exc:
+                if getattr(exc.orig, "sqlstate", None) == "55P03":
+                    return 0
+                raise
         recovered = 0
         for room_id in candidates:
             # Same lock order as claims and fenced writes: playback, then room.
             # One short transaction per candidate; recheck after both locks.
             async with self.database.session_factory() as session:
                 record = await self._lock_replay(session, room_id)
-                room = (
-                    await session.execute(
-                        select(RaceRoomRecord).where(RaceRoomRecord.id == room_id).with_for_update()
-                    )
-                ).scalar_one_or_none()
                 now = await session.scalar(select(func.clock_timestamp()))
                 if (
                     record is None
                     or record.is_paused
-                    or room is None
-                    or room.status != RoomStatus.REPLAYING.value
-                    or room.mode not in {RoomMode.REPLAY.value, RoomMode.ARCHIVED.value}
                     or (
                         record.replay_owner_token is not None
                         and record.replay_owner_expires_at is not None
                         and record.replay_owner_expires_at > now
                     )
+                ):
+                    continue
+                room = await self._try_lock_replay_room(session, room_id)
+                if (
+                    room is None
+                    or room.status != RoomStatus.REPLAYING.value
+                    or room.mode not in {RoomMode.REPLAY.value, RoomMode.ARCHIVED.value}
                 ):
                     continue
                 record.is_paused = True
@@ -918,9 +990,9 @@ class SqlRaceRoomRepository:
             values["is_paused"] = is_paused
         if started_at is not None:
             values["started_at"] = started_at
-        async with self.database.session_factory() as session:
-            if owner_token is not None:
-                await self._require_replay_owner(session, room_id, owner_token)
+        async with self._replay_mutation(
+            room_id, owner_token, lock_room=room_status is not None
+        ) as session:
             await session.execute(
                 update(RoomPlaybackStateRecord)
                 .where(RoomPlaybackStateRecord.room_id == room_id)
@@ -937,7 +1009,6 @@ class SqlRaceRoomRepository:
                 )
             record = await session.get(RoomPlaybackStateRecord, room_id)
             result = RoomPlaybackState.model_validate(record, from_attributes=True)
-            await session.commit()
             return result
 
     async def max_message_sequence(self, room_id: UUID) -> int:
@@ -983,13 +1054,10 @@ class SqlRaceRoomRepository:
             values["current_lap"] = current_lap
         if last_event_at is not None:
             values["last_event_at"] = last_event_at
-        async with self.database.session_factory() as session:
-            if owner_token is not None:
-                await self._require_replay_owner(session, room_id, owner_token)
+        async with self._replay_mutation(room_id, owner_token, lock_room=True) as session:
             await session.execute(
                 update(RaceRoomRecord).where(RaceRoomRecord.id == room_id).values(**values)
             )
-            await session.commit()
 
     async def mark_generation_status(
         self,
@@ -1083,9 +1151,7 @@ class SqlRaceRoomRepository:
 
     async def reset_discussion(self, room_id: UUID, *, owner_token: UUID | None = None) -> None:
         message_ids = select(RoomMessageRecord.id).where(RoomMessageRecord.room_id == room_id)
-        async with self.database.session_factory() as session:
-            if owner_token is not None:
-                await self._require_replay_owner(session, room_id, owner_token)
+        async with self._replay_mutation(room_id, owner_token, lock_room=True) as session:
             await session.execute(
                 delete(MessageEvidenceRecord).where(
                     MessageEvidenceRecord.message_id.in_(message_ids)
@@ -1099,4 +1165,3 @@ class SqlRaceRoomRepository:
                 .where(RaceRoomRecord.id == room_id)
                 .values(message_count=0, current_lap=None, last_event_at=None)
             )
-            await session.commit()

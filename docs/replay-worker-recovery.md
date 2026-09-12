@@ -50,6 +50,17 @@ transitions commit together. Ownership loss stops local work; database failures
 leave expiry available for recovery. Closing the service cancels in-flight
 initialization and renewal as well as workers.
 
+Healthy ownership is checked before seeking the room lock. Recovery skips a
+busy room, and a competing claim declines it, without keeping playback locked
+while a heartbeat waits. Fenced writes acquire required row locks before their
+final validation. Additional SQL lock waits are bounded at 100 ms, and ownership
+is checked again after mutations/flush before commit. Contention or expiry rolls
+back the entire mutation. A worker retries only the rolled-back SQL write with
+backoff while its heartbeat runs, without consuming the event or discussion
+again; a user control gets a retryable 409. True expiry/replacement still stops
+the worker. A room busy during both startup sweeps remains for explicit resume
+or a subsequent recovery invocation.
+
 Recovery leaves the room paused. Use the existing explicit resume control to
 rebuild the recorded prefix and continue from the preserved event cursor.
 Restart retains its existing meaning: reset playback and discussion.

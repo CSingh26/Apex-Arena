@@ -18,7 +18,11 @@ from app.services.race_state import RaceStateEngine
 from app.services.session_semantics import normalize_qualifying_phase
 from app.storage.redis import EventBus
 from app.storage.repositories import SqlNormalizedEventRepository
-from app.storage.room_repository import ReplayOwnershipLostError, SqlRaceRoomRepository
+from app.storage.room_repository import (
+    ReplayOwnershipLostError,
+    ReplayWriteBusyError,
+    SqlRaceRoomRepository,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -142,7 +146,8 @@ class RoomReplayCoordinator:
                     room.id, lease.token, lease_seconds=self.lease_seconds
                 ):
                     raise ReplayUnavailableError(
-                        "Replay is owned by another worker; retry the control request shortly"
+                        "Replay is busy or owned by another worker; "
+                        "retry the control request shortly"
                     )
                 self._leases[room.id] = lease
                 lease.heartbeat = asyncio.create_task(
@@ -158,7 +163,7 @@ class RoomReplayCoordinator:
             context = self._owner.set(lease.token)
             try:
                 yield
-            except ReplayOwnershipLostError as exc:
+            except (ReplayOwnershipLostError, ReplayWriteBusyError) as exc:
                 raise ReplayUnavailableError(str(exc)) from exc
             except asyncio.CancelledError:
                 if lease.lost:
@@ -173,7 +178,18 @@ class RoomReplayCoordinator:
                     await self._release_lease(room.id, lease)
 
     async def _update_playback(self, room_id: UUID, **values) -> RoomPlaybackState:
-        return await self.rooms.update_playback(room_id, owner_token=self._owner.get(), **values)
+        while True:
+            try:
+                return await self.rooms.update_playback(
+                    room_id, owner_token=self._owner.get(), **values
+                )
+            except ReplayWriteBusyError:
+                if asyncio.current_task() is not self._tasks.get(room_id):
+                    raise
+                # Retry only the rolled-back SQL mutation. Event reduction and
+                # discussion already ran; don't consume them again. The separate
+                # heartbeat can renew while this worker waits without SQL locks.
+                await asyncio.sleep(min(0.1, self.lease_seconds / 3))
 
     async def _update_room_status(self, room_id: UUID, status: RoomStatus, **values) -> None:
         await self.rooms.update_room_status(
