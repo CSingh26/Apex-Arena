@@ -77,6 +77,10 @@ cd ..
 scripts/run-production-migrations.sh --check
 ```
 
+`database_status` checks PostgreSQL connectivity, the Alembic revision, and
+database counts only; it does not test Redis. On the main API app,
+`/health/ready` is the 200/503 dependency check for both PostgreSQL and Redis.
+
 Never paste DSNs, passwords, OAuth tokens, or internal API keys into command
 history or reports.
 
@@ -168,10 +172,10 @@ RECENT_SESSION_RECONCILIATION_ENABLED=true
 RECENT_SESSION_AUTO_BACKFILL_ENABLED=true
 ```
 
-It runs only in `ingestor` or `combined` and covers Practice 1/2/3, Sprint
-Qualifying, Sprint, Qualifying, and Race. The defaults are a 14-day lookback,
-15-minute provider grace, 900-second interval, and one selected room per pass.
-Selected rooms are processed sequentially.
+It runs in `ingestor`, `combined`, or legacy non-production `all` and covers
+Practice 1/2/3, Sprint Qualifying, Sprint, Qualifying, and Race. The defaults
+are a 14-day lookback, 15-minute provider grace, 900-second interval, and one
+selected room per pass. Selected rooms are processed sequentially.
 `RECENT_SESSION_AUTO_BACKFILL_MAX_CONCURRENT` is declared and validated but is
 not consumed by this reconciler. Durable least-recently-attempted ordering
 prevents permanent starvation across restarts.
@@ -180,11 +184,13 @@ The recent candidate query can select an incomplete `RoomStatus.LIVE` row once
 its scheduled start is sufficiently overdue (four hours for a race, two hours
 for other types, in addition to the provider grace). It advances
 `reconciliation_attempted_at` before provider work. The reconciler may inspect
-endpoints and resolve/bind identity, but the historical service then refuses a
-provider session with a missing or future `date_end`; no historical endpoint
-ingestion runs, and the attempt remains retryable. This differs from
-`backfill_completed_rooms`, whose repository query explicitly excludes live
-rooms before invoking backfill.
+endpoints and resolve/bind identity, but the historical service then refuses
+an active provider session with a missing or future `date_end`; no historical
+endpoint ingestion runs. The failure is reported as retryable, and the live
+row remains eligible for a later pass while it still matches the candidate
+filters; the durable marker only moves it through the fair ordering. This
+differs from `backfill_completed_rooms`, whose repository query explicitly
+excludes `RoomStatus.LIVE` before invoking backfill.
 
 The reconciler inspects provider endpoint availability first. It binds a
 confident provider identity but leaves the room pending when drivers/timing are
@@ -227,10 +233,13 @@ WHERE session_key = (
 );
 ```
 
-`GET /api/v1/internal/openf1/backfill-status` requires
+`GET /api/v1/internal/openf1/backfill-status` on the main API app requires
 `X-Internal-API-Key` and reports only safe state, counters, role-aware provider
 status, recent-reconciliation state, lease ownership, and Redis diagnostics.
-Do not confuse an API process's local SSE client count with a cluster total.
+An API-only process reads shared provider status from Redis; `combined` and
+legacy `all` use process-local worker status. The dedicated ingestor does not
+register this API route. Do not confuse any API process's local SSE client count
+with a cluster total.
 
 After a successful canary, verify the public room/session response has the
 expected slug, confident identity, availability, and replay/result flags. Run

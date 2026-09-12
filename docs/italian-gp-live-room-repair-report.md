@@ -64,10 +64,11 @@ Tasks 1–18 retain one provider-neutral normalized event path and add or correc
   durable least-recently-attempted ordering;
 - replay state rebuilding through the saved cursor with replay-marked event
   copies and bounded rehydration;
-- role-aware provider health: API roles read the Redis status stream and mark
-  reports older than 120 seconds `STALE`; API/combined provider probes can
-  return HTTP 503, while the dedicated ingestor's diagnostic provider route
-  always returns HTTP 200 and exposes state in JSON;
+- role-aware provider health: the API-only role reads the Redis status stream
+  and marks reports older than 120 seconds `STALE`; `combined` and legacy `all`
+  use process-local worker state. Main-app provider probes can return HTTP 503,
+  while the dedicated ingestor's diagnostic provider route always returns
+  HTTP 200 and exposes state in JSON;
 - session-scoped browser streams, strict frame validation, authoritative room
   rehydration, bounded GPS caches, mutable live windows, immutable replay
   windows, and two-sided seek pruning that preserves quiet drivers.
@@ -90,18 +91,25 @@ The committed modes are not interchangeable:
   session key.
 
 `api` serves HTTP/SSE and reads shared provider state. `ingestor` runs the
-dedicated worker app. `combined` performs both roles. Staging/production
+dedicated worker app. `combined` performs both roles; legacy non-production
+`all` also uses the main API app and runs the worker. Staging/production
 ingesting roles require the direct `DATABASE_MIGRATION_URL`; production rejects
-the legacy `all` role. Only API/combined exposes `/health/ready` and its
-200/503 `/health/provider` gate. A dedicated ingestor exposes `/health/live`
-and an always-200 `/health/provider` diagnostic, so operators must inspect the
-JSON state and check shared dependency readiness elsewhere.
+`all`. The main API app used by `api`, `combined`, and `all` exposes
+`/health/ready` and its 200/503 `/health/provider` gate. A dedicated ingestor
+exposes `/health/live` and an always-200 `/health/provider` diagnostic, so
+operators must inspect the JSON state. PostgreSQL plus Redis readiness must be
+checked at the main API app's `/health/ready`; `database_status` checks only
+PostgreSQL/schema state and does not test Redis.
 
-Recent recovery uses an age/status candidate predicate. It can inspect a
-sufficiently overdue live row and records the attempt before provider work.
-The historical backfill completion guard refuses a missing/future provider
-`date_end`, so no historical endpoint ingestion runs for an unfinished
-session. The manual completed-room batch separately excludes live rows.
+Automatic recent recovery runs in `ingestor`, `combined`, and legacy
+non-production `all`. Its age/status candidate predicate can select a
+sufficiently overdue `RoomStatus.LIVE` row and records the attempt before
+provider work. The historical backfill completion guard refuses an active
+provider session with a missing/future `date_end`, so no historical endpoint
+ingestion runs for it. The outcome is retryable and the row remains eligible
+for later passes while it matches the candidate filters; the attempt marker
+only affects fair ordering. The manual completed-room batch separately and
+explicitly excludes `RoomStatus.LIVE` rows.
 
 ## Historical Italian GP evidence
 

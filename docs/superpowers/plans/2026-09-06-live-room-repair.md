@@ -80,16 +80,23 @@ even when `OPENF1_LIVE_AUTO_CONNECT=false`; `mqtt` requires auto-connect and
 does not fall back to REST; `auto` requires auto-connect and uses REST only
 while MQTT is not connected and fresh for the same session. `api` processes do
 not ingest. API-role provider status is read from Redis and becomes `STALE`
-after 120 seconds; combined reports local state. API/combined owns
-`/health/ready` and the provider route that can return HTTP 503. The dedicated
-ingestor has no readiness route, and its `/health/provider` is an always-200
-diagnostic whose JSON status must be evaluated.
+after 120 seconds; `combined` and legacy non-production `all` report
+process-local worker state. The main API app used by `api`, `combined`, and
+`all` owns `/health/ready` and the provider route that can return HTTP 503. The
+dedicated ingestor has no readiness route, and its `/health/provider` is an
+always-200 diagnostic whose JSON status must be evaluated. `/health/ready`
+checks PostgreSQL plus Redis; the `database_status` CLI checks only
+PostgreSQL/schema state and does not test Redis.
 
-Recent recovery can select a sufficiently overdue live row, mark its durable
-attempt time, and inspect/resolve provider data. The historical service's
-provider completion guard rejects an unfinished `date_end`, so it does not run
-historical endpoint ingestion for that row. Manual completed-room selection
-explicitly excludes live status.
+Automatic recent recovery runs in `ingestor`, `combined`, and legacy
+non-production `all`. It can select a sufficiently overdue `RoomStatus.LIVE`
+row, mark its durable attempt time, and inspect/resolve provider data. The
+historical service's provider completion guard rejects an active provider
+session whose `date_end` is missing or in the future, so it does not run
+historical endpoint ingestion for that row. The outcome is retryable and the
+row remains eligible for later passes while it matches the filters; the marker
+only changes fair ordering. Manual completed-room selection explicitly
+excludes `RoomStatus.LIVE`.
 
 Replay now rebuilds state through the durable playback cursor. Browser GPS uses
 session-scoped bounded caches, mutable live windows, immutable replay/archive

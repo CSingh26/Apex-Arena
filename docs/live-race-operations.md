@@ -31,9 +31,10 @@ Use one of these deployed process roles:
 - `APP_PROCESS_ROLE=combined`: API and worker in one process.
 
 `all` is retained for non-production compatibility and is rejected when
-`APP_ENV=production`. An ingesting `ingestor` or `combined` process must have
-`DATABASE_MIGRATION_URL` set to the direct, non-pooler PostgreSQL endpoint in
-staging and production. The process holds a session-scoped advisory lease;
+`APP_ENV=production`; when used, it serves the API and runs the worker like
+`combined`. An ingesting `ingestor`, `combined`, or legacy `all` process must
+have `DATABASE_MIGRATION_URL` set to the direct, non-pooler PostgreSQL endpoint
+in staging and production. The process holds a session-scoped advisory lease;
 failure to acquire it is fatal. Do not run multiple independent live workers.
 
 ## Live transport modes
@@ -91,17 +92,17 @@ prove:
 
 | Process | Probe behavior |
 | --- | --- |
-| API or combined | `/health/live` is process-only HTTP 200. `/health/ready` checks PostgreSQL and Redis and returns 200 or 503. `/health/provider` evaluates provider state and returns 200 or 503 when live transport is configured. |
+| API, combined, or legacy `all` served by the main API app | `/health/live` is process-only HTTP 200. `/health/ready` checks PostgreSQL and Redis and returns 200 or 503. `/health/provider` evaluates provider state and returns 200 or 503 when live transport is configured. |
 | Dedicated ingestor | `/health/live` is process-only HTTP 200. `/health/provider` always returns HTTP 200 when its handler completes; its JSON `status`, `current_session_key`, `last_event_at`, reconnect count, and reconciliation fields are diagnostic and must be inspected. `/health/ready`, `/health`, `/api/v1/live/status`, and `/api/v1/engine/status` are not registered. |
 
-On an API process, provider state is read from the shared Redis status stream
-and a report older than 120 seconds becomes `STALE`; a combined process reads
-its local worker state. `/api/v1/live/status` on API/combined returns that
-role-aware state with more detail. `/api/v1/engine/status` adds durable counts
-and database/Redis health, but its top-level readiness still reflects database
-and Redis, not provider freshness.
+On an API-only process, provider state is read from the shared Redis status
+stream and a report older than 120 seconds becomes `STALE`; `combined` and
+legacy `all` read their process-local worker state. `/api/v1/live/status` on
+the main API app returns that role-aware state with more detail.
+`/api/v1/engine/status` adds durable counts and database/Redis health, but its
+top-level readiness still reflects database and Redis, not provider freshness.
 
-The API/combined `/health` route is a legacy aggregate whose OpenF1-live
+The main API app's `/health` route is a legacy aggregate whose OpenF1-live
 component is based on configuration and credential presence. Do not use it as
 proof that the REST/MQTT worker is running.
 
@@ -119,15 +120,16 @@ Before a session:
 2. Confirm the database is at the single Alembic head
    `20260911_0015`; see the migration checks below.
 3. Confirm exactly one ingestor owns the advisory lease.
-4. Against the API/combined service, require HTTP 200 from `/health/ready`, use
-   `/health/provider` as the 200/503 provider gate, and inspect
-   `/api/v1/live/status` for the expected room/session identity.
+4. Against the API, combined, or legacy `all` service, require HTTP 200 from
+   `/health/ready`, use `/health/provider` as the 200/503 provider gate, and
+   inspect `/api/v1/live/status` for the expected room/session identity.
 5. Against a dedicated ingestor, require HTTP 200 from `/health/live`, then
    parse `/health/provider` and require an operational JSON `status` and the
    expected session/freshness fields. Do not probe its absent `/health/ready`
    route or treat the diagnostic endpoint's HTTP 200 alone as readiness. Check
-   shared PostgreSQL/Redis readiness through the API service or an explicit
-   operator database-status check.
+   PostgreSQL plus Redis readiness through the main API service's
+   `/health/ready`. The `database_status` CLI is only a PostgreSQL/schema check
+   and cannot substitute for the Redis part of readiness.
 6. Open `/api/v1/race-rooms/events` on the API service. A calendar-live item may
    link to a waiting room with no session key; an upcoming item remains
    schedule-only.
@@ -177,20 +179,23 @@ RECENT_SESSION_AUTO_BACKFILL_ENABLED=true
 
 The defaults are disabled, a 14-day lookback, a 15-minute provider grace
 period, a 900-second pass interval, and one selected room per pass. It runs
-only in `ingestor` or `combined`, processes selected rooms sequentially, excludes
-high-frequency `car_data` and `location`, resumes non-empty endpoint
-checkpoints, retries empty endpoints, and leaves incomplete provider data
-pending. `RECENT_SESSION_AUTO_BACKFILL_MAX_CONCURRENT` is declared and
-validated but is not consumed by the current sequential reconciler. Migration
-`20260911_0015` supplies the durable fairness marker.
+in `ingestor`, `combined`, or legacy non-production `all`, processes selected
+rooms sequentially, excludes high-frequency `car_data` and `location`, resumes
+non-empty endpoint checkpoints, retries empty endpoints, and leaves incomplete
+provider data pending. `RECENT_SESSION_AUTO_BACKFILL_MAX_CONCURRENT` is
+declared and validated but is not consumed by the current sequential
+reconciler. Migration `20260911_0015` supplies the durable fairness marker.
 
 The candidate query is age/status based rather than a strict `status != live`
 filter. A sufficiently overdue `RoomStatus.LIVE` row can therefore be selected
 and have `reconciliation_attempted_at` advanced. The reconciler may resolve or
-bind provider identity, but `OpenF1HistoricalBackfillService` rejects an
-unfinished provider session whose `date_end` is missing or in the future, so
-historical endpoint ingestion does not run. This is reported as retryable. The
-manual completed-room batch has a separate explicit `status != live` filter.
+bind provider identity, but `OpenF1HistoricalBackfillService` rejects an active
+provider session whose `date_end` is missing or in the future, so historical
+endpoint ingestion does not run. That failure is reported as retryable, and
+the row remains eligible for a later pass while it continues to match the
+candidate filters; the attempt marker changes fair ordering, not eligibility.
+The manual completed-room batch is different: its repository query explicitly
+excludes `RoomStatus.LIVE` rows before invoking backfill.
 
 For explicit recovery, use
 [`openf1-rest-backfill.md`](openf1-rest-backfill.md).
@@ -209,10 +214,14 @@ cd ..
 scripts/run-production-migrations.sh --check
 ```
 
-The status and `--check` commands apply no migration. Before a production
-upgrade, create a recoverable database backup/branch and run the reviewed
-one-shot migration process against `DATABASE_MIGRATION_URL`. Do not downgrade
-or delete provider facts as a rollback shortcut.
+`database_status` checks the selected PostgreSQL connection, its schema
+revision, and database row counts; it does not connect to or test Redis. The
+API-app `/health/ready` endpoint is the operational readiness check that covers
+both PostgreSQL and Redis. The status and `--check` commands apply no
+migration. Before a production upgrade, create a recoverable database
+backup/branch and run the reviewed one-shot migration process against
+`DATABASE_MIGRATION_URL`. Do not downgrade or delete provider facts as a
+rollback shortcut.
 
 No production rollout is recorded by this document. Tasks 20–27 still contain
 security, restart reconciliation, CI seed, release-graph, formatting, and full
