@@ -131,7 +131,8 @@ class FakeJobs:
 
     async def complete_endpoint(self, season, session_key, endpoint, **counts):  # type: ignore[no-untyped-def]
         self.endpoint_updates.append(endpoint)
-        self.record.completed_endpoints.append(endpoint)
+        if counts["fetched"] > 0:
+            self.record.completed_endpoints.append(endpoint)
         self.record.rows_fetched += counts["fetched"]
         self.record.rows_processed += counts["processed"]
         self.record.rows_inserted += counts["inserted"]
@@ -152,25 +153,34 @@ class FakeJobs:
 
 
 class FakeAdapter:
-    def __init__(self, failures: set[str] | None = None) -> None:
+    def __init__(
+        self, failures: set[str] | None = None, empty_endpoints: set[str] | None = None
+    ) -> None:
         self.endpoints: list[str] = []
         self.failures = failures or set()
+        self.empty_endpoints = empty_endpoints or set()
 
     async def ingest_session(
-        self, session_key: str, endpoints: list[str], *, update_room: bool
+        self,
+        session_key: str,
+        endpoints: list[str],
+        *,
+        update_room: bool,
+        session_type_hint: str | None = None,
     ) -> HistoricalIngestionResult:
         assert update_room is False
         self.endpoints.extend(endpoints)
         if endpoints[0] in self.failures:
             raise RuntimeError("provider unavailable")
+        fetched = 0 if endpoints[0] in self.empty_endpoints else 2
         return HistoricalIngestionResult(
             run_id=uuid4(),
             session_key=session_key,
             endpoints=endpoints,
-            fetched_records=2,
-            raw_inserted=1,
-            duplicates=1,
-            normalized_inserted=1,
+            fetched_records=fetched,
+            raw_inserted=0 if fetched == 0 else 1,
+            duplicates=0 if fetched == 0 else 1,
+            normalized_inserted=0 if fetched == 0 else 1,
             normalized_duplicates=0,
             snapshots=0,
             data_availability=HistoricalDataAvailability.PARTIAL,
@@ -178,7 +188,7 @@ class FakeAdapter:
 
 
 class FakeFinalizer:
-    async def finalize(self, session_key: str) -> RoomFinalizationResult:
+    async def finalize(self, session_key: str, *, partial: bool = False) -> RoomFinalizationResult:
         return RoomFinalizationResult(
             room_slug="2026-australian-grand-prix-qualifying",
             normalized_event_count=10,
@@ -197,9 +207,10 @@ def service(
     acquired=True,
     completed=None,
     failures=None,
+    empty_endpoints=None,
 ):  # type: ignore[no-untyped-def]
     client = FakeClient(provider_rows or [provider_session()])
-    adapter = FakeAdapter(failures)
+    adapter = FakeAdapter(failures, empty_endpoints)
     jobs = FakeJobs(completed)
     rooms = FakeRooms(existing_room or room())
     database = FakeDatabase(acquired)
@@ -225,6 +236,27 @@ async def test_resolution_prefers_existing_session_key(settings) -> None:  # typ
 
 
 @pytest.mark.asyncio
+async def test_existing_session_key_rejects_a_different_provider_session_type(settings) -> None:  # type: ignore[no-untyped-def]
+    target = room(session_key="1001")
+    wrong = provider_session() | {"session_name": "Race"}
+    backfill, *_ = service(settings, existing_room=target, provider_rows=[wrong])
+
+    with pytest.raises(ValueError, match="session type"):
+        await backfill.resolve(season=2026, room_slug=target.slug)
+
+
+@pytest.mark.asyncio
+async def test_explicit_session_key_works_without_room_metadata(settings) -> None:  # type: ignore[no-untyped-def]
+    backfill, *_ = service(settings, existing_room=None)
+    backfill.rooms = FakeRooms(None)  # type: ignore[assignment]
+
+    result = await backfill.resolve(season=2026, session_key="1001")
+
+    assert result.session_key == "1001"
+    assert result.room_slug is None
+
+
+@pytest.mark.asyncio
 async def test_session_key_selector_finds_bound_room(settings) -> None:  # type: ignore[no-untyped-def]
     backfill, _, _, _, rooms, _ = service(settings, existing_room=room(session_key="1001"))
     result = await backfill.run(season=2026, session_key="1001", dry_run=True)
@@ -237,6 +269,15 @@ async def test_resolution_uses_meeting_key_and_session_type(settings) -> None:  
     result = await backfill.resolve(season=2026, room_slug="2026-australian-grand-prix-qualifying")
     assert result.session_key == "1001"
     assert result.match_method == "meeting_key_and_session_type"
+
+
+@pytest.mark.asyncio
+async def test_resolution_preserves_medium_canonical_match_confidence(settings) -> None:  # type: ignore[no-untyped-def]
+    backfill, *_ = service(settings, provider_rows=[provider_session(hour_delta=6)])
+
+    result = await backfill.resolve(season=2026, room_slug="2026-australian-grand-prix-qualifying")
+
+    assert result.confidence == "medium"
 
 
 @pytest.mark.asyncio
@@ -282,6 +323,39 @@ async def test_completed_endpoint_is_resumed_without_refetch(settings) -> None: 
     )
     assert adapter.endpoints[0] == "laps"
     assert result.skipped_completed_endpoints == ["sessions", "drivers"]
+
+
+@pytest.mark.asyncio
+async def test_run_without_resume_refreshes_completed_endpoints(settings) -> None:  # type: ignore[no-untyped-def]
+    backfill, _, adapter, _, *_ = service(settings, completed=["sessions", "drivers"])
+
+    result = await backfill.run(
+        season=2026,
+        room_slug="2026-australian-grand-prix-qualifying",
+    )
+
+    assert adapter.endpoints[:2] == ["sessions", "drivers"]
+    assert result.skipped_completed_endpoints == []
+
+
+@pytest.mark.asyncio
+async def test_empty_successful_endpoint_is_retried_on_the_next_run(settings) -> None:  # type: ignore[no-untyped-def]
+    backfill, _, adapter, jobs, *_ = service(settings, empty_endpoints={"laps"})
+
+    summary = await backfill.run(season=2026, room_slug="2026-australian-grand-prix-qualifying")
+    assert summary.status is BackfillStatus.PARTIAL
+    assert "laps" not in jobs.record.completed_endpoints
+
+    adapter.empty_endpoints.clear()
+    adapter.endpoints.clear()
+    await backfill.run(
+        season=2026,
+        room_slug="2026-australian-grand-prix-qualifying",
+        resume=True,
+    )
+
+    assert "laps" in adapter.endpoints
+    assert "laps" in jobs.record.completed_endpoints
 
 
 @pytest.mark.asyncio
@@ -380,3 +454,94 @@ def test_room_finalization_never_downgrades_better_data() -> None:
         )
         is SourceAvailability.TELEMETRY
     )
+
+
+def test_partial_historical_data_opens_the_archived_room() -> None:
+    values, replay_available = OpenF1RoomFinalizer.room_values(
+        availability=SourceAvailability.TIMING_ONLY,
+        live=False,
+        has_results=False,
+        prior_results_available=False,
+        last_event_at=None,
+        prior_last_event_at=None,
+    )
+
+    assert replay_available is True
+    assert values["status"] == RoomStatus.COMPLETED.value
+    assert values["mode"] == RoomMode.ARCHIVED.value
+    assert values["eligibility_status"] == RoomEligibilityStatus.ELIGIBLE_HISTORICAL.value
+
+
+def test_live_finalization_preserves_live_mode_without_enabling_replay() -> None:
+    values, replay_available = OpenF1RoomFinalizer.room_values(
+        availability=SourceAvailability.TELEMETRY,
+        live=True,
+        has_results=False,
+        prior_results_available=False,
+        last_event_at=None,
+        prior_last_event_at=None,
+    )
+
+    assert replay_available is False
+    assert values["status"] == RoomStatus.LIVE.value
+    assert values["mode"] == RoomMode.LIVE.value
+    assert values["source_availability"] == SourceAvailability.TELEMETRY.value
+
+
+@pytest.mark.parametrize(
+    ("session_type", "provider_name"),
+    [
+        (SessionType.RACE, "Race"),
+        (SessionType.QUALIFYING, "Qualifying"),
+        (SessionType.SPRINT, "Sprint"),
+        (SessionType.SPRINT_QUALIFYING, "Sprint Qualifying"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_each_session_type_maps_to_its_own_provider_session_key(
+    settings,  # type: ignore[no-untyped-def]
+    session_type: SessionType,
+    provider_name: str,
+) -> None:
+    """A sprint weekend publishes four sessions under one meeting_key.
+
+    Location has to be fetched with the session_key of the exact session, so
+    resolution must never settle for the meeting.
+    """
+
+    weekend = [
+        provider_session(key="9001", meeting="55") | {"session_name": "Sprint Qualifying"},
+        provider_session(key="9002", meeting="55") | {"session_name": "Sprint"},
+        provider_session(key="9003", meeting="55") | {"session_name": "Qualifying"},
+        provider_session(key="9004", meeting="55") | {"session_name": "Race"},
+    ]
+    expected = {
+        "Sprint Qualifying": "9001",
+        "Sprint": "9002",
+        "Qualifying": "9003",
+        "Race": "9004",
+    }[provider_name]
+    target = room()
+    backfill, *_ = service(
+        settings,
+        provider_rows=weekend,
+        existing_room=target.model_copy(update={"session_type": session_type}),
+    )
+    result = await backfill.resolve(season=2026, room_slug=target.slug)
+    assert result.session_key == expected
+    assert result.meeting_key == "55"
+    assert result.session_key != result.meeting_key
+
+
+def test_results_only_archive_does_not_claim_timing_replay():
+    values, replay = OpenF1RoomFinalizer.room_values(
+        availability=SourceAvailability.RESULTS_ONLY,
+        live=False,
+        has_results=True,
+        prior_results_available=False,
+        last_event_at=None,
+        prior_last_event_at=None,
+    )
+    assert values["status"] == "completed"
+    assert values["results_available"] is True
+    assert replay is False

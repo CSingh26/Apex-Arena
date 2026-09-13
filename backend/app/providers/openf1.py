@@ -7,7 +7,9 @@ import logging
 import math
 import re
 import ssl
+import threading
 import time
+from collections import deque
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -18,7 +20,9 @@ import httpx
 import paho.mqtt.client as mqtt
 
 from app.core.settings import Settings
+from app.providers.retry import bounded_retry_delay
 from app.services.event_pipeline import RaceEventProcessor
+from app.services.history_ownership import HistoryContextBusyError
 from app.services.raw_events import RawEventInput
 from app.storage.redis import EventBus
 
@@ -46,6 +50,10 @@ OPENF1_ENDPOINTS = frozenset(
 )
 OPENF1_HIGH_FREQUENCY_ENDPOINTS = frozenset({"car_data", "location"})
 FILTER_PATTERN = re.compile(r"^[a-z][a-z0-9_]*(?:<=|>=|<|>)?$")
+MQTT_DISPATCH_ROWS = 256
+MQTT_DISPATCH_BYTES = 8 * 1024 * 1024
+MQTT_MESSAGE_BYTES = 64 * 1024
+CONTEXT_PRESSURE_DELAYS = (0.1, 0.25, 0.5)
 
 
 class ProviderPayloadError(RuntimeError):
@@ -78,6 +86,7 @@ class OpenF1RestClient:
             headers={"Accept": "application/json", "User-Agent": "Apex-Arena/0.1"},
         )
         self.token_provider = token_provider
+        self._authentication_required = False
         self.retry_attempts = max(
             1,
             retry_attempts
@@ -150,7 +159,7 @@ class OpenF1RestClient:
                 oldest = min(self._cache, key=lambda key: self._cache[key][0])
                 self._cache.pop(oldest, None)
         cached = self._cache.get(cache_key)
-        if cached is not None and cached[0] > now:
+        if cache_ttl_seconds != 0 and cached is not None and cached[0] > now:
             return [dict(row) for row in cached[1]]
 
         response: httpx.Response | None = None
@@ -158,8 +167,12 @@ class OpenF1RestClient:
         for attempt in range(self.retry_attempts):
             await self._throttle()
             try:
-                response = await self.client.get(endpoint, params=params)
+                headers = {}
+                if self._authentication_required and self.token_provider is not None:
+                    headers["Authorization"] = f"Bearer {await self.token_provider()}"
+                response = await self.client.get(endpoint, params=params, headers=headers)
                 if response.status_code == 401 and self.token_provider is not None:
+                    self._authentication_required = True
                     token = await self.token_provider()
                     await self._throttle()
                     response = await self.client.get(
@@ -177,12 +190,9 @@ class OpenF1RestClient:
                 break
             if attempt + 1 >= self.retry_attempts:
                 break
-            retry_after = response.headers.get("Retry-After")
-            try:
-                server_delay = float(retry_after) if retry_after is not None else 0.0
-            except ValueError:
-                server_delay = 0.0
-            await asyncio.sleep(max(server_delay, self._retry_delay(attempt)))
+            await asyncio.sleep(
+                bounded_retry_delay(response.headers.get("Retry-After"), self._retry_delay(attempt))
+            )
 
         if response is None:
             assert last_request_error is not None
@@ -213,6 +223,10 @@ class OpenF1RestClient:
 
     async def meetings(self, **filters: Any) -> list[dict[str, Any]]:
         return await self._get("meetings", filters)
+
+    async def live_get(self, endpoint: str, **filters: Any) -> list[dict[str, Any]]:
+        """Fresh reads for the singleton live worker; share authentication and throttling."""
+        return await self._get(endpoint, filters, cache_ttl_seconds=0)
 
     async def sessions(self, **filters: Any) -> list[dict[str, Any]]:
         return await self._get("sessions", filters)
@@ -389,11 +403,26 @@ class OpenF1LiveClient:
         self.last_event_at: datetime | None = None
         self.reconnect_attempts = 0
         self.current_session_key: str | None = None
+        self.admit_message: Callable[[str, dict[str, Any], datetime], Awaitable[str]] | None = None
+        self.capture_admission: str = "not_configured"
         self.degraded_reason: str | None = None
         self._client: mqtt.Client | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._shutting_down = False
         self._connect_timeout_task: asyncio.Task[None] | None = None
+        # Paho's callback runs outside the event loop. Reserve before scheduling:
+        # a full loop callback backlog must not bypass the memory bound.
+        self._dispatch_lock = threading.Lock()
+        self._dispatch_queue: deque[tuple[str, bytes, datetime]] = deque()
+        self._dispatch_scheduled = False
+        self._dispatch_task: asyncio.Task[None] | None = None
+        self._dispatch_rows = 0
+        self._dispatch_bytes = 0
+        self._dispatch_overflow = 0
+        self._dispatch_unpersisted = 0
+        self._dispatch_pressure_retries = 0
+        self._dispatch_pressure_exhausted = 0
+        self._dispatch_flush_failures = 0
 
     async def connect(self) -> None:
         if not self.settings.live_mode_enabled:
@@ -448,7 +477,14 @@ class OpenF1LiveClient:
         )
 
     async def disconnect(self) -> None:
+        if self._client is None and self._loop is None:
+            return
         self._shutting_down = True
+        with self._dispatch_lock:
+            self._discard_dispatch_queue()
+        if self._dispatch_task is not None:
+            self._dispatch_task.cancel()
+            await asyncio.wait({self._dispatch_task}, timeout=0.25)
         if self._connect_timeout_task is not None:
             self._connect_timeout_task.cancel()
             self._connect_timeout_task = None
@@ -459,7 +495,21 @@ class OpenF1LiveClient:
         await self._set_state(LiveConnectionState.DISCONNECTED)
 
     def status(self) -> dict[str, Any]:
+        with self._dispatch_lock:
+            dispatch = {
+                "dispatch_retained_rows": self._dispatch_rows,
+                "dispatch_retained_bytes": self._dispatch_bytes,
+                "dispatch_overflow_rows": self._dispatch_overflow,
+                "dispatch_unpersisted_rows": self._dispatch_unpersisted,
+                "dispatch_pressure_retries": self._dispatch_pressure_retries,
+                "dispatch_pressure_exhausted": self._dispatch_pressure_exhausted,
+                "dispatch_flush_failures": self._dispatch_flush_failures,
+                "dispatch_gap_detected": bool(
+                    self._dispatch_unpersisted or self._dispatch_flush_failures
+                ),
+            }
         return {
+            **dispatch,
             "live_mode_enabled": self.settings.live_mode_enabled,
             "credentials_present": self.auth.credentials_present,
             "auth_available": self.auth.credentials_present,
@@ -471,6 +521,7 @@ class OpenF1LiveClient:
             "last_event_at": self.last_event_at,
             "reconnect_attempts": self.reconnect_attempts,
             "current_session_key": self.current_session_key,
+            "capture_admission": self.capture_admission,
             "degraded_reason": self.degraded_reason,
         }
 
@@ -521,18 +572,119 @@ class OpenF1LiveClient:
         self._submit_state(LiveConnectionState.RECONNECTING)
 
     def _on_message(self, client: mqtt.Client, userdata: object, message: object) -> None:
-        if self._loop is None:
+        if self._loop is None or self._shutting_down:
             return
         try:
-            payload = json.loads(message.payload.decode("utf-8"))  # type: ignore[attr-defined]
+            encoded = message.payload  # type: ignore[attr-defined]
             topic = str(message.topic)  # type: ignore[attr-defined]
-        except (AttributeError, UnicodeDecodeError, json.JSONDecodeError):
-            self._submit_state(LiveConnectionState.DEGRADED, "Invalid MQTT message received")
+        except AttributeError:
             return
-        if not isinstance(payload, dict):
-            self._submit_state(LiveConnectionState.DEGRADED, "Unexpected MQTT payload shape")
-            return
-        asyncio.run_coroutine_threadsafe(self._handle_message(topic, payload), self._loop)
+        with self._dispatch_lock:
+            if (
+                not isinstance(encoded, bytes)
+                or len(encoded) > MQTT_MESSAGE_BYTES
+                or len(topic) > 128
+                or self._dispatch_rows >= MQTT_DISPATCH_ROWS
+                or self._dispatch_bytes + len(encoded) > MQTT_DISPATCH_BYTES
+            ):
+                self._dispatch_overflow += 1
+                self._dispatch_unpersisted += 1
+                return
+            self._dispatch_queue.append((topic, encoded, datetime.now(UTC)))
+            self._dispatch_rows += 1
+            self._dispatch_bytes += len(encoded)
+            if not self._dispatch_scheduled:
+                self._dispatch_scheduled = True
+                try:
+                    self._loop.call_soon_threadsafe(self._start_dispatch)
+                except RuntimeError:
+                    self._discard_dispatch_queue()
+                    self._dispatch_scheduled = False
+
+    def _discard_dispatch_queue(self) -> None:
+        while self._dispatch_queue:
+            _, encoded, _ = self._dispatch_queue.popleft()
+            self._dispatch_rows -= 1
+            self._dispatch_bytes -= len(encoded)
+            self._dispatch_unpersisted += 1
+
+    def _start_dispatch(self) -> None:
+        with self._dispatch_lock:
+            if self._shutting_down:
+                self._discard_dispatch_queue()
+                self._dispatch_scheduled = False
+                return
+            self._dispatch_task = asyncio.create_task(self._dispatch(), name="openf1-mqtt-dispatch")
+
+    async def _dispatch(self) -> None:
+        pending_flush: set[str] = set()
+        try:
+            while not self._shutting_down:
+                # One bounded batch, then one common ordering wait. Sleeping per
+                # message would cap healthy intake below one message per second.
+                for _ in range(MQTT_DISPATCH_ROWS):
+                    with self._dispatch_lock:
+                        if not self._dispatch_queue:
+                            break
+                        topic, encoded, received = self._dispatch_queue.popleft()
+                    try:
+                        payload = json.loads(encoded.decode("utf-8"))
+                        if not isinstance(payload, dict):
+                            raise ValueError("MQTT object required")
+                        key = await self._handle_message(
+                            topic, payload, received_at=received, defer_flush=True
+                        )
+                        if key is not None:
+                            pending_flush.add(key)
+                    except asyncio.CancelledError:
+                        self._dispatch_unpersisted += 1
+                        raise
+                    except (ValueError, UnicodeDecodeError, RecursionError):
+                        self._dispatch_unpersisted += 1
+                    finally:
+                        with self._dispatch_lock:
+                            self._dispatch_rows -= 1
+                            self._dispatch_bytes -= len(encoded)
+                if pending_flush:
+                    await asyncio.sleep(self.settings.event_ordering_buffer_ms / 1000)
+                    for key in sorted(pending_flush):
+                        try:
+                            await self._pressure_retry(
+                                lambda key=key: self.processor.flush_session(key)
+                            )
+                        except Exception as exc:
+                            self._dispatch_flush_failures += 1
+                            logger.warning(
+                                "MQTT buffered flush incomplete error=%s", type(exc).__name__
+                            )
+                    pending_flush.clear()
+                with self._dispatch_lock:
+                    if not self._dispatch_queue:
+                        return
+        finally:
+            # Already persisted raw rows may still need normalization after a
+            # cancelled flush. This is an explicit gap, not a redelivery claim.
+            self._dispatch_flush_failures += len(pending_flush)
+            with self._dispatch_lock:
+                if self._shutting_down:
+                    self._discard_dispatch_queue()
+                if self._dispatch_queue and not self._shutting_down:
+                    # A callback can race the final empty check from its thread.
+                    # Keep its reservation and hand off to exactly one successor.
+                    self._loop.call_soon(self._start_dispatch)
+                else:
+                    self._dispatch_scheduled = False
+
+    async def _pressure_retry(self, operation):
+        for attempt in range(len(CONTEXT_PRESSURE_DELAYS) + 1):
+            try:
+                return await operation()
+            except HistoryContextBusyError:
+                if attempt == len(CONTEXT_PRESSURE_DELAYS):
+                    self._dispatch_pressure_exhausted += 1
+                    raise
+                self._dispatch_pressure_retries += 1
+                await asyncio.sleep(CONTEXT_PRESSURE_DELAYS[attempt])
 
     async def _connection_timeout(self) -> None:
         try:
@@ -549,28 +701,45 @@ class OpenF1LiveClient:
             "MQTT broker connection timed out",
         )
 
-    async def _handle_message(self, topic: str, payload: dict[str, Any]) -> None:
+    async def _handle_message(
+        self,
+        topic: str,
+        payload: dict[str, Any],
+        *,
+        received_at: datetime | None = None,
+        defer_flush: bool = False,
+    ) -> str | None:
+        received_at = received_at or datetime.now(UTC)
+        if self.admit_message is not None:
+            try:
+                self.capture_admission = await self.admit_message(topic, payload, received_at)
+            except Exception:
+                self.capture_admission = "authority_unavailable"
+            if self.capture_admission != "accepted":
+                return
         session_key = str(payload.get("session_key") or "unknown")
         self.current_session_key = session_key
-        self.last_event_at = datetime.now(UTC)
+        self.last_event_at = received_at
         if self.processor is None:
             await self._set_state(LiveConnectionState.DEGRADED, "Race event processor unavailable")
             return
         try:
-            await self.processor.ingest(
-                RawEventInput(
-                    provider="openf1",
-                    provider_endpoint=topic.removeprefix("v1/"),
-                    provider_event_id=str(payload["_id"]) if "_id" in payload else None,
-                    session_key=session_key,
-                    raw_payload=payload,
-                    received_at=self.last_event_at,
-                )
+            raw = RawEventInput(
+                provider="openf1",
+                provider_endpoint=topic.removeprefix("v1/"),
+                provider_event_id=str(payload["_id"]) if "_id" in payload else None,
+                session_key=session_key,
+                raw_payload=payload,
+                received_at=self.last_event_at,
             )
-            await asyncio.sleep(self.settings.event_ordering_buffer_ms / 1000)
-            await self.processor.flush_session(session_key)
+            await self._pressure_retry(lambda: self.processor.ingest(raw))
+            if not defer_flush:
+                await asyncio.sleep(self.settings.event_ordering_buffer_ms / 1000)
+                await self._pressure_retry(lambda: self.processor.flush_session(session_key))
             await self._set_state(LiveConnectionState.CONNECTED)
+            return session_key
         except Exception as exc:
+            self._dispatch_unpersisted += 1
             logger.error("OpenF1 message processing failed error=%s", type(exc).__name__)
             await self._set_state(LiveConnectionState.DEGRADED, "Race event processing failed")
 

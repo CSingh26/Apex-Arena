@@ -37,4 +37,5 @@ numReplicas = 1
 #   REDIS_URL                (secret, Upstash rediss://)
 #   OPENF1_USERNAME / OPENF1_PASSWORD (secrets)
 #   APEX_ARENA_PROXY_TOKEN   (secret, staging-specific value)
+#   ADMIN_DASHBOARD_PASSWORD (secret, required when ENABLE_PUBLIC_REPLAYS=true)
 #   LOG_FORMAT=json

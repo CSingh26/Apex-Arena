@@ -130,6 +130,7 @@ class HistoricalRoomChatGenerator:
                 await self.rooms.mark_generation_status(
                     room.id,
                     ChatGenerationStatus.SKIPPED,
+                    expected_generation=room.discussion_generation,
                     generation_version=generation_version,
                     error=result.error,
                 )
@@ -142,19 +143,30 @@ class HistoricalRoomChatGenerator:
             result.status = ChatGenerationStatus.COMPLETED.value
             return result
 
-        await self.rooms.mark_generation_status(
-            room.id, ChatGenerationStatus.RUNNING, generation_version=generation_version
+        started = await self.rooms.mark_generation_status(
+            room.id,
+            ChatGenerationStatus.RUNNING,
+            expected_generation=room.discussion_generation,
+            generation_version=generation_version,
         )
-        if force_regenerate:
-            result.archived_messages = await self.rooms.archive_generated_messages(
-                room.id, generation_version
-            )
-        evaluator = DiscussionTriggerEvaluator(topic_cooldown_seconds=self.topic_cooldown_seconds)
-        engine = RaceRoomDiscussionEngine(
-            self.rooms, evaluator, generation_version=generation_version
-        )
-        engine.reset_session(room.session_key, str(room.id))
+        if not started:
+            result.status = ChatGenerationStatus.FAILED.value
+            result.error = "discussion generation changed"
+            return result
         try:
+            if force_regenerate:
+                result.archived_messages = await self.rooms.archive_generated_messages(
+                    room.id,
+                    generation_version,
+                    expected_generation=room.discussion_generation,
+                )
+            evaluator = DiscussionTriggerEvaluator(
+                topic_cooldown_seconds=self.topic_cooldown_seconds
+            )
+            engine = RaceRoomDiscussionEngine(
+                self.rooms, evaluator, generation_version=generation_version
+            )
+            engine.reset_session(room.session_key, str(room.id))
             for event in normalized:
                 if max_messages is not None and result.messages_inserted >= max_messages:
                     result.status = ChatGenerationStatus.PARTIAL.value
@@ -166,17 +178,27 @@ class HistoricalRoomChatGenerator:
                     continue
                 result.triggers_selected += 1
                 context = engine.context_builder.build(event, None)
-                chain = await engine._generate_chain(room.id, event, trigger, context)
+                chain = await engine._generate_chain(
+                    room.id,
+                    event,
+                    trigger,
+                    context,
+                    discussion_generation=room.discussion_generation,
+                )
                 result.messages_inserted += chain.inserted_count
                 result.messages_skipped += chain.skipped_count
             if result.status == ChatGenerationStatus.RUNNING.value:
                 result.status = ChatGenerationStatus.COMPLETED.value
-            await self.rooms.mark_generation_status(
+            finalized = await self.rooms.mark_generation_status(
                 room.id,
                 ChatGenerationStatus(result.status),
+                expected_generation=room.discussion_generation,
                 generation_version=generation_version,
                 error=result.error,
             )
+            if not finalized:
+                result.status = ChatGenerationStatus.FAILED.value
+                result.error = "discussion generation changed"
         except Exception as exc:
             result.status = ChatGenerationStatus.FAILED.value
             result.error = type(exc).__name__
@@ -184,6 +206,7 @@ class HistoricalRoomChatGenerator:
             await self.rooms.mark_generation_status(
                 room.id,
                 ChatGenerationStatus.FAILED,
+                expected_generation=room.discussion_generation,
                 generation_version=generation_version,
                 error=result.error,
             )

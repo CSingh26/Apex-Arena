@@ -28,8 +28,8 @@ services:
     command: ["redis-server", "--appendonly", "yes"]
     # Bind to loopback only: unauthenticated local Redis must never be reachable
     # off-host. Staging/production use a managed Redis endpoint with auth + TLS.
-    ports:
-      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
+    # ports:
+    #   - "127.0.0.1:${REDIS_PORT:-6379}:6379"
     volumes:
       - redis_data:/data
     healthcheck:
@@ -77,8 +77,8 @@ services:
       APP_PROCESS_ROLE: combined
       OPENF1_INGESTION_MODE: rest
       OPENF1_LIVE_AUTO_CONNECT: "false"
-      RECENT_SESSION_RECONCILIATION_ENABLED: "false"
-      RECENT_SESSION_AUTO_BACKFILL_ENABLED: "false"
+      RECENT_SESSION_RECONCILIATION_ENABLED: "true"
+      RECENT_SESSION_AUTO_BACKFILL_ENABLED: "true"
       DATABASE_URL: postgresql://${POSTGRES_USER:-apex}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-apex_arena}
       DATABASE_MIGRATION_URL: postgresql://${POSTGRES_USER:-apex}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-apex_arena}
       POSTGRES_HOST: postgres

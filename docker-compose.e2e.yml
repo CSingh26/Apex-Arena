@@ -1,0 +1,121 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Standalone, disposable synthetic stack. Never merge with docker-compose.yml.
+# Pass an explicit --env-file and unique --project-name; no normal .env is loaded.
+x-backend: &backend
+  image: ${COMPOSE_PROJECT_NAME:?Set a unique E2E project name}-backend:e2e
+  build:
+    context: ./backend
+  environment: &backend-env
+    APP_ENV: test
+    APP_PROCESS_ROLE: api
+    DATABASE_URL: postgresql://apex:${POSTGRES_PASSWORD:?Set synthetic password}@postgres:5432/apex_e2e
+    POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set synthetic password}
+    REDIS_URL: redis://redis:6379/0
+    LIVE_MODE_ENABLED: "false"
+    OPENF1_LIVE_AUTO_CONNECT: "false"
+    RECENT_SESSION_RECONCILIATION_ENABLED: "false"
+    RECENT_SESSION_AUTO_BACKFILL_ENABLED: "false"
+    OPENF1_REST_BASE_URL: http://fixture-provider:9000/openf1
+    JOLPICA_BASE_URL: http://fixture-provider:9000/jolpica
+    ADMIN_DASHBOARD_PASSWORD: ${E2E_REPLAY_OPERATOR_PASSWORD:?Set synthetic operator password}
+    CORS_ALLOWED_ORIGINS: http://frontend:3000
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: apex_e2e
+      POSTGRES_USER: apex
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set synthetic password}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U apex -d apex_e2e"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+  redis:
+    image: redis:7.4-alpine
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+  fixture-provider:
+    <<: *backend
+    environment:
+      APP_ENV: test
+      APEX_E2E_FIXTURES: "1"
+    command: [python, -m, app.cli.e2e_provider]
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9000/health', timeout=3)"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+  migrate:
+    <<: *backend
+    command: [python, -m, app.runtime, migrate]
+    depends_on:
+      postgres:
+        condition: service_healthy
+  backend:
+    <<: *backend
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      fixture-provider:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=3)"]
+      interval: 3s
+      timeout: 5s
+      retries: 40
+  frontend:
+    image: ${COMPOSE_PROJECT_NAME:?Set a unique E2E project name}-frontend:e2e
+    build:
+      context: ./frontend
+      args:
+        NEXT_PUBLIC_APP_URL: http://frontend:3000
+        NEXT_PUBLIC_APP_BASE_PATH: ""
+    environment:
+      NODE_ENV: production
+      HOSTNAME: 0.0.0.0
+      PORT: 3000
+      APP_BASE_PATH: ""
+      INTERNAL_BACKEND_URL: http://backend:8000
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:3000').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 3s
+      timeout: 5s
+      retries: 40
+  browser-tests:
+    profiles: [tools]
+    image: ${COMPOSE_PROJECT_NAME:?Set a unique E2E project name}-browser-tests:e2e
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.e2e
+    init: true
+    ipc: private
+    shm_size: 1gb
+    environment:
+      CI: "true"
+      E2E_BASE_URL: http://frontend:3000
+      E2E_API_URL: http://backend:8000
+      E2E_REPLAY_OPERATOR_PASSWORD: ${E2E_REPLAY_OPERATOR_PASSWORD:?Set synthetic operator password}
+    volumes:
+      - ${E2E_ARTIFACTS_DIR:-./e2e-artifacts}/test-results:/tests/test-results
+      - ${E2E_ARTIFACTS_DIR:-./e2e-artifacts}/playwright-report:/tests/playwright-report
+    depends_on:
+      frontend:
+        condition: service_healthy
+
+networks:
+  default:
+    internal: true
+volumes:
+  postgres_data:

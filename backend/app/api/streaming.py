@@ -20,24 +20,70 @@ async def session_event_stream(
     session_key: str,
     last_sequence_number: int,
 ) -> AsyncIterator[str]:
+    bus = getattr(services, "event_bus", None)
+    if bus is not None:
+        bus.session_client_connected(session_key)
+    try:
+        async for frame in _session_event_stream(
+            request, services, session_key, last_sequence_number
+        ):
+            yield frame
+    finally:
+        if bus is not None:
+            bus.session_client_disconnected(session_key)
+
+
+async def _session_event_stream(
+    request: Request,
+    services: AppServices,
+    session_key: str,
+    last_sequence_number: int,
+) -> AsyncIterator[str]:
     """Replay missed persisted events, send current state, then tail Redis Streams."""
 
     cursor = last_sequence_number
-    missed = await services.normalized_event_repository.list_for_session(
-        session_key,
-        after_sequence=cursor,
-        limit=services.settings.engine_recent_events_limit,
-    )
-    for event in missed:
-        cursor = max(cursor, event.sequence_number)
-        yield format_sse(
-            "event",
-            event.model_dump(mode="json"),
-            event_id=str(event.sequence_number),
-        )
-
     state = await services.race_state.get_state(session_key)
     state_cursor = state.sequence_number
+    replay_bound = state_cursor if state.is_replay else None
+
+    async def catch_up(bound: int | None):
+        nonlocal cursor
+        if bound is not None and cursor >= bound:
+            return
+        page_limit = max(1, services.settings.engine_recent_events_limit)
+        remaining_events = None if bound is not None else page_limit
+        while not await request.is_disconnected():
+            query_limit = page_limit if remaining_events is None else remaining_events
+            missed = await services.normalized_event_repository.list_for_session(
+                session_key,
+                after_sequence=cursor,
+                limit=query_limit,
+                before_sequence=bound,
+            )
+            previous = cursor
+            emitted = 0
+            for event in missed:
+                if remaining_events is not None and emitted >= remaining_events:
+                    break
+                if event.sequence_number <= cursor or (
+                    bound is not None and event.sequence_number > bound
+                ):
+                    continue
+                cursor = event.sequence_number
+                emitted += 1
+                yield format_sse("event", event.model_dump(mode="json"), event_id=str(cursor))
+            if remaining_events is not None:
+                remaining_events -= emitted
+                if remaining_events <= 0:
+                    break
+            if cursor == previous or len(missed) < query_limit:
+                break
+            if bound is not None and cursor >= bound:
+                break
+
+    async for frame in catch_up(state_cursor):
+        yield frame
+
     yield format_sse("state", state.model_dump(mode="json"))
 
     event_stream = services.event_bus.event_stream(session_key)
@@ -69,10 +115,14 @@ async def session_event_stream(
                 "stream_status",
                 {"status": "degraded", "detail": "Redis stream temporarily unavailable"},
             )
+            async for frame in catch_up(replay_bound):
+                yield frame
             await asyncio.sleep(1)
             continue
 
         if not records:
+            async for frame in catch_up(replay_bound):
+                yield frame
             yield ": heartbeat\n\n"
             continue
 
@@ -84,15 +134,26 @@ async def session_event_stream(
             if kind == "event":
                 if sequence_number <= cursor:
                     continue
+                if replay_bound is not None and sequence_number > state_cursor:
+                    continue
+                if sequence_number > cursor + 1:
+                    async for frame in catch_up(sequence_number - 1):
+                        yield frame
                 cursor = sequence_number
             elif kind == "state":
                 if sequence_number <= state_cursor:
                     continue
                 state_cursor = sequence_number
+                if record["data"].get("is_replay"):
+                    replay_bound = state_cursor
+                    async for frame in catch_up(replay_bound):
+                        yield frame
+                else:
+                    replay_bound = None
             yield format_sse(
                 kind,
                 record["data"],
-                event_id=str(sequence_number) if sequence_number else None,
+                event_id=str(sequence_number) if kind == "event" and sequence_number else None,
             )
 
 

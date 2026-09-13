@@ -146,7 +146,14 @@ export type RaceWeekendSession = {
   starts_at: string;
 };
 
-export type SessionRoomType = "QUALIFYING" | "SPRINT_QUALIFYING" | "SPRINT" | "RACE" | string;
+export type SessionRoomType =
+  | "PRACTICE_1"
+  | "PRACTICE_2"
+  | "PRACTICE_3"
+  | "QUALIFYING"
+  | "SPRINT_QUALIFYING"
+  | "SPRINT"
+  | "RACE";
 export type EventWeekendStatus = "live" | "completed" | "upcoming";
 export type RoomEligibility =
   | "eligible_live"
@@ -159,6 +166,11 @@ export type RoomEligibility =
 
 /** A public, session-level summary returned as part of a grouped event weekend. */
 export type EventSessionSummary = {
+  status_basis?: string;
+  capture_state?: string;
+  capture_deadline?: string | null;
+  sporting_status?: string;
+  session_id?: string;
   session_type: SessionRoomType;
   display_name: string;
   scheduled_start: string;
@@ -170,6 +182,31 @@ export type EventSessionSummary = {
   data_availability: SourceAvailability;
   replay_available: boolean;
   results_available: boolean;
+  provider_status?: "NOT_REQUESTED" | "FETCHING" | "NOT_YET_PUBLISHED" | "PROVIDER_UNAVAILABLE" | "FETCH_FAILED" | "PARTIAL" | "AVAILABLE" | "ARCHIVED" | string;
+};
+
+export type CapabilityStatus = "available" | "partial" | "unavailable" | "unknown";
+
+export type SessionCapabilities = {
+  timing: CapabilityStatus;
+  telemetry: CapabilityStatus;
+  location: CapabilityStatus;
+  weather: CapabilityStatus;
+  race_control: CapabilityStatus;
+  pit_stops: CapabilityStatus;
+  stints: CapabilityStatus;
+  results: CapabilityStatus;
+  checked_at: string | null;
+  source: string | null;
+};
+
+export type SessionBootstrap = {
+  session: EventSessionSummary;
+  weekend: RaceRoomEvent;
+  room_status: RoomEligibility;
+  capabilities: SessionCapabilities;
+  room_slug: string | null;
+  intelligence: SessionIntelligenceState;
 };
 
 /** Public Race Rooms index model. One item represents one race weekend. */
@@ -187,7 +224,6 @@ export type RaceRoomEvent = {
   weekend_status: EventWeekendStatus;
   is_sprint_weekend: boolean;
   sessions: EventSessionSummary[];
-  is_development?: boolean;
 };
 
 export type RaceRoomEventsResponse = {
@@ -256,39 +292,522 @@ export type EngineStatus = {
   latest_ingestion: IngestionRun | null;
 };
 
+export type EventOrigin = "SOURCE_FACT" | "DERIVED";
+export type EventImportance = "LOW" | "NORMAL" | "IMPORTANT" | "MAJOR" | "CRITICAL";
+export type EventConfidence = "LOW" | "MEDIUM" | "HIGH";
+export type RaceEventCategory = "BATTLES" | "PITS" | "RACE_CONTROL" | "FAST_LAPS";
+export type RaceEventFilter = "ALL" | "BATTLES" | "PITS" | "RACE_CONTROL" | "MY_DRIVER";
+export type RaceRoomMode = "FAN" | "ANALYST";
+
+export type DerivationEvidence = {
+  kind: string;
+  observed_at: string;
+  event_id: string | null;
+  value: string | number | boolean | null;
+};
+
+export type EventDerivation = {
+  algorithm: string;
+  version: number;
+  evidence: DerivationEvidence[];
+  exclusions_checked: string[];
+};
+
 export type NormalizedRaceEvent = {
   id: string;
   session_key: string;
   source: string;
+  raw_event_id: string | null;
   event_time: string;
+  received_at: string;
   processed_at: string;
   sequence_number: number;
   event_type: string;
+  event_origin: EventOrigin;
   driver_numbers: number[];
+  primary_driver_number: number | null;
+  secondary_driver_number: number | null;
+  position_before: number | null;
+  position_after: number | null;
+  gap_seconds: number | null;
+  interval_seconds: number | null;
   lap_number: number | null;
+  importance: number | null;
+  importance_level: EventImportance;
+  confidence: number | null;
+  confidence_level: EventConfidence;
+  derivation: EventDerivation | null;
   payload: Record<string, unknown>;
+  dedup_key: string;
   is_replay: boolean;
 };
 
+export type BattleTrend = "CLOSING" | "STABLE" | "FALLING_BACK";
+export type BattleIntensity = "BUILDING" | "CLOSE" | "INTENSE";
+export type BattleStatus = "POTENTIAL" | "ACTIVE" | "INTENSE" | "RESOLVED";
+
+export type BattleState = {
+  id: string;
+  session_key: string;
+  lead_driver_number: number;
+  chasing_driver_number: number;
+  lead_position: number;
+  chasing_position: number;
+  interval_seconds: number;
+  closest_interval_seconds: number;
+  interval_history: number[];
+  started_at: string;
+  last_updated_at: string;
+  trend: BattleTrend;
+  intensity: BattleIntensity;
+  status: BattleStatus;
+  within_one_second: boolean;
+  drs_status: string;
+  tyre_context: Record<string, unknown>;
+  lap_number: number | null;
+  train_size: number;
+  resolution_reason: string | null;
+  /**
+   * The Battle Engine's deterministic context for this fight, or `null` when
+   * the projection did not stand behind one at this cursor. A `null` here is
+   * "not published", never "nothing interesting"; the card degrades to the
+   * intensity-only presentation.
+   */
+  strategy_context?: StrategyBattleContext | null;
+};
+
+/**
+ * Why the engine ranked this battle where it did. Every component is a bounded
+ * integer contribution; `score` is their published total, not a recomputation.
+ */
+export type StrategyBattleProminence = {
+  interval: number;
+  persistence: number;
+  closing: number;
+  lead_position: number;
+  train: number;
+  remaining_distance: number;
+  team_relevance: number;
+  strategy_relevance: number;
+  score: number;
+  basis: "timing_pressure" | "green_timing_pressure" | "not_racing";
+};
+
+/**
+ * Context the Battle Engine publishes alongside a battle.
+ *
+ * Three fields are deliberately conservative and must never be read as facts
+ * about the racing:
+ *  - `attempt_evidence` and `championship_context` are pinned to the literal
+ *    `"unavailable"`. They mean the system cannot determine this, not that
+ *    there were no attempts or that the fight is championship-irrelevant.
+ *  - `observed_wing_open` is the only signal about DRS actually being used.
+ *    `within_one_second` is proximity and `drs_permission` is a track state;
+ *    neither is evidence that a driver used DRS.
+ */
+export type StrategyBattleContext = {
+  tyres: StrategyTyreContext[];
+  pace: StrategyRelativePaceContext | null;
+  duration_seconds: number | null;
+  closing: boolean;
+  train_members: number[];
+  same_reported_team: boolean | null;
+  remaining_laps: number | null;
+  /** Track state published by race control; `"unknown"` means undetermined. */
+  drs_permission: string;
+  /** Proximity only. Never evidence that DRS was used. */
+  within_one_second: boolean | null;
+  /** The only observed DRS-usage signal in this contract. */
+  observed_wing_open: boolean | null;
+  /** Pinned literal: the system cannot determine overtake attempts. */
+  attempt_evidence: "unavailable";
+  /** Pinned literal: the system cannot determine championship relevance. */
+  championship_context: "unavailable";
+  prominence: StrategyBattleProminence;
+  evidence: Record<string, StrategyEvidence>;
+  limitations: string[];
+};
+
+export type QualifyingIntelligence = {
+  session_key: string;
+  phase: string | null;
+  field_size: number;
+  cutoff_position: number | null;
+  positions: Record<string, number>;
+  best_laps: Record<string, number>;
+  best_laps_by_phase?: Record<string, Record<string, number>>;
+  best_lap_availability?: "unknown" | "available" | "partial";
+  session_best: number | null;
+  provisional_pole_driver: number | null;
+  eliminated_drivers: number[];
+  risk_cooldowns: Record<string, string>;
+};
+
+export type ControlEvidence = { event_id: string; sequence: number; observed_at: string; source: string };
+export type ControlObservation = { value: string; evidence: ControlEvidence | null };
+export type ControlProjection = {
+  session_key: string;
+  sequence: number;
+  lifecycle: ControlObservation;
+  neutralization: ControlObservation;
+  track_flag: ControlObservation;
+  drs_permission: ControlObservation;
+  sector_flags: Record<string, ControlObservation>;
+  /** Full transitions belong to the explicit detail response, not compact state. */
+  history?: Array<ControlEvidence & { semantics: Record<string, unknown> }>;
+  history_truncated?: boolean;
+};
+
+/**
+ * Deterministic strategy contract mirrored from
+ * `backend/app/domain/strategy_situations.py`. Every field here is produced by
+ * the backend's bounded frame builder, so nullability is meaningful: a `null`
+ * means the system could not determine the value, never that it was omitted
+ * for brevity.
+ */
+export type StrategySituationKind =
+  | "stint_divergence"
+  | "relative_pace"
+  | "pit_window"
+  | "undercut_condition"
+  | "overcut_condition"
+  | "neutralized_pit_context"
+  | "extra_stop_consequence"
+  | "weather_change";
+
+export type StrategyCapabilityAvailability = "available" | "partial" | "unavailable" | "omitted";
+export type StrategySituationAvailability = "available" | "partial" | "unavailable";
+
+export type StrategyCapability = {
+  availability: StrategyCapabilityAvailability;
+  reason: string;
+};
+
+export type StrategyEvidenceRole =
+  | "weather"
+  | "stint"
+  | "lap"
+  | "pit"
+  | "position"
+  | "interval"
+  | "team"
+  | "control"
+  | "drs"
+  | "distance"
+  | "deletion";
+
+export type StrategyEvidenceBasis = "observed" | "approximate_lap_interval" | "inferred";
+
+export type StrategyEvidence = {
+  event_id: string;
+  sequence: number;
+  observed_at: string;
+  source: string;
+  session_key: string;
+  role: StrategyEvidenceRole;
+  family: string;
+  driver_number: number | null;
+  lap_number: number | null;
+  stint_number: number | null;
+  basis: StrategyEvidenceBasis;
+};
+
+export type StrategyTyreContext = {
+  driver_number: number;
+  compound: string | null;
+  stint_number: number | null;
+  age_laps: number | null;
+  age_basis: string;
+  stop_count: number;
+  stop_count_basis: "complete" | "retained_lower_bound";
+};
+
+export type StrategyPaceWindow = {
+  driver_number: number;
+  stint_number: number;
+  median_seconds: number;
+  range_seconds: [number, number];
+  sample_laps: number[];
+};
+
+export type StrategyRelativePaceContext = {
+  first: StrategyPaceWindow;
+  second: StrategyPaceWindow;
+  difference_seconds: number;
+  range_seconds: [number, number];
+  shared_conditions: "overlapping_green_samples";
+};
+
+export type StrategyPitWindowContext = {
+  loss_seconds: number;
+  loss_range_seconds: [number, number];
+  projected_gap_seconds: [number, number];
+  traffic: number[];
+  rank_range: [number, number] | null;
+  timing_basis: "observed" | "approximate_lap_interval";
+};
+
+export type StrategySituationPayload = {
+  tyres: StrategyTyreContext[];
+  age_offset_laps: number | null;
+  same_reported_team: boolean | null;
+  /** The backend never infers a plan; the literal records that fact. */
+  plan: "unknown";
+  pace: StrategyRelativePaceContext | null;
+  pit_window: StrategyPitWindowContext | null;
+  gap_seconds: number | null;
+  required_gain_seconds: number | null;
+  required_gain_range_seconds: [number, number] | null;
+  required_average_gain_seconds: [number, number] | null;
+  remaining_laps: number | null;
+  pit_anchor: string | null;
+  clean_laps_since_pit: number | null;
+  neutralization: string | null;
+  numeric_saving: null;
+  rainfall_before: boolean | null;
+  rainfall_now: boolean | null;
+  track_temperature_change: number | null;
+  air_temperature_change: number | null;
+  wind_speed_change: number | null;
+  wind_direction_change: number | null;
+  outcome: "unknown";
+  new_tyre_pace: "unknown";
+  warmup: "unknown";
+  rival_stop_timing: "unknown";
+};
+
+export type StrategySituation = {
+  situation_id: string;
+  revision_id: string;
+  kind: StrategySituationKind;
+  status: "active" | "withdrawn";
+  transition: "opened" | "revised" | "withdrawn";
+  superseded_revision_id: string | null;
+  participants: number[];
+  source_anchor: string;
+  source_sequence: number;
+  session_key: string;
+  sequence: number;
+  history_sequence: number;
+  analysis_time: string;
+  semantic_identity: string;
+  availability: StrategySituationAvailability;
+  payload: StrategySituationPayload;
+  evidence_keys: string[];
+  assumptions: string[];
+  limitations: string[];
+  observation_confidence: "observed" | "qualified";
+  implication_uncertainty: "unknown";
+};
+
+export type StrategyFrame = {
+  session_key: string;
+  sequence: number;
+  history_sequence: number;
+  history_event_id: string | null;
+  analysis_time: string;
+  semantic_identity: string;
+  clock_basis: "monotonic_consumed_source";
+  projection_status: "acknowledged_at_cursor" | "unavailable";
+  /** Always the eight `StrategySituationKind` keys. */
+  capabilities: Record<string, StrategyCapability>;
+  situations: StrategySituation[];
+  /** Keyed by `${event_id}:${role}`, closed over every situation evidence key. */
+  evidence: Record<string, StrategyEvidence>;
+  situations_truncated: boolean;
+  omitted_situations: number;
+  suppressed_events: number;
+  limitations: string[];
+};
+
+export type IntelligenceProjectionStatusValue =
+  | "unknown"
+  | "current"
+  | "pending"
+  | "historical_effects_unverified"
+  | "unavailable"
+  | "stale"
+  | "replay";
+
+export type IntelligenceProjection = {
+  status: IntelligenceProjectionStatusValue;
+  completed_through_sequence: number;
+  completed_source_sequence: number;
+  pending_source_sequence: number | null;
+  algorithm_version: string | null;
+  historical_effects_unverified: boolean;
+  failure_code: string | null;
+};
+
+export type SessionIntelligenceState = {
+  control?: ControlProjection | null;
+  session_key: string;
+  sequence_number: number;
+  current_battles: BattleState[];
+  recent_events: NormalizedRaceEvent[];
+  qualifying: QualifyingIntelligence | null;
+  strategy_frame: StrategyFrame | null;
+  projection: IntelligenceProjection;
+};
+
 export type DriverRaceState = {
+  completed_lap?: number | null;
+  tyre_age_laps?: number | null;
+  tyre_age_basis?: string;
+  tyre_age_evidence?: ControlEvidence[];
+  best_lap_availability?: "available" | "partial" | "unknown";
+  driver_number: number | null;
+  full_name: string | null;
+  broadcast_name: string | null;
+  team_name: string | null;
   position: number | null;
+  position_change: number | null;
   gap_to_leader: number | string | null;
   interval: number | string | null;
   last_lap: Record<string, unknown>;
+  latest_lap_duration: number | null;
+  best_lap_duration: number | null;
   pit_stops: Record<string, unknown>[];
   stint: Record<string, unknown>;
+  telemetry: Record<string, number | boolean>;
+  telemetry_updated_at: string | null;
+  location: Record<string, number>;
+  location_updated_at: string | null;
 };
 
 export type RaceState = {
+  analysis_time?: string | null;
+  history_sequence?: number;
+  history_reference?: HistoryReference | null;
+  history_detail_status?: "available" | "checkpoint_bytes" | "legacy_history_unverified";
+  compact_schema_version?: number;
+  control?: ControlProjection;
   session_key: string;
+  session_type: string | null;
+  current_phase: string | null;
   status: string;
   current_lap: number | null;
   drivers: Record<string, DriverRaceState>;
   race_control_state: Record<string, unknown>;
   weather: Record<string, unknown>;
+  current_battles: BattleState[];
+  recent_events: NormalizedRaceEvent[];
+  qualifying_intelligence: QualifyingIntelligence | null;
+  /** Present once the strategy projection has acknowledged this cursor. */
+  strategy_frame?: StrategyFrame | null;
   last_updated_at: string | null;
   sequence_number: number;
   is_replay: boolean;
+};
+
+export type HistoryReference = {
+  schema_version: number;
+  algorithm_version: string;
+  base_event_id: string;
+  base_sequence: number;
+  relevant_event_id: string;
+  relevant_sequence: number;
+  checksum: string;
+};
+
+export type TimingMode = "race" | "qualifying" | "practice";
+export type TyreCompound = "SOFT" | "MEDIUM" | "HARD" | "INTERMEDIATE" | "WET" | "UNKNOWN";
+export type DriverBattleContextStatus = "CLOSING" | "UNDER_PRESSURE" | "BATTLING" | "CLEAR_AIR" | "UNAVAILABLE";
+export type DriverBattleContext = {
+  driver_number: number;
+  ahead_driver_number: number | null;
+  ahead_interval_seconds: number | null;
+  behind_driver_number: number | null;
+  behind_interval_seconds: number | null;
+  status: DriverBattleContextStatus;
+  battle_id: string | null;
+};
+export type DriverTimingState = {
+  driver_number: number;
+  name: string;
+  abbreviation: string;
+  team_name: string | null;
+  position: number | null;
+  position_change: number | null;
+  gap_to_leader: number | string | null;
+  interval: number | string | null;
+  latest_lap: number | null;
+  best_lap: number | null;
+  tyre_compound: TyreCompound;
+  tyre_age_laps: number | null;
+  pit_stop_count: number;
+  is_fastest: boolean;
+  is_personal_best: boolean;
+  status: string;
+  battle_context: DriverBattleContext;
+};
+export type SessionTimingState = {
+  control?: ControlProjection | null;
+  session_key: string;
+  sequence_number: number;
+  updated_at: string | null;
+  mode: TimingMode;
+  session_phase: string | null;
+  current_lap: number | null;
+  track_status: string;
+  drivers: DriverTimingState[];
+};
+export type DriverTelemetryState = {
+  session_key: string;
+  driver_number: number;
+  sampled_at: string | null;
+  speed_kph: number | null;
+  throttle_percent: number | null;
+  brake_percent: number | null;
+  gear: number | null;
+  rpm: number | null;
+  drs_active: boolean | null;
+  available: boolean;
+};
+export type DriverLocationState = {
+  driver_number: number;
+  x: number;
+  y: number;
+  z: number | null;
+  sampled_at: string | null;
+  position: number | null;
+  abbreviation: string;
+};
+export type TrackBounds = { min_x: number; max_x: number; min_y: number; max_y: number };
+export type LocationSource = "live" | "historical" | "unavailable";
+export type SessionLocationState = {
+  session_key: string;
+  sequence_number: number;
+  updated_at: string | null;
+  available: boolean;
+  source: LocationSource;
+  bounds: TrackBounds | null;
+  drivers: DriverLocationState[];
+};
+export type DriverLocationSample = {
+  driver_number: number;
+  x: number;
+  y: number;
+  z: number | null;
+  sample_time: string;
+};
+export type SessionLocationSamplesState = {
+  session_key: string;
+  count: number;
+  drivers: number[];
+  since: string | null;
+  until: string | null;
+  samples: DriverLocationSample[];
+};
+export type SessionTrackState = {
+  session_key: string;
+  available: boolean;
+  bounds: TrackBounds | null;
+  path: Array<[number, number]>;
+  source_driver_number: number | null;
+  sample_count: number;
+  first_sample_at: string | null;
+  last_sample_at: string | null;
 };
 
 export type SessionEventsResponse = {
@@ -301,22 +820,81 @@ export type SessionEventsResponse = {
 export type SessionStateResponse = {
   state: RaceState;
 };
+export type SessionTimingResponse = { timing: SessionTimingState };
+export type SessionTelemetryResponse = { telemetry: DriverTelemetryState };
+export type SessionLocationsResponse = { locations: SessionLocationState };
+export type SessionLocationSamplesResponse = { locations: SessionLocationSamplesState };
+export type SessionTrackResponse = { track: SessionTrackState };
+
+/**
+ * Retained historical car telemetry, mirroring `app/domain/telemetry.py`.
+ *
+ * Every channel on a sample is nullable and a missing channel stays missing.
+ * A chart must never substitute zero for an absent value — a flat zero brake
+ * trace is a fabricated fact, not an observation.
+ */
+export type TelemetryChannel = "speed" | "throttle" | "brake" | "rpm" | "gear" | "drs";
+
+export type TelemetryAvailability = "available" | "partial" | "unavailable";
+
+/** Published whenever availability is not `"available"`. */
+export type TelemetryReason =
+  | "no_telemetry_retained"
+  | "no_telemetry_for_lap"
+  | "telemetry_missing_for_some_drivers"
+  | "scan_limit_reached";
+
+export type TelemetrySample = {
+  sequence: number;
+  observed_at: string;
+  lap_number: number | null;
+  speed: number | null;
+  throttle: number | null;
+  brake: number | null;
+  rpm: number | null;
+  gear: number | null;
+  drs: boolean | null;
+};
+
+export type DriverTelemetrySeries = {
+  driver_number: number;
+  samples: TelemetrySample[];
+  /** Authoritative: only channels this driver actually published a value for. */
+  channels: string[];
+  samples_truncated: boolean;
+};
+
+export type TelemetryWindow = {
+  session_key: string;
+  availability: TelemetryAvailability;
+  /** Never `null` when availability is not `"available"`. */
+  reason: string | null;
+  lap_number: number | null;
+  drivers: DriverTelemetrySeries[];
+  units: Record<string, string>;
+  view_sequence: number;
+  scan_limited: boolean;
+};
 
 export type RoomStatus = "pending" | "ingesting" | "ready" | "live" | "replaying" | "paused" | "completed" | "failed" | "unavailable";
-export type RoomMode = "live" | "replay" | "archived" | "development";
+export type RoomMode = "live" | "replay" | "archived";
 export type SourceAvailability = "telemetry" | "limited_telemetry" | "timing_only" | "results_only" | "unavailable";
 export type MessageTopic = "strategy" | "pace" | "racecraft" | "incident" | "race_control" | "weather" | "pit_stop" | "tyres" | "championship" | "summary" | "session";
 export type MessageType = "observation" | "analysis" | "question" | "reply" | "agreement" | "disagreement" | "correction" | "summary" | "uncertainty_notice";
 
 export type RaceRoom = {
   id: string; slug: string; session_key: string | null; season: number; round_number: number | null;
+  event_slug?: string | null; meeting_key?: string | null;
   race_name: string; official_name: string; circuit_name: string; country: string; session_type: string;
   country_code: string | null;
   scheduled_start: string; actual_start: string | null; status: RoomStatus; mode: RoomMode;
   current_lap: number | null; total_laps: number | null; source_availability: SourceAvailability;
+  eligibility_status?: string; ingestion_status?: string;
+  replay_available?: boolean; results_available?: boolean;
   telemetry_quality: string;
   message_count: number; agent_count: number; last_event_at: string | null; created_at: string; updated_at: string;
-  is_featured: boolean; is_development: boolean;
+  discussion_generation: number;
+  is_featured: boolean;
   current_phase?: string | null;
   phase_boundaries_available?: boolean;
 };
@@ -330,6 +908,7 @@ export type AgentProfile = {
 
 export type RoomMessage = {
   id: string; room_id: string; agent_id: string; sequence: number; lap_number: number | null;
+  discussion_generation: number;
   session_time: number | null; wall_time: string | null; topic: MessageTopic; message_type: MessageType;
   content: string; confidence: "low" | "medium" | "high"; evidence_status: "grounded" | "partial" | "unavailable";
   reply_to_message_id: string | null; trigger_event_id: string | null; trigger_snapshot_id: string | null;
@@ -347,11 +926,14 @@ export type RoomPlayback = {
   room_id: string;
   current_event_sequence: number;
   current_message_sequence: number;
+  discussion_generation: number;
   current_lap: number | null;
   playback_speed: number;
   is_paused: boolean;
   started_at: string | null;
   updated_at: string;
+  /** Where the replay sits in real session time; null when unmappable. */
+  session_clock: string | null;
 };
 export type CircuitRecord = { label: string; value: string; detail: string | null };
 export type CircuitIntelligence = {
@@ -380,10 +962,16 @@ export type RaceRoomDetailResponse = {
   playback: RoomPlayback;
   circuit: CircuitIntelligence;
   weather: SessionWeather;
+  intelligence: SessionIntelligenceState;
   data_notice: string;
   diagnostics_available: boolean;
 };
-export type RoomMessagesResponse = { messages: RoomMessage[]; next_cursor: number | null };
+export type RoomMessagesResponse = {
+  discussion_generation: number;
+  reset_required: boolean;
+  messages: RoomMessage[];
+  next_cursor: number | null;
+};
 export type MessageEvidenceResponse = {
   message_id: string;
   evidence: MessageEvidence[];
@@ -402,6 +990,7 @@ export type PlaybackAction =
   | { action: "seek_to_session_time"; session_time: number }
   | { action: "seek_to_sequence"; sequence: number };
 export type ReplayResponse = { room: RaceRoom; playback: RoomPlayback };
+export type ReplayOperatorVerification = { authorized: true };
 export type RoomDiagnostics = {
   room_slug: string;
   raw_event_count: number;
@@ -416,4 +1005,57 @@ export type RoomDiagnostics = {
   race_state: Record<string, unknown>;
   playback: RoomPlayback;
   discussion: Record<string, number>;
+};
+
+export type HistoryFamily = "laps" | "stints" | "pits" | "weather" | "control";
+export type FactualLap = {
+  lap_number: number;
+  duration_seconds: number | null;
+  sectors_seconds: Array<number | null>;
+  evidence: ControlEvidence;
+  deleted: boolean;
+  deletion_evidence: ControlEvidence | null;
+  exclusions: string[];
+  phase: string | null;
+  interval_start: string | null;
+  interval_end: string | null;
+  interval_authority: "unknown" | "approximate_provider_interval" | "approximate_start_plus_complete_duration";
+  interval_evidence: ControlEvidence[];
+  interval_limitations: string[];
+  control_evidence: ControlEvidence[];
+};
+export type FactualStint = {
+  stint_number: number; compound: string | null; lap_start: number; lap_end: number | null;
+  tyre_age_at_start: number | null; evidence: ControlEvidence;
+};
+export type FactualPit = {
+  lap_number: number; lane_seconds: number | null; stationary_seconds: number | null; evidence: ControlEvidence;
+};
+export type FactualWeather = {
+  air_temperature: number | null; track_temperature: number | null; humidity: number | null;
+  rainfall: boolean | null; wind_speed: number | null; wind_direction: number | null; evidence: ControlEvidence;
+};
+export type HistoryDetailResponse = {
+  availability: "available" | "partial";
+  projection_status: string;
+  session_key: string;
+  view_sequence: number;
+  history_sequence: number;
+  analysis_time: string;
+  history_reference: HistoryReference;
+  room_id?: string; room_mode?: string; discussion_generation?: number;
+  data: {
+    drivers: Record<string, { laps?: FactualLap[]; stints?: FactualStint[]; pits?: FactualPit[] }>;
+    truncation: Record<string, boolean>;
+    unresolved_deletions: number;
+    weather?: FactualWeather[];
+    control?: ControlProjection;
+  };
+} | {
+  availability: "unavailable";
+  reason: string;
+  history_sequence?: number | null;
+  history_detail_status?: string;
+  session_key?: string; view_sequence?: number | null; projection_status?: string;
+  room_id?: string; room_mode?: string; discussion_generation?: number;
 };

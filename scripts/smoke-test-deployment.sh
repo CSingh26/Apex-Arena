@@ -126,13 +126,6 @@ esac
 section 'Production hardening'
 expect_status 'debug config is disabled' "$API_BASE_URL/debug/config" 404
 
-fetch "$API_BASE_URL/rooms"
-if printf '%s' "$HTTP_BODY" | grep -qi 'day3-validation-room\|development_fixture'; then
-  fail 'development fixtures are exposed' 'DEVELOPMENT_FIXTURE_ENABLED must be false'
-else
-  pass 'no development fixtures in public output'
-fi
-
 fetch "$PUBLIC_BASE_URL"
 if printf '%s' "$HTTP_HEADERS" | grep -qi 'x-content-type-options: *nosniff'; then
   pass 'X-Content-Type-Options is set'

@@ -1,0 +1,22 @@
+.feed { margin: 22px 0; padding-block: 18px; border-block: 1px solid var(--line); }
+.feed > header { display: flex; align-items: end; justify-content: space-between; gap: 18px; }
+.feed header > div:first-child > span, .recent > span { color: var(--apex-cyan); font: 700 .57rem var(--font-mono, ui-monospace), monospace; letter-spacing: .08em; text-transform: uppercase; }
+.feed h2, .recent h2 { margin: 4px 0 0; font-size: 1rem; }
+.filters { display: flex; flex-wrap: wrap; gap: 4px; }
+.filters button { min-height: 30px; padding: 5px 8px; border: 1px solid var(--line); border-radius: 5px; background: transparent; color: var(--muted); cursor: pointer; font: 700 .56rem var(--font-mono, ui-monospace), monospace; text-transform: uppercase; }
+.filters button[aria-pressed="true"] { border-color: var(--apex-cyan); background: color-mix(in srgb, var(--apex-cyan) 13%, transparent); color: var(--foreground); }
+.filters button:focus-visible { outline: 2px solid var(--apex-cyan); outline-offset: 2px; }
+.filters button:disabled { cursor: not-allowed; opacity: .45; }
+.events { display: grid; margin: 14px 0 0; padding: 0; list-style: none; }
+.events li { display: grid; grid-template-columns: minmax(92px, .25fr) minmax(0, 1fr) auto; align-items: center; gap: 14px; min-height: 52px; padding: 9px 2px; border-top: 1px solid color-mix(in srgb, var(--line) 72%, transparent); }
+.events li > div span, .events li > div small { display: block; }
+.events li > div span { color: var(--foreground); font: 750 .6rem var(--font-mono, ui-monospace), monospace; }
+.events li > div small { margin-top: 3px; color: var(--faint); font-size: .55rem; }
+.events p { margin: 0; font-size: .73rem; line-height: 1.45; }
+.events li > b { color: var(--faint); font: 700 .52rem var(--font-mono, ui-monospace), monospace; }
+.empty { margin: 14px 0 0; color: var(--muted); font-size: .73rem; }
+.loadMore { margin-top: 12px; border: 0; background: transparent; color: var(--apex-cyan); cursor: pointer; font-size: .68rem; font-weight: 750; }
+.recent { margin: 18px 0; padding: 14px 0; border-block: 1px solid var(--line); }
+.recent ul { display: grid; gap: 6px; margin: 10px 0 0; padding-left: 18px; color: var(--muted); font-size: .7rem; line-height: 1.45; }
+.recent p { margin: 10px 0 0; color: var(--muted); font-size: .7rem; }
+@media (max-width: 700px) { .feed > header { align-items: start; flex-direction: column; } .events li { grid-template-columns: 72px minmax(0, 1fr); } .events li > b { display: none; } .filters { width: 100%; } }

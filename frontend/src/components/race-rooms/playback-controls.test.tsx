@@ -11,12 +11,12 @@ describe("PlaybackControls", () => {
     const user = userEvent.setup();
     const onReplay = vi.fn().mockResolvedValue(undefined);
     const onControl = vi.fn().mockResolvedValue(undefined);
-    const { rerender } = render(<PlaybackControls room={room} playback={playback} busy={false} error={null} onReplay={onReplay} onControl={onControl} />);
+    const { rerender } = render(<PlaybackControls room={room} playback={playback} busy={false} error={null} authorized unlocking={false} unlockError={null} onUnlock={vi.fn()} onLock={vi.fn()} onReplay={onReplay} onControl={onControl} />);
     await user.click(screen.getByRole("button", { name: /start replay/i }));
     expect(onReplay).toHaveBeenCalledWith("start");
 
     const started = { ...playback, started_at: playback.updated_at, current_event_sequence: 3, current_lap: 2, is_paused: false };
-    rerender(<PlaybackControls room={{ ...room, status: "replaying" }} playback={started} busy={false} error={null} onReplay={onReplay} onControl={onControl} />);
+    rerender(<PlaybackControls room={{ ...room, status: "replaying" }} playback={started} busy={false} error={null} authorized unlocking={false} unlockError={null} onUnlock={vi.fn()} onLock={vi.fn()} onReplay={onReplay} onControl={onControl} />);
     await user.click(screen.getByRole("button", { name: /pause/i }));
     expect(onControl).toHaveBeenCalledWith({ action: "pause" });
     await user.selectOptions(screen.getByLabelText("Playback speed"), "4");
@@ -33,7 +33,7 @@ describe("PlaybackControls", () => {
     const onControl = vi.fn().mockResolvedValue(undefined);
     const qualifyingRoom = { ...room, session_type: "SPRINT_QUALIFYING", current_phase: "SQ2", status: "replaying" as const };
     const started = { ...playback, started_at: playback.updated_at, current_event_sequence: 3, current_lap: null, is_paused: true };
-    render(<PlaybackControls room={qualifyingRoom} playback={started} busy={false} error={null} onReplay={vi.fn()} onControl={onControl} />);
+    render(<PlaybackControls room={qualifyingRoom} playback={started} busy={false} error={null} authorized unlocking={false} unlockError={null} onUnlock={vi.fn()} onLock={vi.fn()} onReplay={vi.fn()} onControl={onControl} />);
 
     expect(screen.getByText("SQ2")).toBeVisible();
     expect(screen.queryByText(/Lap data/)).not.toBeInTheDocument();
@@ -45,5 +45,44 @@ describe("PlaybackControls", () => {
     await user.click(screen.getByRole("button", { name: "Go to time" }));
     expect(onControl).toHaveBeenCalledWith({ action: "seek_to_session_time", session_time: 600 });
     expect(screen.queryByLabelText("Lap")).not.toBeInTheDocument();
+  });
+
+  it("keeps anonymous visitors read-only and removes the password from the DOM after unlock", async () => {
+    const user = userEvent.setup();
+    const canary = "operator-dom-canary";
+    const onUnlock = vi.fn().mockResolvedValue(undefined);
+    const onReplay = vi.fn().mockResolvedValue(undefined);
+    const onControl = vi.fn().mockResolvedValue(undefined);
+    const props = {
+      room,
+      playback,
+      busy: false,
+      error: null,
+      unlocking: false,
+      unlockError: null,
+      onUnlock,
+      onLock: vi.fn(),
+      onReplay,
+      onControl,
+    };
+    const { container, rerender } = render(<PlaybackControls {...props} authorized={false} />);
+
+    expect(screen.queryByRole("button", { name: /start replay/i })).not.toBeInTheDocument();
+    expect(screen.getByText(/viewing shared replay state/i)).toBeVisible();
+    await user.click(screen.getByRole("button", { name: /unlock controls/i }));
+    const password = screen.getByLabelText("Operator password");
+    expect(password).toHaveAttribute("type", "password");
+    expect(password).toHaveAttribute("autocomplete", "current-password");
+    await user.type(password, canary);
+    await user.click(screen.getByRole("button", { name: /^unlock$/i }));
+
+    expect(onUnlock).toHaveBeenCalledWith(canary);
+    rerender(<PlaybackControls {...props} authorized />);
+    expect(screen.getByRole("button", { name: /start replay/i })).toBeVisible();
+    expect(screen.getByRole("button", { name: /lock controls/i })).toBeVisible();
+    expect(container).not.toHaveTextContent(canary);
+    expect(screen.queryByLabelText("Operator password")).not.toBeInTheDocument();
+    expect(onReplay).not.toHaveBeenCalled();
+    expect(onControl).not.toHaveBeenCalled();
   });
 });

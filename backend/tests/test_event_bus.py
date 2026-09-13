@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 
 from app.domain.models import NormalizedRaceEvent, RaceEventType
-from app.services.race_state import RaceStateEngine, SnapshotPersistResult
+from app.services.race_state import RaceState, RaceStateEngine, SnapshotPersistResult
 from app.storage.redis import EventBus, RaceEventRedisPublisher, RedisPublishError
 
 
@@ -31,6 +31,10 @@ class FakeRedis:
 
     async def xread(self, streams: dict[str, str], **_: Any) -> list[object]:
         return []
+
+    async def xrevrange(self, stream: str, *, count: int) -> list[object]:
+        matches = [entry for entry in self.entries if entry[0] == stream]
+        return [("1-1", matches[-1][1])] if matches else []
 
 
 class Snapshots:
@@ -85,3 +89,48 @@ async def test_redis_publish_failure_is_explicit_and_secret_safe() -> None:
         await bus.publish_event(race_event())
 
     assert "private connection details" not in str(error.value)
+
+
+@pytest.mark.asyncio
+async def test_latest_state_returns_the_latest_safe_snapshot() -> None:
+    redis = FakeRedis()
+    bus = EventBus(redis)  # type: ignore[arg-type]
+    state = RaceState(session_key="spa/race", sequence_number=7)
+    await bus.publish_state(state)
+
+    assert await bus.latest_state("spa/race") == state
+    assert await EventBus(FakeRedis()).latest_state("missing") is None  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_bus_diagnostics_track_publish_health_and_session_clients() -> None:
+    redis = FakeRedis()
+    bus = EventBus(redis)  # type: ignore[arg-type]
+    await bus.publish_event(race_event())
+    bus.session_client_connected("spa/race")
+    bus.session_client_connected("spa/race")
+    bus.session_client_disconnected("spa/race")
+
+    diagnostics = bus.diagnostics("spa/race")
+    assert diagnostics["active_session_sse_clients"] == 1
+    assert diagnostics["last_successful_event_publish_at"] is not None
+    assert diagnostics["last_successful_state_publish_at"] is None
+    assert diagnostics["last_error"] is None
+
+    redis.fail = True
+    with pytest.raises(RedisPublishError):
+        await bus.publish_state(RaceState(session_key="spa/race"))
+    assert bus.diagnostics("spa/race")["last_error"]["type"] == "ConnectionError"
+
+
+@pytest.mark.asyncio
+async def test_failed_publish_diagnostics_evict_the_oldest_session() -> None:
+    bus = EventBus(FakeRedis(fail=True))  # type: ignore[arg-type]
+
+    for index in range(257):
+        event = race_event().model_copy(update={"session_key": f"session-{index}"})
+        with pytest.raises(RedisPublishError):
+            await bus.publish_event(event)
+
+    assert bus.diagnostics("session-0")["last_error"] is None
+    assert bus.diagnostics("session-256")["last_error"]["type"] == "ConnectionError"

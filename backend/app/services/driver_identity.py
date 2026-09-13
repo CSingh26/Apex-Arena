@@ -92,7 +92,7 @@ class DriverIdentityResolver:
         ):
             value = cls._clean(payload.get(field))
             if value:
-                return value
+                return cls._public_name(value)
         relevant_state = payload.get("relevant_driver_state")
         if driver_number is not None and isinstance(relevant_state, dict):
             driver_state = relevant_state.get(str(driver_number))
@@ -100,7 +100,7 @@ class DriverIdentityResolver:
                 for field in ("full_name", "broadcast_name"):
                     value = cls._clean(driver_state.get(field))
                     if value:
-                        return value
+                        return cls._public_name(value)
         if driver_number is not None:
             return f"The driver in car {driver_number}"
         return "The driver"
@@ -117,3 +117,11 @@ class DriverIdentityResolver:
     @staticmethod
     def _clean(value: object) -> str:
         return " ".join(str(value or "").split())
+
+    @staticmethod
+    def _public_name(value: str) -> str:
+        """Keep provider casing unless a provider has sent an all-caps name token."""
+        return " ".join(
+            token.title() if len(token) > 1 and token.isupper() else token
+            for token in value.split()
+        )

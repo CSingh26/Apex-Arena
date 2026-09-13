@@ -66,10 +66,12 @@ class FakeDatabase:
 class FakeRoomsService:
     def __init__(self) -> None:
         self.force_syncs = 0
+        self.force_sync_calls: list[dict[str, object]] = []
         self.invalidations = 0
 
-    async def force_sync(self) -> int:
+    async def force_sync(self, **kwargs) -> int:
         self.force_syncs += 1
+        self.force_sync_calls.append(kwargs)
         return 1
 
     def invalidate_catalog(self) -> None:
@@ -80,18 +82,28 @@ class FakeRoomRepository:
     def __init__(self, rooms: list[RaceRoom]) -> None:
         self.rooms = rooms
         self.binds: list[tuple[str, str | None, str]] = []
+        self.reconciliation_attempts: list[tuple[str, datetime]] = []
+        self._reconciliation_attempted_at: dict[str, datetime] = {}
+        self.candidate_queries: list[dict[str, object]] = []
 
     async def list_recent_reconciliation_candidates(self, **kwargs: object) -> list[RaceRoom]:
+        self.candidate_queries.append(kwargs)
+        candidates = self._candidates(**kwargs)
+        return candidates[: int(kwargs["limit"])]
+
+    def _candidates(self, **kwargs: object) -> list[RaceRoom]:
         now = kwargs["now"]
         assert isinstance(now, datetime)
         lookback = timedelta(days=int(kwargs["lookback_days"]))
         grace = timedelta(minutes=int(kwargs["grace_minutes"]))
-        return [
+        candidates = [
             room
             for room in self.rooms
-            if not room.is_development
-            and room.session_type
+            if room.session_type
             in {
+                SessionType.PRACTICE_1,
+                SessionType.PRACTICE_2,
+                SessionType.PRACTICE_3,
                 SessionType.QUALIFYING,
                 SessionType.SPRINT_QUALIFYING,
                 SessionType.SPRINT,
@@ -99,7 +111,22 @@ class FakeRoomRepository:
             }
             and now - lookback <= room.scheduled_start <= now - grace
             and not room.replay_available
-        ][: int(kwargs["limit"])]
+        ]
+        candidates.sort(key=lambda room: room.slug)
+        candidates.sort(key=lambda room: room.scheduled_start, reverse=True)
+        candidates.sort(
+            key=lambda room: (
+                room.slug in self._reconciliation_attempted_at,
+                self._reconciliation_attempted_at.get(room.slug, datetime.min.replace(tzinfo=UTC)),
+            )
+        )
+        return candidates
+
+    async def mark_recent_reconciliation_attempt(
+        self, slug: str, *, attempted_at: datetime
+    ) -> None:
+        self.reconciliation_attempts.append((slug, attempted_at))
+        self._reconciliation_attempted_at[slug] = attempted_at
 
     async def bind_provider_session(
         self, slug: str, *, meeting_key: str | None, session_key: str
@@ -110,12 +137,21 @@ class FakeRoomRepository:
 
 
 class FakeBackfill:
-    def __init__(self, *, fails_resolution: bool = False, replay_available: bool = True) -> None:
+    def __init__(
+        self,
+        *,
+        fails_resolution: bool = False,
+        replay_available: bool = True,
+        status: BackfillStatus = BackfillStatus.PARTIAL,
+    ) -> None:
         self.fails_resolution = fails_resolution
         self.replay_available = replay_available
+        self.status = status
+        self.resolutions: list[str] = []
         self.runs: list[dict[str, Any]] = []
 
     async def resolve(self, *, season: int, room_slug: str, **_: object) -> SessionResolution:
+        self.resolutions.append(room_slug)
         if self.fails_resolution:
             raise ValueError("No confident OpenF1 session match was found")
         return SessionResolution(
@@ -137,7 +173,7 @@ class FakeBackfill:
     async def run(self, **kwargs: Any) -> BackfillSummary:
         self.runs.append(kwargs)
         return BackfillSummary(
-            status=BackfillStatus.PARTIAL,
+            status=self.status,
             season=kwargs["season"],
             session_key="11330",
             meeting_key="1290",
@@ -169,21 +205,32 @@ class FakeClient:
         return fetch
 
 
-def service(settings, *, rooms, endpoint_rows, auto_backfill=True, backfill=None):  # type: ignore[no-untyped-def]
-    configured = settings.model_copy(
-        update={
-            "app_process_role": "combined",
-            "recent_session_reconciliation_enabled": True,
-            "recent_session_auto_backfill_enabled": auto_backfill,
-        }
-    )
+def service(  # type: ignore[no-untyped-def]
+    settings,
+    *,
+    rooms,
+    endpoint_rows,
+    auto_backfill=True,
+    max_sessions=None,
+    backfill=None,
+    database=None,
+    repository=None,
+):
+    updates = {
+        "app_process_role": "combined",
+        "recent_session_reconciliation_enabled": True,
+        "recent_session_auto_backfill_enabled": auto_backfill,
+    }
+    if max_sessions is not None:
+        updates["recent_session_auto_backfill_max_sessions"] = max_sessions
+    configured = settings.model_copy(update=updates)
     rooms_service = FakeRoomsService()
-    repository = FakeRoomRepository(rooms)
+    repository = repository or FakeRoomRepository(rooms)
     backfill_service = backfill or FakeBackfill()
     return (
         RecentSessionReconciliationService(
             settings=configured,
-            database=FakeDatabase(),  # type: ignore[arg-type]
+            database=database or FakeDatabase(),  # type: ignore[arg-type]
             rooms=rooms_service,  # type: ignore[arg-type]
             room_repository=repository,  # type: ignore[arg-type]
             client=FakeClient(endpoint_rows),  # type: ignore[arg-type]
@@ -228,6 +275,36 @@ async def test_recent_spa_qualifying_is_backfilled_when_core_data_exists(setting
         "weather",
         "session_result",
         "starting_grid",
+    ]
+    assert backfill.runs[0]["resume"] is True
+    assert backfill.runs[0]["force_retry_failed"] is True
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_uses_observed_time_for_bounded_catalog_sync(settings) -> None:  # type: ignore[no-untyped-def]
+    observed_at = datetime(2026, 7, 20, 12, tzinfo=UTC)
+    reconciler, rooms_service, repository, _ = service(
+        settings,
+        rooms=[],
+        endpoint_rows={},
+    )
+
+    await reconciler.run_once(now=observed_at)
+
+    assert rooms_service.force_sync_calls == [
+        {
+            "now": observed_at,
+            "live_window_only": True,
+            "lookback_days": 14,
+        }
+    ]
+    assert repository.candidate_queries == [
+        {
+            "now": observed_at,
+            "lookback_days": 14,
+            "grace_minutes": 15,
+            "limit": 1,
+        }
     ]
 
 
@@ -274,6 +351,23 @@ async def test_recent_spa_race_uses_race_endpoint_allowlist(settings) -> None:  
 
 
 @pytest.mark.asyncio
+async def test_recent_practice_session_is_backfilled(settings) -> None:  # type: ignore[no-untyped-def]
+    reconciler, _, _, backfill = service(
+        settings,
+        rooms=[
+            spa_room(slug="2026-belgian-grand-prix-practice-1", session_type=SessionType.PRACTICE_1)
+        ],
+        endpoint_rows={"drivers": [{}], "laps": [{}]},
+    )
+
+    summary = await reconciler.run_once(now=datetime(2026, 7, 20, 12, tzinfo=UTC))
+
+    assert summary.sessions_examined == 1
+    assert summary.sessions_queued_for_backfill == 1
+    assert backfill.runs[0]["room_slug"] == "2026-belgian-grand-prix-practice-1"
+
+
+@pytest.mark.asyncio
 async def test_provider_metadata_missing_remains_pending(settings) -> None:  # type: ignore[no-untyped-def]
     reconciler, rooms_service, repository, backfill = service(
         settings,
@@ -289,6 +383,39 @@ async def test_provider_metadata_missing_remains_pending(settings) -> None:  # t
     assert rooms_service.invalidations == 0
     assert repository.binds == []
     assert backfill.runs == []
+
+
+@pytest.mark.asyncio
+async def test_provider_resolution_failure_advances_durable_candidate_order(settings) -> None:  # type: ignore[no-untyped-def]
+    targets = [spa_room(slug="first-qualifying"), spa_room(slug="second-qualifying")]
+    repository = FakeRoomRepository(targets)
+    backfill = FakeBackfill(fails_resolution=True)
+    reconciler, _, _, _ = service(
+        settings,
+        rooms=targets,
+        endpoint_rows={},
+        repository=repository,
+        backfill=backfill,
+    )
+
+    first = await reconciler.run_once(now=datetime(2026, 7, 20, 12, tzinfo=UTC))
+    restarted, _, _, _ = service(
+        settings,
+        rooms=targets,
+        endpoint_rows={},
+        repository=repository,
+        backfill=backfill,
+    )
+    second = await restarted.run_once(now=datetime(2026, 7, 20, 12, 30, tzinfo=UTC))
+
+    assert first.current_room_slug == "first-qualifying"
+    assert second.current_room_slug == "second-qualifying"
+    assert first.sessions_awaiting_provider == 1
+    assert second.sessions_awaiting_provider == 1
+    assert [slug for slug, _ in repository.reconciliation_attempts] == [
+        "first-qualifying",
+        "second-qualifying",
+    ]
 
 
 @pytest.mark.asyncio
@@ -319,3 +446,143 @@ async def test_future_sessions_are_excluded(settings) -> None:  # type: ignore[n
 
     assert summary.sessions_examined == 0
     assert backfill.runs == []
+
+
+@pytest.mark.asyncio
+async def test_candidate_budget_is_deterministic_and_rotates_without_starvation(settings) -> None:  # type: ignore[no-untyped-def]
+    targets = [
+        spa_room(
+            slug="older-practice",
+            session_type=SessionType.PRACTICE_1,
+            scheduled_start=datetime(2026, 7, 18, 10, tzinfo=UTC),
+        ),
+        spa_room(
+            slug="newer-b-qualifying",
+            scheduled_start=datetime(2026, 7, 19, 10, tzinfo=UTC),
+        ),
+        spa_room(
+            slug="newer-a-qualifying",
+            scheduled_start=datetime(2026, 7, 19, 10, tzinfo=UTC),
+        ),
+    ]
+    reconciler, _, _, backfill = service(
+        settings,
+        rooms=targets,
+        endpoint_rows={},
+        auto_backfill=False,
+        max_sessions=2,
+    )
+
+    first = await reconciler.run_once(now=datetime(2026, 7, 20, 12, tzinfo=UTC))
+    second = await reconciler.run_once(now=datetime(2026, 7, 20, 12, 15, tzinfo=UTC))
+
+    assert first.sessions_examined == 2
+    assert second.sessions_examined == 2
+    assert backfill.resolutions == [
+        "newer-a-qualifying",
+        "newer-b-qualifying",
+        "older-practice",
+        "newer-a-qualifying",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_locked_backfill_job_consumes_budget_then_rotates(settings) -> None:  # type: ignore[no-untyped-def]
+    targets = [spa_room(slug="new-qualifying"), spa_room(slug="older-qualifying")]
+    repository = FakeRoomRepository(targets)
+    backfill = FakeBackfill(
+        replay_available=False,
+        status=BackfillStatus.LOCKED,
+    )
+    reconciler, _, _, _ = service(
+        settings,
+        rooms=targets,
+        endpoint_rows={"drivers": [{}], "laps": [{}]},
+        backfill=backfill,
+        repository=repository,
+    )
+
+    first = await reconciler.run_once(now=datetime(2026, 7, 20, 12, tzinfo=UTC))
+    restarted, _, _, _ = service(
+        settings,
+        rooms=targets,
+        endpoint_rows={"drivers": [{}], "laps": [{}]},
+        backfill=backfill,
+        repository=repository,
+    )
+    second = await restarted.run_once(now=datetime(2026, 7, 20, 12, 30, tzinfo=UTC))
+
+    assert first.sessions_examined == 1
+    assert first.sessions_queued_for_backfill == 1
+    assert first.sessions_finalized == 0
+    assert second.sessions_examined == 1
+    assert second.sessions_queued_for_backfill == 1
+    assert second.sessions_finalized == 0
+    assert first.current_room_slug == "new-qualifying"
+    assert second.current_room_slug == "older-qualifying"
+    assert [run["room_slug"] for run in backfill.runs] == [
+        "new-qualifying",
+        "older-qualifying",
+    ]
+    assert [slug for slug, _ in repository.reconciliation_attempts] == [
+        "new-qualifying",
+        "older-qualifying",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_durable_attempt_order_reaches_overflow_after_skipped_interval_restarts(  # type: ignore[no-untyped-def]
+    settings,
+) -> None:
+    targets = [
+        spa_room(
+            slug=f"candidate-{index:03}",
+            scheduled_start=datetime(2026, 7, 18, 10, tzinfo=UTC),
+        )
+        for index in range(102)
+    ]
+    first_pass = datetime(2026, 7, 20, 12, tzinfo=UTC)
+    attempted: list[str] = []
+    repository = FakeRoomRepository(targets)
+
+    for pass_index in range(102):
+        reconciler, _, _, backfill = service(
+            settings,
+            rooms=targets,
+            endpoint_rows={},
+            auto_backfill=False,
+            repository=repository,
+        )
+        await reconciler.run_once(
+            now=first_pass
+            + timedelta(
+                seconds=pass_index * 2 * settings.recent_session_reconciliation_interval_seconds
+            )
+        )
+        attempted.extend(backfill.resolutions)
+
+    assert len(attempted) == 102
+    assert set(attempted) == {f"candidate-{index:03}" for index in range(102)}
+    assert "candidate-101" in attempted
+
+
+@pytest.mark.asyncio
+async def test_concurrent_reconciliation_lock_does_not_advance_candidate_order(settings) -> None:  # type: ignore[no-untyped-def]
+    targets = [spa_room(slug="first-qualifying"), spa_room(slug="second-qualifying")]
+    repository = FakeRoomRepository(targets)
+    reconciler, rooms_service, _, backfill = service(
+        settings,
+        rooms=targets,
+        endpoint_rows={},
+        auto_backfill=False,
+        database=FakeDatabase(acquired=False),
+        repository=repository,
+    )
+
+    summary = await reconciler.run_once(now=datetime(2026, 7, 20, 12, tzinfo=UTC))
+
+    assert summary.last_safe_error_category == "reconciliation_locked"
+    assert repository.reconciliation_attempts == []
+    assert repository.candidate_queries == []
+    assert rooms_service.force_sync_calls == []
+    assert backfill.resolutions == []

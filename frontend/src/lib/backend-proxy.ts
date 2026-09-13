@@ -13,3 +13,13 @@ export function backendPath(publicSegments: readonly string[]): string {
   if (path.startsWith("rooms/")) return `/api/v1/race-rooms/${path.slice("rooms/".length)}`;
   return `/api/v1/${path}`;
 }
+
+/** Build upstream headers without treating the visitor-facing proxy token as authority. */
+export function upstreamRequestHeaders(incoming: Headers, backendToken?: string): Headers {
+  const headers = new Headers(incoming);
+  headers.delete("host");
+  headers.delete("content-length");
+  headers.delete("x-apex-proxy-token");
+  if (backendToken) headers.set("x-apex-proxy-token", backendToken);
+  return headers;
+}

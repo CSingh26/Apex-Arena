@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 from __future__ import annotations
 
+import asyncio
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Any, Protocol
 from uuid import UUID
@@ -44,7 +45,13 @@ HISTORICAL_INGESTION_STAGES: dict[str, tuple[str, ...]] = {
     "classification": ("session_result", "starting_grid"),
     # High-frequency endpoints are opt-in and still use a session_key plus the
     # configured per-endpoint cap.  They are never part of the default backfill.
-    "deep_telemetry": ("car_data", "location"),
+    #
+    # ``location`` is deliberately absent: collapsing it to one end-of-session
+    # fix per driver put every LOCATION_SAMPLE at the tail of the replay
+    # sequence, so the map stayed empty until playback finished and the cars
+    # never moved. The full series now has its own time-indexed pipeline in
+    # app.services.locations.
+    "deep_telemetry": ("car_data",),
 }
 
 
@@ -57,6 +64,10 @@ class HistoricalDataAvailability(StrEnum):
 
 class HistoricalIngestionError(RuntimeError):
     """Safe aggregate failure that never embeds provider response content."""
+
+
+class HistoricalRunOwnershipLostError(HistoricalIngestionError):
+    """The durable run row stopped accepting writes from this worker."""
 
 
 class HistoricalStageResult(BaseModel):
@@ -93,7 +104,11 @@ class IngestionRunRepository(Protocol):
         result: PipelineResult,
         last_event_at: datetime | None,
         last_error: str | None = None,
-    ) -> None: ...
+    ) -> bool: ...
+
+    async def heartbeat(self, run_id: UUID) -> bool: ...
+
+    async def fail_running_before(self, cutoff: datetime, *, reason: str) -> int: ...
 
     async def latest(self) -> IngestionRunSummary | None: ...
 
@@ -149,14 +164,78 @@ class HistoricalOpenF1Adapter:
         snapshots: SnapshotCounter,
         max_records_per_endpoint: int,
         room_availability: RoomAvailabilityUpdater | None = None,
+        run_heartbeat_seconds: float = 60.0,
     ) -> None:
+        if run_heartbeat_seconds <= 0:
+            raise ValueError("Historical run heartbeat interval must be positive")
         self.client = client
         self.processor = processor
         self.runs = runs
         self.snapshots = snapshots
         self.max_records_per_endpoint = max_records_per_endpoint
         self.room_availability = room_availability
+        self.run_heartbeat_seconds = run_heartbeat_seconds
         self.identity_resolver = DriverIdentityResolver()
+
+    async def reconcile_stale_runs(self, *, now: datetime, stale_after: timedelta) -> int:
+        """Mark historical runs without a fresh owner heartbeat as retryable failures."""
+        return await self.runs.fail_running_before(
+            now - stale_after,
+            reason="worker interrupted",
+        )
+
+    async def _maintain_run_heartbeat(
+        self,
+        run_id: UUID,
+        owner: asyncio.Task[object],
+        stopping: asyncio.Event,
+        ownership_lost: asyncio.Event,
+    ) -> None:
+        try:
+            while True:
+                await asyncio.sleep(self.run_heartbeat_seconds)
+                if stopping.is_set():
+                    return
+                if not await self.runs.heartbeat(run_id):
+                    break
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "Historical run heartbeat failed run=%s error=%s",
+                run_id,
+                type(exc).__name__,
+            )
+        # Do not mask cancellation already requested by the caller. When this
+        # task requests cancellation itself, the owner removes exactly this one
+        # request before translating it into an ordinary retryable failure.
+        if not stopping.is_set() and not owner.done() and owner.cancelling() == 0:
+            ownership_lost.set()
+            owner.cancel()
+
+    async def _record_cancelled_run(
+        self,
+        run_id: UUID,
+        *,
+        result: PipelineResult,
+        last_event_at: datetime | None,
+        last_error: str,
+    ) -> None:
+        """Best-effort terminal persistence without replacing caller cancellation."""
+        try:
+            await self.runs.finish(
+                run_id,
+                status="failed",
+                result=result,
+                last_event_at=last_event_at,
+                last_error=last_error,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Historical run cancellation persistence failed run=%s error=%s",
+                run_id,
+                type(exc).__name__,
+            )
 
     async def ingest_session(
         self,
@@ -165,8 +244,12 @@ class HistoricalOpenF1Adapter:
         *,
         availability_baseline: dict[str, int] | None = None,
         update_room: bool = True,
+        session_type_hint: str | None = None,
     ) -> HistoricalIngestionResult:
         selected = self._validate_endpoints(endpoints)
+        projection = getattr(self.processor, "critical_projection", None)
+        if projection is not None:
+            await projection.repository.check_writer_access(session_key)
         selected_stages = self._selected_stages(selected)
         run_id = await self.runs.start(
             provider="openf1",
@@ -177,7 +260,15 @@ class HistoricalOpenF1Adapter:
                 "stages": [name for name, _ in selected_stages],
             },
         )
-        before_snapshots = await self.snapshots.count(session_key)
+        owner = asyncio.current_task()
+        assert owner is not None
+        stopping = asyncio.Event()
+        ownership_lost = asyncio.Event()
+        heartbeat = asyncio.create_task(
+            self._maintain_run_heartbeat(run_id, owner, stopping, ownership_lost),
+            name=f"historical-run-heartbeat:{run_id}",
+        )
+        before_snapshots = 0
         received_at = datetime.now(UTC)
         endpoint_counts: dict[str, int] = dict(availability_baseline or {})
         run_endpoint_counts: dict[str, int] = {}
@@ -186,15 +277,22 @@ class HistoricalOpenF1Adapter:
         result = PipelineResult()
         all_records: list[RawEventInput] = []
         driver_registry: dict[int, DriverIdentity] = {}
-        normalized_session_type: str | None = None
+        normalized_session_type: str | None = session_type_hint
         try:
+            before_snapshots = await self.snapshots.count(session_key)
+            high_frequency_from = await self._high_frequency_window_start(session_key, selected)
             for stage_name, stage_endpoints in selected_stages:
                 stage_records: list[RawEventInput] = []
                 stage_failures: list[str] = []
                 for endpoint in stage_endpoints:
                     fetch = getattr(self.client, endpoint)
                     try:
-                        payloads = await fetch(session_key=session_key)
+                        payloads = await self._fetch_endpoint(
+                            endpoint,
+                            fetch,
+                            session_key,
+                            high_frequency_from,
+                        )
                     except Exception as exc:
                         stage_failures.append(endpoint)
                         failed_endpoints.append(endpoint)
@@ -274,13 +372,72 @@ class HistoricalOpenF1Adapter:
                 (event.event_time for event in all_records if event.event_time is not None),
                 default=None,
             )
-            await self.runs.finish(
+            snapshot_count = await self.snapshots.count(session_key) - before_snapshots
+            stopping.set()
+            if (
+                await self.runs.finish(
+                    run_id,
+                    status="partial" if failed_endpoints else "completed",
+                    result=result,
+                    last_event_at=last_event_at,
+                )
+                is False
+            ):
+                raise HistoricalRunOwnershipLostError(
+                    "Historical ingestion run ownership was lost; retry the session"
+                )
+            logger.info(
+                "Historical OpenF1 ingestion completed session=%s fetched=%s inserted=%s",
+                session_key,
+                sum(run_endpoint_counts.values()),
+                result.normalized_inserted,
+            )
+            return HistoricalIngestionResult(
+                run_id=run_id,
+                session_key=session_key,
+                endpoints=selected,
+                fetched_records=sum(run_endpoint_counts.values()),
+                raw_inserted=result.raw_inserted,
+                duplicates=result.raw_duplicates + result.normalized_duplicates,
+                normalized_inserted=result.normalized_inserted,
+                normalized_duplicates=result.normalized_duplicates,
+                snapshots=max(0, snapshot_count),
+                status=ingestion_status,
+                data_availability=data_availability,
+                endpoint_counts=endpoint_counts,
+                failed_endpoints=failed_endpoints,
+                stages=stages,
+            )
+        except asyncio.CancelledError:
+            stopping.set()
+            last_event_at = max(
+                (event.event_time for event in all_records if event.event_time is not None),
+                default=None,
+            )
+            if ownership_lost.is_set():
+                remaining_cancellations = owner.uncancel()
+                if remaining_cancellations == 0:
+                    await self._record_cancelled_run(
+                        run_id,
+                        result=result,
+                        last_event_at=last_event_at,
+                        last_error="HistoricalRunOwnershipLostError",
+                    )
+                    raise HistoricalRunOwnershipLostError(
+                        "Historical ingestion run ownership was lost; retry the session"
+                    ) from None
+            await self._record_cancelled_run(
                 run_id,
-                status="partial" if failed_endpoints else "completed",
                 result=result,
                 last_event_at=last_event_at,
+                last_error="CancelledError",
             )
+            logger.warning("Historical OpenF1 ingestion cancelled session=%s", session_key)
+            raise
+        except HistoricalRunOwnershipLostError:
+            raise
         except Exception as exc:
+            stopping.set()
             safe_error = type(exc).__name__
             if update_room and self.room_availability is not None:
                 try:
@@ -301,8 +458,11 @@ class HistoricalOpenF1Adapter:
             await self.runs.finish(
                 run_id,
                 status="failed",
-                result=PipelineResult(),
-                last_event_at=None,
+                result=result,
+                last_event_at=max(
+                    (event.event_time for event in all_records if event.event_time is not None),
+                    default=None,
+                ),
                 last_error=safe_error,
             )
             logger.error(
@@ -311,30 +471,10 @@ class HistoricalOpenF1Adapter:
                 safe_error,
             )
             raise
-
-        snapshot_count = await self.snapshots.count(session_key) - before_snapshots
-        logger.info(
-            "Historical OpenF1 ingestion completed session=%s fetched=%s inserted=%s",
-            session_key,
-            sum(run_endpoint_counts.values()),
-            result.normalized_inserted,
-        )
-        return HistoricalIngestionResult(
-            run_id=run_id,
-            session_key=session_key,
-            endpoints=selected,
-            fetched_records=sum(run_endpoint_counts.values()),
-            raw_inserted=result.raw_inserted,
-            duplicates=result.raw_duplicates + result.normalized_duplicates,
-            normalized_inserted=result.normalized_inserted,
-            normalized_duplicates=result.normalized_duplicates,
-            snapshots=max(0, snapshot_count),
-            status=ingestion_status,
-            data_availability=data_availability,
-            endpoint_counts=endpoint_counts,
-            failed_endpoints=failed_endpoints,
-            stages=stages,
-        )
+        finally:
+            stopping.set()
+            heartbeat.cancel()
+            await asyncio.gather(heartbeat, return_exceptions=True)
 
     async def retry_failed_session(
         self,
@@ -395,6 +535,67 @@ class HistoricalOpenF1Adapter:
                 )
             )
         return result
+
+    async def _high_frequency_window_start(
+        self,
+        session_key: str,
+        selected: list[str],
+    ) -> datetime | None:
+        """Bound GPS/car-data fetches to the end of a completed session.
+
+        OpenF1 requires a date or driver filter for its high-frequency endpoints.
+        A short tail of the final racing laps provides one current sample per
+        driver for the Race Room without downloading a full race's raw feed.
+        """
+
+        if not set(selected) & {"car_data", "location"}:
+            return None
+        try:
+            laps = await self.client.laps(session_key=session_key)
+        except Exception as exc:
+            logger.warning(
+                "High-frequency window unavailable session=%s error=%s",
+                session_key,
+                type(exc).__name__,
+            )
+            return None
+        latest = max(
+            (stamp for row in laps if (stamp := self._payload_time(row)) is not None),
+            default=None,
+        )
+        return latest - timedelta(minutes=5) if latest is not None else None
+
+    async def _fetch_endpoint(
+        self,
+        endpoint: str,
+        fetch: Any,
+        session_key: str,
+        high_frequency_from: datetime | None,
+    ) -> list[dict[str, Any]]:
+        if endpoint not in {"car_data", "location"}:
+            return await fetch(session_key=session_key)
+        if high_frequency_from is None:
+            return await fetch(session_key=session_key)
+        payloads = await fetch(
+            session_key=session_key,
+            # OpenF1's filter parser accepts RFC 3339 seconds, but not the
+            # microsecond form emitted by datetime.isoformat() by default.
+            **{"date>": high_frequency_from.isoformat(timespec="seconds")},
+        )
+        return self._latest_sample_per_driver(payloads)
+
+    @classmethod
+    def _latest_sample_per_driver(cls, payloads: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        latest: dict[int, tuple[datetime, dict[str, Any]]] = {}
+        for payload in payloads:
+            driver_number = cls._optional_int(payload.get("driver_number"))
+            event_time = cls._payload_time(payload)
+            if driver_number is None or event_time is None:
+                continue
+            current = latest.get(driver_number)
+            if current is None or event_time >= current[0]:
+                latest[driver_number] = (event_time, payload)
+        return [payload for _, payload in sorted(latest.values(), key=lambda item: item[0])]
 
     @staticmethod
     def _session_type(payloads: list[dict[str, Any]], session_key: str) -> str | None:
@@ -501,3 +702,12 @@ class HistoricalOpenF1Adapter:
                 continue
             return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
         return None
+
+    @staticmethod
+    def _optional_int(value: object) -> int | None:
+        if value is None or isinstance(value, bool):
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None

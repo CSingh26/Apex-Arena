@@ -2,8 +2,8 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
-from uuid import UUID
+from datetime import UTC, datetime, timedelta
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -15,32 +15,33 @@ from app.domain.rooms import (
     RoomStatus,
     SourceAvailability,
 )
+from app.services.race_state import RaceState, RaceStateEngine
 from app.services.room_replay import ReplayUnavailableError, RoomReplayCoordinator
+from app.storage.room_repository import ReplayOwnershipLostError
 
 
-def replay_room(*, session_key: str | None = "day3-session") -> RaceRoom:
+def replay_room(*, session_key: str | None = "belgian-race-session") -> RaceRoom:
     return RaceRoom(
-        slug="day3-validation-room",
+        slug="belgian-grand-prix-race",
         session_key=session_key,
         season=2026,
-        round_number=99,
-        race_name="Day 3 Validation Race",
-        official_name="Apex Arena Day 3 Validation Race",
-        circuit_name="Apex Validation Circuit",
-        country="Development",
+        round_number=13,
+        race_name="Belgian Grand Prix",
+        official_name="Belgian Grand Prix",
+        circuit_name="Circuit de Spa-Francorchamps",
+        country="Belgium",
         scheduled_start=datetime(2026, 7, 17, 12, tzinfo=UTC),
         status=RoomStatus.READY,
-        mode=RoomMode.DEVELOPMENT,
+        mode=RoomMode.ARCHIVED,
         total_laps=12,
         source_availability=SourceAvailability.TELEMETRY,
-        is_development=True,
     )
 
 
 def replay_event(sequence: int, lap: int) -> NormalizedRaceEvent:
-    timestamp = datetime(2026, 7, 17, 12, 0, sequence, tzinfo=UTC)
+    timestamp = datetime(2026, 7, 17, 12, tzinfo=UTC) + timedelta(seconds=sequence)
     return NormalizedRaceEvent(
-        session_key="day3-session",
+        session_key="belgian-race-session",
         source="fixture",
         event_time=timestamp,
         received_at=timestamp,
@@ -49,7 +50,7 @@ def replay_event(sequence: int, lap: int) -> NormalizedRaceEvent:
         driver_numbers=[4],
         lap_number=lap,
         payload={"lap_number": lap},
-        dedup_key=f"day3:{sequence}",
+        dedup_key=f"replay-fixture:{sequence}",
         is_replay=True,
     )
 
@@ -64,6 +65,53 @@ class FakeRoomRepository:
         self.event_message_sequences: dict[int, int] = {}
         self.event_message_queries: list[tuple[str, int]] = []
         self.terminal_status = asyncio.Event()
+        self.owner_token: UUID | None = None
+        self.owner_expires = 0.0
+        self.renewals = 0
+
+    async def claim_replay(self, room_id, owner_token, *, lease_seconds):
+        if self.owner_token and self.owner_expires > asyncio.get_running_loop().time():
+            return False
+        self.owner_token = owner_token
+        self.owner_expires = asyncio.get_running_loop().time() + lease_seconds
+        return True
+
+    async def renew_replay(self, room_id, owner_token, *, lease_seconds):
+        try:
+            self.require_owner(owner_token)
+        except ReplayOwnershipLostError:
+            return False
+        self.renewals += 1
+        self.owner_expires = asyncio.get_running_loop().time() + lease_seconds
+        return True
+
+    async def release_replay(self, room_id, owner_token):
+        if self.owner_token != owner_token:
+            return False
+        self.owner_token = None
+        return True
+
+    def require_owner(self, owner_token):
+        if (
+            self.owner_token != owner_token
+            or self.owner_expires <= asyncio.get_running_loop().time()
+        ):
+            raise ReplayOwnershipLostError("Replay ownership expired; retry the control request")
+
+    async def pause_orphaned_running_rows(self):
+        if (
+            self.room.mode in {RoomMode.REPLAY, RoomMode.ARCHIVED}
+            and self.room.status == RoomStatus.REPLAYING
+            and not self.playback.is_paused
+            and (
+                self.owner_token is None or self.owner_expires <= asyncio.get_running_loop().time()
+            )
+        ):
+            self.playback = self.playback.model_copy(update={"is_paused": True})
+            self.room = self.room.model_copy(update={"status": RoomStatus.PAUSED})
+            self.owner_token = None
+            return 1
+        return 0
 
     async def get_playback(self, room_id: UUID) -> RoomPlaybackState:
         assert room_id == self.room.id
@@ -79,8 +127,13 @@ class FakeRoomRepository:
         playback_speed: float | None = None,
         is_paused: bool | None = None,
         started_at: datetime | None = None,
+        owner_token: UUID | None = None,
+        room_status: RoomStatus | None = None,
+        last_event_at: datetime | None = None,
     ) -> RoomPlaybackState:
         assert room_id == self.room.id
+        if owner_token is not None:
+            self.require_owner(owner_token)
         updates: dict[str, object] = {"updated_at": datetime.now(UTC)}
         for key, value in (
             ("current_event_sequence", current_event_sequence),
@@ -93,6 +146,14 @@ class FakeRoomRepository:
             if value is not None:
                 updates[key] = value
         self.playback = self.playback.model_copy(update=updates)
+        if room_status is not None:
+            await self.update_room_status(
+                room_id,
+                room_status,
+                current_lap=current_lap,
+                last_event_at=last_event_at,
+                owner_token=owner_token,
+            )
         return self.playback.model_copy(deep=True)
 
     async def update_room_status(
@@ -102,8 +163,11 @@ class FakeRoomRepository:
         *,
         current_lap: int | None = None,
         last_event_at: datetime | None = None,
+        owner_token: UUID | None = None,
     ) -> None:
         assert room_id == self.room.id
+        if owner_token is not None:
+            self.require_owner(owner_token)
         self.status_updates.append((status, current_lap))
         updates: dict[str, object] = {"status": status}
         if current_lap is not None:
@@ -114,11 +178,31 @@ class FakeRoomRepository:
         if status in {RoomStatus.COMPLETED, RoomStatus.FAILED}:
             self.terminal_status.set()
 
-    async def reset_discussion(self, room_id: UUID) -> None:
+    async def begin_discussion_restart(
+        self,
+        room_id: UUID,
+        *,
+        owner_token: UUID,
+        started_at: datetime,
+    ) -> RoomPlaybackState:
         assert room_id == self.room.id
+        self.require_owner(owner_token)
         self.reset_count += 1
         self.message_sequence = 0
         self.event_message_sequences.clear()
+        generation = self.room.discussion_generation + 1
+        self.room = self.room.model_copy(
+            update={"discussion_generation": generation, "status": RoomStatus.PAUSED}
+        )
+        self.playback = RoomPlaybackState(
+            room_id=room_id,
+            discussion_generation=generation,
+            current_lap=0,
+            playback_speed=1,
+            is_paused=True,
+            started_at=started_at,
+        )
+        return self.playback
 
     async def max_message_sequence(self, room_id: UUID) -> int:
         assert room_id == self.room.id
@@ -161,6 +245,13 @@ class FakeEventRepository:
             for event in self.events
             if event.session_key == session_key and event.sequence_number > after_sequence
         ][:limit]
+
+    async def list_driver_profiles(self, session_key: str) -> list[NormalizedRaceEvent]:
+        return [
+            event
+            for event in self.events
+            if event.session_key == session_key and event.event_type is RaceEventType.DRIVER_UPDATE
+        ]
 
     async def sequence_for_lap(self, session_key: str, lap_number: int) -> int | None:
         return next(
@@ -211,23 +302,75 @@ class FakeDiscussion:
         self.resets.append((session_key, room_id))
 
 
-class FakeRaceState:
+class FakeRaceState(RaceStateEngine):
     def __init__(self) -> None:
+        from tests.test_race_state import SnapshotRepository
+
+        super().__init__(SnapshotRepository())
         self.consumed: list[int] = []
+        self.consumed_replay_modes: list[bool] = []
         self.resets: list[str] = []
+        self.reset_modes: list[bool] = []
+        self.primed_profiles: list[list[int]] = []
 
-    async def consume(self, event: NormalizedRaceEvent) -> None:
+    async def consume(self, event: NormalizedRaceEvent, *, persist_snapshot: bool = True) -> None:
+        assert persist_snapshot is False
         self.consumed.append(event.sequence_number)
+        self.consumed_replay_modes.append(event.is_replay)
 
-    async def reset_session(self, session_key: str) -> None:
+    async def apply(self, event, *, persist_snapshot=True):
+        await self.consume(event, persist_snapshot=persist_snapshot)
+        return await super().apply(event, persist_snapshot=persist_snapshot)
+
+    async def reset_session(
+        self, session_key: str, *, is_replay: bool = False, preserve_snapshots: bool = False
+    ) -> None:
+        assert preserve_snapshots is True
         self.resets.append(session_key)
+        self.reset_modes.append(is_replay)
+        await super().reset_session(
+            session_key, is_replay=is_replay, preserve_snapshots=preserve_snapshots
+        )
+
+    async def discard_factual_context(self, session_key: str) -> None:
+        pass  # This test double owns no private factual context.
+
+    async def prime_driver_profiles(
+        self,
+        session_key: str,
+        profiles: list[NormalizedRaceEvent],
+    ) -> RaceState:
+        self.primed_profiles.append([profile.sequence_number for profile in profiles])
+        return await self.get_state(session_key)
+
+    async def get_state(self, session_key: str) -> RaceState:
+        return RaceState(
+            session_key=session_key,
+            sequence_number=self.consumed[-1] if self.consumed else 0,
+            is_replay=True,
+        )
 
 
 class FakeEventBus:
     def __init__(self) -> None:
         self.states: list[dict[str, object]] = []
         self.statuses: list[dict[str, object]] = []
+        self.session_events: list[NormalizedRaceEvent] = []
+        self.session_states: list[RaceState] = []
+        self.generations: list[int] = []
         self.fail = False
+
+    async def publish_event(self, event: NormalizedRaceEvent) -> str:
+        if self.fail:
+            raise ConnectionError("redis://user:secret@private-host")
+        self.session_events.append(event)
+        return "1-0"
+
+    async def publish_state(self, state: RaceState) -> str:
+        if self.fail:
+            raise ConnectionError("redis://user:secret@private-host")
+        self.session_states.append(state)
+        return "1-0"
 
     async def publish_room_state(self, room_id: str, state: dict[str, object]) -> str:
         if self.fail:
@@ -239,6 +382,12 @@ class FakeEventBus:
         if self.fail:
             raise ConnectionError("redis://user:secret@private-host")
         self.statuses.append({"room_id": room_id, **status})
+        return "1-0"
+
+    async def publish_room_generation(self, room_id: str, discussion_generation: int) -> str:
+        if self.fail:
+            raise ConnectionError("redis://user:secret@private-host")
+        self.generations.append(discussion_generation)
         return "1-0"
 
 
@@ -272,6 +421,239 @@ def coordinator(
     return replay, rooms, event_repository, discussion, race_state, event_bus
 
 
+@pytest.mark.parametrize("operation", ["start", "restart", "resume", "pause", "speed", "seek"])
+async def test_healthy_peer_rejects_control_without_mutation(operation):
+    room = replay_room()
+    service, rooms, _, discussion, race_state, bus = coordinator(room, [replay_event(1, 1)])
+    await rooms.claim_replay(room.id, uuid4(), lease_seconds=30)
+    before = rooms.playback.model_copy(deep=True)
+    try:
+        with pytest.raises(ReplayUnavailableError, match="retry"):
+            if operation == "start":
+                await service.start(room)
+            elif operation == "restart":
+                await service.start(room, restart=True)
+            elif operation == "resume":
+                await service.resume(room)
+            elif operation == "pause":
+                await service.pause(room)
+            elif operation == "speed":
+                await service.set_speed(room, 2)
+            else:
+                await service.seek_to_sequence(room, 1)
+        assert rooms.playback == before
+        assert rooms.status_updates == []
+        assert rooms.reset_count == 0
+        assert discussion.consumed == []
+        assert race_state.resets == []
+        assert bus.states == []
+    finally:
+        await service.close()
+
+
+@pytest.mark.parametrize("initializing", [True, False])
+async def test_heartbeat_covers_long_initialization_and_worker_awaits(initializing):
+    room = replay_room()
+    service, rooms, _, discussion, _, _ = coordinator(room, [replay_event(1, 1)])
+    service.lease_seconds = 0.09
+    if initializing:
+        rooms.playback = rooms.playback.model_copy(update={"current_event_sequence": 1})
+    discussion.block_on_sequence = 1
+    starting = asyncio.create_task(service.resume(room))
+    try:
+        await asyncio.wait_for(discussion.consume_started.wait(), 1)
+        await asyncio.sleep(0.2)
+        assert rooms.renewals >= 2
+        assert not await rooms.claim_replay(room.id, uuid4(), lease_seconds=30)
+        assert starting.done() is not initializing
+        discussion.consume_release.set()
+        await starting
+        await asyncio.wait_for(rooms.terminal_status.wait(), 1)
+    finally:
+        starting.cancel()
+        await service.close()
+        await asyncio.gather(starting, return_exceptions=True)
+    assert rooms.owner_token is None
+
+
+async def test_lost_ownership_cancels_blocked_worker_without_failed_write():
+    room = replay_room()
+    service, rooms, _, discussion, _, bus = coordinator(room, [replay_event(1, 1)])
+    service.lease_seconds = 0.06
+    discussion.block_on_sequence = 1
+    try:
+        await service.start(room)
+        await asyncio.wait_for(discussion.consume_started.wait(), 1)
+        replacement = uuid4()
+        rooms.owner_token = replacement
+        rooms.playback = rooms.playback.model_copy(update={"current_event_sequence": 8})
+        rooms.room = rooms.room.model_copy(update={"status": RoomStatus.PAUSED})
+        await asyncio.sleep(0.15)
+        assert rooms.playback.current_event_sequence == 8
+        assert rooms.room.status == RoomStatus.PAUSED
+        assert rooms.owner_token == replacement
+        assert all(item["status"] != "failed" for item in bus.statuses)
+        assert not service._tasks or all(task.done() for task in service._tasks.values())
+    finally:
+        await service.close()
+
+
+async def test_recovered_cursor_explicitly_resumes_and_paused_worker_renews():
+    room = replay_room().model_copy(update={"status": RoomStatus.REPLAYING})
+    service, rooms, _, discussion, _, _ = coordinator(
+        room, [replay_event(1, 1), replay_event(2, 2)], interval=1
+    )
+    service.lease_seconds = 0.09
+    rooms.playback = rooms.playback.model_copy(
+        update={"current_event_sequence": 1, "current_message_sequence": 1, "is_paused": False}
+    )
+    try:
+        assert await service.reconcile_interrupted_replays() == 1
+        assert rooms.playback.current_event_sequence == 1
+        await service.resume(rooms.room)
+        await service.pause(rooms.room)
+        await asyncio.sleep(0.2)
+        assert rooms.renewals >= 2
+        assert await service.reconcile_interrupted_replays() == 0
+        assert rooms.playback.current_event_sequence == 1
+        assert discussion.consumed == [1]
+    finally:
+        await service.close()
+    assert rooms.owner_token is None
+
+
+async def test_temporary_seek_owner_is_released_on_failure():
+    room = replay_room()
+    service, rooms, _, _, _, _ = coordinator(
+        room, [replay_event(1, 1)], discussion_failure=RuntimeError("failed")
+    )
+    with pytest.raises(RuntimeError):
+        await service.seek_to_sequence(room, 1)
+    assert rooms.owner_token is None
+    await service.close()
+
+
+async def test_restarting_before_worker_first_tick_retires_old_lease():
+    room = replay_room()
+    service, rooms, _, _, _, _ = coordinator(room, [replay_event(1, 1)])
+    try:
+        await service.start(room)
+        first_token = rooms.owner_token
+        first_heartbeat = service._leases[room.id].heartbeat
+        await service.start(room, restart=True)
+        assert rooms.owner_token != first_token
+        assert first_heartbeat.done()
+    finally:
+        await service.close()
+
+
+async def test_close_cancels_initialization_and_stops_renewal():
+    room = replay_room()
+    service, rooms, _, discussion, _, _ = coordinator(room, [replay_event(1, 1)])
+    rooms.playback = rooms.playback.model_copy(update={"current_event_sequence": 1})
+    discussion.block_on_sequence = 1
+    starting = asyncio.create_task(service.resume(room))
+    await asyncio.wait_for(discussion.consume_started.wait(), 1)
+    await asyncio.wait_for(service.close(), 1)
+    assert starting.cancelled()
+    assert rooms.owner_token is None
+    assert not service._leases
+
+
+async def test_close_cancels_initial_claim_before_lease_is_registered():
+    room = replay_room()
+    service, rooms, _, _, _, _ = coordinator(room, [replay_event(1, 1)])
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    original = rooms.claim_replay
+
+    async def blocked_claim(*args, **kwargs):
+        entered.set()
+        await release.wait()
+        return await original(*args, **kwargs)
+
+    rooms.claim_replay = blocked_claim
+    starting = asyncio.create_task(service.start(room))
+    try:
+        await asyncio.wait_for(entered.wait(), 1)
+        await asyncio.wait_for(service.close(), 1)
+        assert starting.cancelled()
+        assert rooms.owner_token is None
+    finally:
+        starting.cancel()
+        await asyncio.gather(starting, return_exceptions=True)
+
+
+async def test_resume_waits_for_retiring_worker_then_claims_new_lifetime():
+    room = replay_room()
+    service, rooms, events, _, _, _ = coordinator(room, [replay_event(1, 1)])
+    releasing, release = asyncio.Event(), asyncio.Event()
+    original = rooms.release_replay
+    first_token = None
+
+    async def blocked_release(room_id, token):
+        if token == first_token:
+            releasing.set()
+            await release.wait()
+        return await original(room_id, token)
+
+    rooms.release_replay = blocked_release
+    resuming = None
+    try:
+        await service.start(room)
+        first_token = rooms.owner_token
+        await asyncio.wait_for(releasing.wait(), 1)
+        events.events.append(replay_event(2, 2))
+        resuming = asyncio.create_task(service.resume(rooms.room))
+        await asyncio.sleep(0.02)
+        assert not resuming.done()
+        release.set()
+        await asyncio.wait_for(resuming, 1)
+        await asyncio.wait_for(service._tasks[room.id], 1)
+        assert rooms.playback.current_event_sequence == 2
+        assert rooms.owner_token is None
+    finally:
+        release.set()
+        if resuming is not None:
+            await asyncio.gather(resuming, return_exceptions=True)
+        await service.close()
+
+
+async def test_temporary_storage_contention_becomes_safe_control_conflict():
+    from app.storage.room_repository import ReplayWriteBusyError
+
+    room = replay_room()
+    service, rooms, _, _, _, _ = coordinator(room, [])
+
+    async def busy(*args, **kwargs):
+        raise ReplayWriteBusyError("Replay room is busy; retry the control request")
+
+    rooms.update_playback = busy
+    try:
+        with pytest.raises(ReplayUnavailableError, match="retry"):
+            await service.pause(room)
+        assert rooms.owner_token is None
+        assert rooms.status_updates == []
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_live_capture_is_reset_and_marked_replay_without_deleting_discussion() -> None:
+    room = replay_room()
+    events = [replay_event(1, 1).model_copy(update={"is_replay": False})]
+    service, rooms, _, discussion, race_state, bus = coordinator(room, events)
+    try:
+        await service.start(room)
+        await asyncio.wait_for(rooms.terminal_status.wait(), timeout=2)
+        assert race_state.resets == [room.session_key]
+        assert rooms.reset_count == 0
+        assert bus.session_events[0].is_replay is True
+        assert events[0].is_replay is False
+    finally:
+        await service.close()
+
+
 @pytest.mark.asyncio
 async def test_start_consumes_events_in_order_and_completes_durably() -> None:
     room = replay_room()
@@ -297,6 +679,27 @@ async def test_start_consumes_events_in_order_and_completes_durably() -> None:
         RoomStatus.COMPLETED,
     ]
     assert bus.statuses[-1]["status"] == "replay_complete"
+    assert [event.sequence_number for event in bus.session_events] == [1, 2]
+    assert [state.sequence_number for state in bus.session_states] == [1, 2]
+    await replay.close()
+
+
+@pytest.mark.asyncio
+async def test_replay_primes_driver_profiles_before_timing_events() -> None:
+    room = replay_room()
+    profile = replay_event(2, 1).model_copy(
+        update={
+            "event_type": RaceEventType.DRIVER_UPDATE,
+            "driver_numbers": [63],
+            "payload": {"resolved_driver_name": "George RUSSELL"},
+        }
+    )
+    replay, rooms, _, _, race_state, _ = coordinator(room, [replay_event(1, 1), profile])
+
+    await replay.start(room, restart=True)
+    await asyncio.wait_for(rooms.terminal_status.wait(), timeout=1)
+
+    assert race_state.primed_profiles == [[2]]
     await replay.close()
 
 
@@ -321,17 +724,48 @@ async def test_restart_resets_discussion_state_and_replays_from_sequence_zero() 
     assert restarted.current_lap == 0
     assert restarted.playback_speed == 1
     assert rooms.reset_count == 1
-    assert discussion.resets == [("day3-session", str(room.id))]
-    assert race_state.resets == ["day3-session"]
-    assert events.reads[-2:] == [("day3-session", 0, 1), ("day3-session", 1, 1)]
-    assert any(status["status"] == "discussion_reset" for status in bus.statuses)
+    assert discussion.resets == [("belgian-race-session", str(room.id))]
+    assert race_state.resets == ["belgian-race-session"]
+    assert race_state.reset_modes == [True]
+    assert events.reads[-2:] == [
+        ("belgian-race-session", 0, 1),
+        ("belgian-race-session", 1, 1),
+    ]
+    assert bus.generations == [2]
+    await replay.close()
+
+
+@pytest.mark.asyncio
+async def test_restart_failure_after_durable_reset_leaves_resumable_paused_generation() -> None:
+    room = replay_room()
+    replay, rooms, _, discussion, race_state, bus = coordinator(room, [replay_event(1, 1)])
+
+    async def fail_prime(
+        _session_key: str,
+        _profiles: list[NormalizedRaceEvent],
+    ) -> RaceState:
+        raise RuntimeError("synthetic profile priming failure")
+
+    race_state.prime_driver_profiles = fail_prime  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="synthetic profile priming failure"):
+        await replay.start(room, restart=True)
+
+    assert rooms.room.discussion_generation == 2
+    assert rooms.room.status is RoomStatus.PAUSED
+    assert rooms.playback.discussion_generation == 2
+    assert rooms.playback.is_paused is True
+    assert rooms.playback.current_event_sequence == 0
+    assert rooms.playback.current_message_sequence == 0
+    assert discussion.resets == [("belgian-race-session", str(room.id))]
+    assert bus.generations == [2]
+    assert room.id not in replay._tasks
     await replay.close()
 
 
 @pytest.mark.asyncio
 async def test_pause_prevents_consumption_until_resume_then_completes() -> None:
     room = replay_room()
-    replay, rooms, _, discussion, _, _ = coordinator(
+    replay, rooms, _, discussion, race_state, _ = coordinator(
         room,
         [replay_event(1, 1), replay_event(2, 2)],
         interval=0.01,
@@ -350,7 +784,64 @@ async def test_pause_prevents_consumption_until_resume_then_completes() -> None:
 
     assert resumed.is_paused is False
     assert discussion.consumed == [1, 2]
+    assert race_state.resets == ["belgian-race-session"]
     await replay.close()
+
+
+@pytest.mark.asyncio
+async def test_fresh_coordinator_resume_rebuilds_persisted_cursor_as_replay() -> None:
+    room = replay_room().model_copy(update={"status": RoomStatus.PAUSED})
+    recorded = [
+        replay_event(sequence, sequence).model_copy(update={"is_replay": False})
+        for sequence in range(1, 4)
+    ]
+    replay, rooms, events, discussion, race_state, _ = coordinator(room, recorded, interval=1)
+    rooms.playback = rooms.playback.model_copy(
+        update={
+            "current_event_sequence": 2,
+            "current_message_sequence": 2,
+            "current_lap": 2,
+            "is_paused": True,
+        }
+    )
+
+    try:
+        resumed = await replay.resume(room)
+
+        assert resumed.current_event_sequence == 2
+        assert resumed.is_paused is False
+        assert race_state.resets == ["belgian-race-session"]
+        assert race_state.reset_modes == [True]
+        assert race_state.consumed == [1, 2]
+        assert race_state.consumed_replay_modes == [True, True]
+        assert discussion.consumed == [1, 2]
+        assert events.reads == [("belgian-race-session", 0, 250)]
+        assert all(event.is_replay is False for event in recorded)
+    finally:
+        await replay.close()
+
+
+@pytest.mark.asyncio
+async def test_fresh_coordinator_resume_at_zero_only_primes_profiles() -> None:
+    room = replay_room().model_copy(update={"status": RoomStatus.PAUSED})
+    replay, rooms, _, discussion, race_state, _ = coordinator(
+        room,
+        [replay_event(1, 1)],
+        interval=1,
+    )
+    rooms.playback = rooms.playback.model_copy(update={"is_paused": True})
+
+    try:
+        resumed = await replay.resume(room)
+
+        assert resumed.current_event_sequence == 0
+        assert resumed.is_paused is False
+        assert race_state.resets == []
+        assert race_state.primed_profiles == [[]]
+        assert discussion.resets == []
+        assert discussion.consumed == []
+    finally:
+        await replay.close()
 
 
 @pytest.mark.asyncio
@@ -374,17 +865,51 @@ async def test_speed_and_seek_controls_update_durable_playback_and_publish() -> 
     assert by_lap.current_lap == 5
     assert rooms.playback.current_event_sequence == 6
     assert rooms.event_message_queries == [
-        ("day3-session", 6),
-        ("day3-session", 6),
+        ("belgian-race-session", 6),
+        ("belgian-race-session", 6),
     ]
     assert discussion.consumed == [3, 3]
     assert discussion.resets == [
-        ("day3-session", str(room.id)),
-        ("day3-session", str(room.id)),
+        ("belgian-race-session", str(room.id)),
+        ("belgian-race-session", str(room.id)),
     ]
     assert race_state.consumed == [3, 3]
-    assert race_state.resets == ["day3-session", "day3-session"]
+    assert race_state.resets == ["belgian-race-session", "belgian-race-session"]
+    assert race_state.reset_modes == [True, True]
     assert len(bus.states) == 3
+
+
+@pytest.mark.asyncio
+async def test_seek_rebuilds_more_than_one_bounded_event_page() -> None:
+    room = replay_room()
+    replay, _, events, discussion, race_state, _ = coordinator(
+        room,
+        [replay_event(sequence, sequence) for sequence in range(1, 252)],
+    )
+
+    playback = await replay.seek_to_sequence(room, 251)
+
+    assert playback.current_event_sequence == 251
+    assert race_state.consumed == list(range(1, 252))
+    assert discussion.consumed == list(range(1, 252))
+    assert events.reads == [
+        ("belgian-race-session", 0, 250),
+        ("belgian-race-session", 250, 250),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_seek_publishes_rebuilt_session_state_for_paused_viewers() -> None:
+    room = replay_room().model_copy(update={"status": RoomStatus.PAUSED})
+    replay, _, _, _, _, bus = coordinator(
+        room,
+        [replay_event(1, 1), replay_event(2, 2), replay_event(3, 3)],
+    )
+
+    playback = await replay.seek_to_sequence(room, 2)
+
+    assert playback.current_event_sequence == 2
+    assert [state.sequence_number for state in bus.session_states] == [2]
 
 
 @pytest.mark.asyncio
@@ -421,8 +946,11 @@ async def test_running_replay_and_seek_are_serialized_into_one_coherent_state() 
     assert paused.is_paused is True
     assert discussion.consumed == [1, 1, 2, 3]
     assert race_state.consumed == [1, 1, 2, 3]
-    assert race_state.resets == ["day3-session"]
-    assert rooms.event_message_queries == [("day3-session", 3)]
+    assert race_state.resets == ["belgian-race-session", "belgian-race-session"]
+    assert rooms.event_message_queries == [
+        ("belgian-race-session", 0),
+        ("belgian-race-session", 3),
+    ]
     assert 4 not in discussion.consumed
     await replay.close()
 
@@ -505,3 +1033,156 @@ async def test_event_bus_outage_does_not_stop_replay_progress() -> None:
     assert bus.states == []
     assert bus.statuses == []
     await replay.close()
+
+
+class FakeSessionTimes:
+    """Stands in for the location store's recorded session span."""
+
+    def __init__(
+        self,
+        start: datetime | None = datetime(2026, 7, 19, 13, 0, tzinfo=UTC),
+        end: datetime | None = datetime(2026, 7, 19, 14, 0, tzinfo=UTC),
+    ) -> None:
+        self.start = start
+        self.end = end
+        self.calls = 0
+
+    async def time_range(self, session_key: str) -> tuple[datetime | None, datetime | None]:
+        self.calls += 1
+        return self.start, self.end
+
+
+def clocked_coordinator(
+    room: RaceRoom,
+    events: list[NormalizedRaceEvent],
+    times: FakeSessionTimes,
+) -> tuple[RoomReplayCoordinator, FakeRoomRepository]:
+    rooms = FakeRoomRepository(room)
+    replay = RoomReplayCoordinator(
+        rooms,  # type: ignore[arg-type]
+        FakeEventRepository(events),  # type: ignore[arg-type]
+        FakeDiscussion(rooms),  # type: ignore[arg-type]
+        FakeRaceState(),  # type: ignore[arg-type]
+        FakeEventBus(),  # type: ignore[arg-type]
+        base_interval_seconds=0,
+        session_times=times,
+    )
+    return replay, rooms
+
+
+@pytest.mark.asyncio
+async def test_session_clock_uses_the_timestamp_of_the_applied_replay_event() -> None:
+    """Locations must align with the state created by the replayed event."""
+
+    room = replay_room()
+    event_times = [
+        datetime(2026, 7, 19, 13, minute, tzinfo=UTC)
+        for minute in (1, 2, 4, 6, 8, 12, 17, 25, 39, 55)
+    ]
+    events = [
+        replay_event(sequence, sequence).model_copy(
+            update={
+                "event_time": event_times[sequence - 1],
+                "received_at": event_times[sequence - 1],
+            }
+        )
+        for sequence in range(1, 11)
+    ]
+    replay, _ = clocked_coordinator(room, events, FakeSessionTimes())
+
+    at_start = await replay.with_session_clock(room.session_key, RoomPlaybackState(room_id=room.id))
+    halfway = await replay.with_session_clock(
+        room.session_key, RoomPlaybackState(room_id=room.id, current_event_sequence=5)
+    )
+    at_end = await replay.with_session_clock(
+        room.session_key, RoomPlaybackState(room_id=room.id, current_event_sequence=10)
+    )
+
+    assert at_start.session_clock == datetime(2026, 7, 19, 13, 0, tzinfo=UTC)
+    assert halfway.session_clock == datetime(2026, 7, 19, 13, 8, tzinfo=UTC)
+    assert at_end.session_clock == datetime(2026, 7, 19, 13, 55, tzinfo=UTC)
+    assert at_start.session_clock < halfway.session_clock < at_end.session_clock
+
+
+@pytest.mark.asyncio
+async def test_session_clock_clamps_to_the_final_recorded_event() -> None:
+    room = replay_room()
+    times = FakeSessionTimes()
+    final_event_time = datetime(2026, 7, 19, 13, 17, tzinfo=UTC)
+    replay, _ = clocked_coordinator(
+        room,
+        [
+            replay_event(1, 1).model_copy(
+                update={"event_time": final_event_time, "received_at": final_event_time}
+            )
+        ],
+        times,
+    )
+
+    beyond = await replay.with_session_clock(
+        room.session_key, RoomPlaybackState(room_id=room.id, current_event_sequence=10_000)
+    )
+    await replay.with_session_clock(room.session_key, RoomPlaybackState(room_id=room.id))
+
+    assert beyond.session_clock == final_event_time
+    assert times.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_session_clock_is_absent_without_a_recorded_span() -> None:
+    """No location samples means no clock, and the map falls back cleanly."""
+
+    room = replay_room()
+    replay, _ = clocked_coordinator(room, [replay_event(1, 1)], FakeSessionTimes(None, None))
+
+    playback = await replay.with_session_clock(room.session_key, RoomPlaybackState(room_id=room.id))
+    assert playback.session_clock is None
+
+
+@pytest.mark.asyncio
+async def test_a_missing_span_is_retried_once_locations_are_backfilled() -> None:
+    """Locations are often ingested while the API stays up.
+
+    Caching the miss would leave that room without a clock until the process
+    restarted, so only a found span is cached.
+    """
+
+    room = replay_room()
+    times = FakeSessionTimes(None, None)
+    replay, _ = clocked_coordinator(room, [replay_event(1, 1)], times)
+
+    first = await replay.with_session_clock(room.session_key, RoomPlaybackState(room_id=room.id))
+    assert first.session_clock is None
+
+    # The backfill lands, and the backoff window expires.
+    times.start = datetime(2026, 7, 19, 13, 0, tzinfo=UTC)
+    times.end = datetime(2026, 7, 19, 14, 0, tzinfo=UTC)
+    replay._span_misses.clear()
+
+    second = await replay.with_session_clock(room.session_key, RoomPlaybackState(room_id=room.id))
+    assert second.session_clock == datetime(2026, 7, 19, 13, 0, tzinfo=UTC)
+
+
+@pytest.mark.asyncio
+async def test_a_missing_span_is_not_re_queried_on_every_tick() -> None:
+    room = replay_room()
+    times = FakeSessionTimes(None, None)
+    replay, _ = clocked_coordinator(room, [replay_event(1, 1)], times)
+
+    for _ in range(5):
+        await replay.with_session_clock(room.session_key, RoomPlaybackState(room_id=room.id))
+
+    assert times.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_playback_controls_publish_the_session_clock() -> None:
+    room = replay_room()
+    events = [replay_event(sequence, sequence) for sequence in range(1, 11)]
+    replay, rooms = clocked_coordinator(room, events, FakeSessionTimes())
+
+    await replay.start(room)
+    await asyncio.wait_for(rooms.terminal_status.wait(), timeout=1)
+    paused = await replay.pause(room)
+
+    assert paused.session_clock is not None

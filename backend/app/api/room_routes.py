@@ -10,6 +10,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
 
+from app.api.proxy import require_replay_operator
 from app.api.room_schemas import (
     EventWeekendListResponse,
     MessageEvidenceResponse,
@@ -23,22 +24,29 @@ from app.api.room_schemas import (
     RoomGenerationStatusResponse,
     RoomMessagesResponse,
 )
-from app.api.room_streaming import race_room_stream
+from app.api.room_streaming import parse_discussion_event_id, race_room_stream
+from app.api.routes import intelligence_projection_status
+from app.api.schemas import SessionIntelligenceResponse
 from app.domain.rooms import (
+    MAX_DISCUSSION_GENERATION,
     MessageTopic,
     MessageType,
+    RaceRoom,
     RoomMode,
+    RoomPlaybackState,
     RoomStatus,
     SessionType,
     SourceAvailability,
     WeekendStatus,
 )
 from app.services.container import AppServices
+from app.services.race_state import RaceState
 from app.services.room_eligibility import (
     RoomActionUnavailableError,
     RoomEligibilityService,
 )
 from app.services.room_replay import ReplayUnavailableError
+from app.services.strategy_public import sanitize_strategy_state
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/race-rooms", tags=["Race Rooms"])
@@ -51,17 +59,19 @@ def get_services(request: Request) -> AppServices:
 Services = Annotated[AppServices, Depends(get_services)]
 
 
+def _require_matching_generation(room: RaceRoom, playback: RoomPlaybackState) -> None:
+    if room.discussion_generation != playback.discussion_generation:
+        # Do not repeat a mutation: it may already have committed successfully.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Discussion restarted while reading playback; refresh the room",
+        )
+
+
 async def require_room(slug: str, services: AppServices):
     await services.rooms.ensure_catalog()
     room = await services.room_repository.get_room(slug)
     if room is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Race room not found")
-    runtime_settings = getattr(services, "settings", None)
-    app_env = getattr(runtime_settings, "app_env", "test")
-    fixture_access = app_env == "test" or (
-        app_env == "local" and bool(getattr(runtime_settings, "development_fixture_enabled", False))
-    )
-    if room.is_development and not fixture_access:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Race room not found")
     try:
         _eligibility_service(services).require_room_action(room, action="open")
@@ -112,10 +122,8 @@ async def list_race_rooms(
         limit=limit,
         offset=offset,
     )
-    public_rooms = [room for room in rooms if not room.is_development]
-    total = max(0, total - (len(rooms) - len(public_rooms)))
     return RaceRoomListResponse(
-        rooms=public_rooms,
+        rooms=rooms,
         total=total,
         limit=limit,
         offset=offset,
@@ -150,6 +158,15 @@ async def list_event_weekends(
     )
 
 
+@router.post(
+    "/replay-operator/verify",
+    response_model=dict[str, bool],
+    dependencies=[Depends(require_replay_operator)],
+)
+async def verify_replay_operator() -> dict[str, bool]:
+    return {"authorized": True}
+
+
 @router.post("/sync", response_model=dict[str, int])
 async def sync_race_room_catalog(
     services: Services,
@@ -172,11 +189,22 @@ async def sync_race_room_catalog(
 async def race_room_detail(room_slug: str, services: Services) -> RaceRoomDetailResponse:
     room = await require_room(room_slug, services)
     circuit = services.circuit_intelligence.for_circuit(room.circuit_name)
-    agents, playback, weather = await asyncio.gather(
+    agents, playback, weather, state = await asyncio.gather(
         services.room_repository.get_agents(room.id),
         services.room_repository.get_playback(room.id),
         services.circuit_weather.for_session(room.session_key),
+        services.race_state.get_state(room.session_key)
+        if getattr(services, "race_state", None) is not None and room.session_key
+        else asyncio.sleep(0, result=RaceState(session_key=room.session_key or "")),
     )
+    _require_matching_generation(room, playback)
+    projection = await intelligence_projection_status(
+        services,
+        room.session_key,
+        view_sequence=state.sequence_number,
+        is_replay=state.is_replay,
+    )
+    state = sanitize_strategy_state(state, projection)
     notices = {
         SourceAvailability.TELEMETRY: "Detailed normalized telemetry is available.",
         SourceAvailability.LIMITED: "Some telemetry is incomplete; conclusions are qualified.",
@@ -191,9 +219,12 @@ async def race_room_detail(room_slug: str, services: Services) -> RaceRoomDetail
     return RaceRoomDetailResponse(
         room=room,
         agents=agents,
-        playback=playback,
+        # The initial page load needs the same replay clock the stream sends,
+        # so the map is positioned before the first playback event arrives.
+        playback=await services.room_replay.with_session_clock(room.session_key, playback),
         circuit=circuit,
         weather=weather,
+        intelligence=SessionIntelligenceResponse.from_state(state, projection),
         data_notice=notices[room.source_availability],
         diagnostics_available=(
             services.settings.app_env != "production" or services.settings.room_diagnostics_enabled
@@ -227,6 +258,7 @@ async def room_messages(
     room_slug: str,
     services: Services,
     after_sequence: int = Query(default=0, ge=0),
+    discussion_generation: int | None = Query(default=None, ge=1, le=MAX_DISCUSSION_GENERATION),
     agent_id: str | None = Query(default=None, max_length=80),
     topic: Annotated[MessageTopic | None, Query()] = None,
     message_type: Annotated[MessageType | None, Query()] = None,
@@ -237,8 +269,9 @@ async def room_messages(
     limit: int = Query(default=100, ge=1, le=250),
 ) -> RoomMessagesResponse:
     room = await require_room(room_slug, services)
-    messages = await services.room_repository.list_messages(
+    page = await services.room_repository.list_message_page(
         room.id,
+        expected_generation=discussion_generation,
         after_sequence=after_sequence,
         agent_id=agent_id,
         topic=topic,
@@ -250,8 +283,10 @@ async def room_messages(
         limit=limit,
     )
     return RoomMessagesResponse(
-        messages=messages,
-        next_cursor=messages[-1].sequence if len(messages) == limit else None,
+        discussion_generation=page.discussion_generation,
+        reset_required=page.reset_required,
+        messages=page.messages,
+        next_cursor=page.next_cursor,
     )
 
 
@@ -299,7 +334,11 @@ async def message_evidence(
     )
 
 
-@router.post("/{room_slug}/replay", response_model=ReplayResponse)
+@router.post(
+    "/{room_slug}/replay",
+    response_model=ReplayResponse,
+    dependencies=[Depends(require_replay_operator)],
+)
 async def start_replay(
     room_slug: str,
     services: Services,
@@ -322,10 +361,15 @@ async def start_replay(
     except ReplayUnavailableError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     refreshed = await services.room_repository.get_room(room_slug)
+    _require_matching_generation(refreshed or room, playback)
     return ReplayResponse(room=refreshed or room, playback=playback)
 
 
-@router.post("/{room_slug}/playback", response_model=ReplayResponse)
+@router.post(
+    "/{room_slug}/playback",
+    response_model=ReplayResponse,
+    dependencies=[Depends(require_replay_operator)],
+)
 async def change_playback(
     room_slug: str, payload: PlaybackRequest, services: Services
 ) -> ReplayResponse:
@@ -357,6 +401,7 @@ async def change_playback(
     except ReplayUnavailableError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     refreshed = await services.room_repository.get_room(room_slug)
+    _require_matching_generation(refreshed or room, playback)
     return ReplayResponse(room=refreshed or room, playback=playback)
 
 
@@ -385,6 +430,10 @@ async def room_diagnostics(
     )
     playback = await services.room_repository.get_playback(room.id)
     race_state = await services.race_state.get_state(session_key)
+    coordinator = getattr(services, "race_intelligence", None)
+    pending_overtakes = (
+        coordinator.overtakes.pending_for_session(session_key) if coordinator is not None else []
+    )
     live = services.openf1_live.status()
     return RoomDiagnosticsResponse(
         room_slug=room.slug,
@@ -398,6 +447,19 @@ async def room_diagnostics(
         connection_state=str(live["connection_state"]),
         latest_events=[event.model_dump(mode="json") for event in latest_events],
         race_state=race_state.model_dump(mode="json"),
+        intelligence={
+            "current_battles": [
+                battle.model_dump(mode="json") for battle in race_state.current_battles
+            ],
+            "pending_overtakes": [
+                candidate.model_dump(mode="json") for candidate in pending_overtakes
+            ],
+            "qualifying": (
+                race_state.qualifying_intelligence.model_dump(mode="json")
+                if race_state.qualifying_intelligence
+                else None
+            ),
+        },
         playback=playback,
         discussion=services.room_discussion.metrics.model_dump(),
     )
@@ -409,14 +471,26 @@ async def stream_race_room(
     request: Request,
     services: Services,
     after_sequence: int = Query(default=0, ge=0),
+    discussion_generation: int | None = Query(default=None, ge=1, le=MAX_DISCUSSION_GENERATION),
     last_event_id: Annotated[str | None, Header(alias="Last-Event-ID")] = None,
 ) -> StreamingResponse:
     room = await require_room(room_slug, services)
     recovered_sequence = after_sequence
-    if last_event_id is not None and last_event_id.isdigit():
+    recovered_generation = discussion_generation
+    composite_cursor = parse_discussion_event_id(last_event_id)
+    if composite_cursor is not None:
+        recovered_generation, recovered_sequence = composite_cursor
+    elif last_event_id is not None and last_event_id.isdigit():
         recovered_sequence = max(recovered_sequence, int(last_event_id))
     return StreamingResponse(
-        race_room_stream(request, services, room.id, recovered_sequence),
+        race_room_stream(
+            request,
+            services,
+            room.id,
+            recovered_sequence,
+            room.session_key,
+            recovered_generation,
+        ),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache, no-transform",

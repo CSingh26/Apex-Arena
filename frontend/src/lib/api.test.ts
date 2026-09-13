@@ -1,0 +1,134 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+import {
+  getRoomMessages,
+  getRoomHistoryDetail,
+  getSessionHistoryDetail,
+  roomStreamUrl,
+  startRoomReplay,
+  updateRoomPlayback,
+  verifyReplayOperator,
+} from "@/lib/api";
+
+describe("replay operator client", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("requests selected cursor-bound history with cancellation and preserves retry guidance", async () => {
+    const signal = new AbortController().signal;
+    const fetchMock = vi.fn().mockImplementation(async () => new Response(JSON.stringify({availability:"unavailable",reason:"legacy_history_unverified"}),{status:200}));
+    vi.stubGlobal("fetch",fetchMock);
+    await getRoomHistoryDetail("race room",[4,16],["laps","control"],signal);
+    expect(fetchMock.mock.calls[0][0]).toContain("/rooms/race%20room/intelligence-detail?driver=4&driver=16&family=laps&family=control");
+    expect(fetchMock.mock.calls[0][1].signal).toBe(signal);
+    await getSessionHistoryDetail("race/key",[4],["pits"],17,signal);
+    expect(fetchMock.mock.calls[1][0]).toContain("/sessions/race%2Fkey/intelligence-detail?driver=4&family=pits&cursor=17");
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({detail:"History detail is temporarily unavailable; retry shortly"}),{status:503,headers:{"Retry-After":"1"}}));
+    await expect(getRoomHistoryDetail("race",[4],["laps"])).rejects.toMatchObject({status:503,retryAfterSeconds:1});
+  });
+
+  it("sends the operator credential only as a custom header on replay mutations", async () => {
+    const canary = "operator-canary-never-leak";
+    const fetchMock = vi.fn().mockImplementation(async () => new Response(
+      JSON.stringify({ authorized: true }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    ));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await verifyReplayOperator(canary);
+    await startRoomReplay("spa-race", "start", canary);
+    await updateRoomPlayback("spa-race", { action: "pause" }, canary);
+
+    for (const [url, options] of fetchMock.mock.calls as [string, RequestInit][]) {
+      expect(url).not.toContain(canary);
+      expect(String(options.body ?? "")).not.toContain(canary);
+      expect(new Headers(options.headers).get("X-Apex-Replay-Password")).toBe(
+        Buffer.from(canary, "utf-8").toString("base64"),
+      );
+    }
+    expect(fetchMock.mock.calls[0][1].body).toBeUndefined();
+  });
+
+  it.each([
+    "plain-ascii-password",
+    "opérateur-password",
+    "operator-🔒-password",
+    "  exact padded password  ",
+  ])("encodes the exact UTF-8 password into an ASCII-safe Headers value: %s", async (password) => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(
+      JSON.stringify({ authorized: true }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    ));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await verifyReplayOperator(password);
+
+    const headers = new Headers(fetchMock.mock.calls[0][1].headers);
+    const wireValue = headers.get("X-Apex-Replay-Password");
+    expect(wireValue).toBe(Buffer.from(password, "utf-8").toString("base64"));
+    expect(wireValue).toMatch(/^[A-Za-z0-9+/]+={0,2}$/);
+    expect(wireValue).not.toContain(password);
+  });
+
+  it("does not attach operator credentials to public reads", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      room: {}, agents: [], playback: {}, circuit: {}, weather: {}, intelligence: {},
+    }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { getRaceRoom } = await import("@/lib/api");
+    await getRaceRoom("spa-race");
+
+    expect(new Headers(fetchMock.mock.calls[0][1].headers).has("X-Apex-Replay-Password")).toBe(false);
+  });
+
+  it("encodes the discussion generation with HTTP and SSE sequence cursors", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      discussion_generation: 3,
+      reset_required: false,
+      messages: [],
+      next_cursor: null,
+    }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await getRoomMessages(
+      "spa race",
+      "discussion_generation=3&after_sequence=17&limit=100",
+    );
+
+    expect(fetchMock.mock.calls[0][0]).toContain(
+      "/rooms/spa%20race/messages?discussion_generation=3&after_sequence=17&limit=100",
+    );
+    expect(roomStreamUrl("spa race", 17, 3)).toContain(
+      "/rooms/spa%20race/stream?after_sequence=17&discussion_generation=3",
+    );
+    expect(roomStreamUrl("spa race", 17)).toContain(
+      "/rooms/spa%20race/stream?after_sequence=17",
+    );
+    expect(roomStreamUrl("spa race", 17)).not.toContain("discussion_generation");
+  });
+
+  it("returns an error with HTTP status without reflecting a rejected secret", async () => {
+    const canary = "rejected-operator-canary";
+    const wireCanary = Buffer.from(canary, "utf-8").toString("base64");
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(
+      JSON.stringify({ detail: "Invalid replay operator credential" }),
+      { status: 401, headers: { "Content-Type": "application/json" } },
+    )));
+
+    await expect(verifyReplayOperator(canary)).rejects.toMatchObject({
+      status: 401,
+      message: "Invalid replay operator credential",
+    });
+    await expect(verifyReplayOperator(canary)).rejects.not.toHaveProperty("message", expect.stringContaining(canary));
+    await expect(verifyReplayOperator(canary)).rejects.not.toHaveProperty("message", expect.stringContaining(wireCanary));
+  });
+});

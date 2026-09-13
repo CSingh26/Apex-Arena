@@ -10,7 +10,13 @@ import httpx
 import pytest
 
 from app.core.settings import Settings
-from app.domain.models import MeetingLifecycleStatus, RaceEventType, RaceMeeting, RaceWeekendSession
+from app.domain.models import (
+    EventImportance,
+    MeetingLifecycleStatus,
+    RaceEventType,
+    RaceMeeting,
+    RaceWeekendSession,
+)
 from app.domain.rooms import IngestionStatus, SessionType, SourceAvailability
 from app.providers.openf1 import OpenF1RestClient
 from app.services.discussion import DeterministicRoomGenerator, GroundingContext
@@ -73,7 +79,7 @@ def meeting(
         ("Sprint Shootout", SessionType.SPRINT_QUALIFYING),
         ("Sprint Race", SessionType.SPRINT),
         ("Race", SessionType.RACE),
-        ("Practice 2", None),
+        ("Practice 2", SessionType.PRACTICE_2),
     ],
 )
 def test_competitive_session_names_have_one_canonical_identity(
@@ -440,6 +446,9 @@ def test_driver_identity_resolution_enriches_public_evidence_without_guessing_te
     assert enriched["resolved_driver_name"] == "Oscar Piastri"
     assert enriched["resolved_team_name"] == "McLaren"
     assert resolver.public_label(enriched, 81) == "Oscar Piastri"
+    assert (
+        resolver.public_label({"resolved_driver_name": "Valtteri BOTTAS"}, 77) == "Valtteri Bottas"
+    )
     assert resolver.public_label({"driver_number": 99}, 99) == "The driver in car 99"
     assert (
         resolver.public_label(
@@ -580,7 +589,12 @@ def test_qualifying_commentary_uses_driver_name_plain_language_and_no_race_strat
             ),
             uuid4(),
         )
-        .model_copy(update={"sequence_number": 7})
+        .model_copy(
+            update={
+                "sequence_number": 7,
+                "importance_level": EventImportance.IMPORTANT,
+            }
+        )
     )
     trigger = DiscussionTriggerEvaluator(
         topic_cooldown_seconds=0, agent_cooldown_seconds=0

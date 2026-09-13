@@ -80,9 +80,9 @@ MIGRATION_LOCK_ID = 1_095_782_233  # Distinct from the ingestor singleton lease.
 
 
 def dsn() -> str:
-    from app.core.settings import get_settings
+    from app.core.settings import get_migration_settings
 
-    return get_settings().async_migration_database_url
+    return get_migration_settings().async_migration_database_url
 
 
 async def main() -> int:

@@ -2,18 +2,21 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 from contextlib import suppress
+from datetime import UTC, datetime, timedelta
 
 from app.core.settings import Settings
+from app.domain.intelligence import RaceIntelligenceConfig
 from app.providers.jolpica import JolpicaClient
 from app.providers.openf1 import OpenF1AuthService, OpenF1LiveClient, OpenF1RestClient
+from app.services.agent_claims import AgentClaimMemory
 from app.services.championship import ChampionshipService
 from app.services.circuit_intelligence import (
     CircuitIntelligenceService,
     CircuitWeatherService,
 )
-from app.services.development_fixture import DevelopmentFixtureService
 from app.services.discussion import RaceRoomDiscussionEngine
 from app.services.discussion_triggers import DiscussionTriggerEvaluator
 from app.services.event_pipeline import (
@@ -22,18 +25,33 @@ from app.services.event_pipeline import (
     RaceEventProcessor,
     SequenceNumberService,
 )
+from app.services.generation_policy import GenerationPolicy, build_language_provider
 from app.services.historical import HistoricalOpenF1Adapter
+from app.services.history_details import HistoryDetailReader
+from app.services.intelligence_recovery import IntelligenceProjection
+from app.services.live_ingestion import LiveSessionIngestionService
+from app.services.locations import (
+    LiveLocationRecorder,
+    LocationIngestionService,
+    SessionLocationService,
+)
 from app.services.normalization import OpenF1EventNormalizer
 from app.services.openf1_backfill import OpenF1HistoricalBackfillService, OpenF1RoomFinalizer
+from app.services.race_intelligence import RaceIntelligenceCoordinator
 from app.services.race_state import RaceStateEngine
+from app.services.rate_limits import RedisRateLimiter
 from app.services.raw_events import RawProviderEventService
 from app.services.recent_sessions import RecentSessionReconciliationService
 from app.services.room_eligibility import RoomEligibilityService
 from app.services.room_replay import RoomReplayCoordinator
 from app.services.rooms import RaceRoomService
 from app.services.season import SeasonService
+from app.services.telemetry_history import TelemetryHistoryService
 from app.storage.backfill_repository import SqlOpenF1BackfillJobRepository
 from app.storage.database import Database
+from app.storage.intelligence_progress import SqlIntelligenceProgressRepository
+from app.storage.intelligence_repository import SqlBattleSummaryRepository
+from app.storage.location_repository import SqlSessionLocationRepository
 from app.storage.redis import EventBus, RaceEventRedisPublisher, RedisStore
 from app.storage.repositories import (
     SqlIngestionRunRepository,
@@ -44,6 +62,7 @@ from app.storage.repositories import (
 from app.storage.room_repository import SqlRaceRoomRepository
 
 logger = logging.getLogger(__name__)
+INGESTION_RUN_STALE_AFTER = timedelta(minutes=30)
 
 
 class AppServices:
@@ -66,12 +85,17 @@ class AppServices:
             health_check_interval=settings.redis_health_check_interval_seconds,
         )
         self.event_bus = EventBus(self.redis.client)
+        self.rate_limiter = RedisRateLimiter(self.redis.client, settings)
         self.jolpica = JolpicaClient(settings.jolpica_base_url)
         self.openf1_auth = OpenF1AuthService(settings)
         self.openf1 = OpenF1RestClient(
             settings,
-            token_provider=lambda: self.openf1_auth.get_access_token(force_refresh=True),
+            token_provider=self.openf1_auth.get_access_token,
         )
+        # Optional and off by default: an install without an explicit generation
+        # opt-in gets the null provider and keeps deterministic room wording.
+        self.generation_policy = GenerationPolicy(settings, build_language_provider(settings))
+        self.agent_claims = AgentClaimMemory(self.database)
         self.circuit_intelligence = CircuitIntelligenceService()
         self.circuit_weather = CircuitWeatherService(self.openf1)
         self.season = SeasonService(settings, self.jolpica)
@@ -86,35 +110,70 @@ class AppServices:
         self.raw_event_repository = SqlRawEventRepository(self.database)
         self.normalized_event_repository = SqlNormalizedEventRepository(self.database)
         self.snapshot_repository = SqlRaceStateSnapshotRepository(self.database)
+        self.battle_summary_repository = SqlBattleSummaryRepository(self.database)
         self.ingestion_runs = SqlIngestionRunRepository(self.database)
         self.backfill_jobs = SqlOpenF1BackfillJobRepository(self.database)
         self.room_repository = SqlRaceRoomRepository(self.database)
+        self.location_repository = SqlSessionLocationRepository(self.database)
+        self.session_locations = SessionLocationService(self.location_repository)
+        self.location_ingestion = LocationIngestionService(
+            client=self.openf1,
+            repository=self.location_repository,
+            sample_interval_ms=settings.location_sample_interval_ms,
+            fetch_window_seconds=settings.location_fetch_window_seconds,
+            max_samples_per_session=settings.location_max_samples_per_session,
+        )
         self.raw_events = RawProviderEventService(self.raw_event_repository)
         self.ordering_buffer = EventOrderingBuffer(settings.event_ordering_buffer_ms)
         self.race_state = RaceStateEngine(
             self.snapshot_repository,
             settings.race_state_snapshot_every_n_events,
+            live_state_reader=self.event_bus.latest_state,
+        )
+        self.telemetry_history = TelemetryHistoryService(
+            self.normalized_event_repository, self.race_state
+        )
+        intelligence_config = RaceIntelligenceConfig(
+            overtake_confirmation_seconds=settings.overtake_confirmation_seconds,
+            overtake_confirmation_samples=settings.overtake_confirmation_samples,
+            overtake_max_interval_seconds=settings.overtake_max_interval_seconds,
+            battle_start_interval_seconds=settings.battle_start_interval_seconds,
+            battle_start_samples=settings.battle_start_samples,
+            battle_intense_interval_seconds=settings.battle_intense_interval_seconds,
+            battle_end_interval_seconds=settings.battle_end_interval_seconds,
+            battle_end_samples=settings.battle_end_samples,
+            battle_trend_window=settings.battle_trend_window,
+            battle_trend_minimum_change=settings.battle_trend_minimum_change,
+            proximity_exit_seconds=settings.proximity_exit_seconds,
+            event_cooldown_seconds=settings.intelligence_event_cooldown_seconds,
+        )
+        # Critical projection never derives against Redis/shared replay state.
+        self.projection_state = RaceStateEngine(
+            self.snapshot_repository,
+            retain_applied_dedup_keys=False,
+        )
+        self.race_intelligence = RaceIntelligenceCoordinator(
+            self.projection_state,
+            config=intelligence_config,
+            battle_summaries=self.battle_summary_repository,
         )
         self.redis_publisher = RaceEventRedisPublisher(self.event_bus, self.race_state)
-        fixture = (
-            DevelopmentFixtureService(self.normalized_event_repository)
-            if settings.app_env in {"local", "test"} and settings.development_fixture_enabled
-            else None
-        )
         self.room_eligibility = RoomEligibilityService()
         self.rooms = RaceRoomService(
             self.room_repository,
             self.season,
             settings.season_year,
-            fixture=fixture,
             openf1=self.openf1,
             eligibility=self.room_eligibility,
+            capture_window_seconds=settings.live_session_capture_window_seconds,
         )
         self.room_discussion = RaceRoomDiscussionEngine(
             self.room_repository,
             DiscussionTriggerEvaluator(settings.room_topic_cooldown_seconds),
             publisher=self.event_bus.publish_room_message,
             state_reader=self.race_state.get_state,
+            claims=self.agent_claims,
+            generation_policy=self.generation_policy,
         )
         self.room_replay = RoomReplayCoordinator(
             self.room_repository,
@@ -123,6 +182,7 @@ class AppServices:
             self.race_state,
             self.event_bus,
             settings.room_replay_interval_seconds,
+            session_times=self.session_locations,
         )
         self.processor = RaceEventProcessor(
             raw_events=self.raw_events,
@@ -132,12 +192,29 @@ class AppServices:
             ordering_buffer=self.ordering_buffer,
             sequence_numbers=SequenceNumberService(self.normalized_event_repository),
             consumers=[
-                self.race_state,
                 self.redis_publisher,
                 self.room_discussion,
                 self.championship,
+                LiveLocationRecorder(self.session_locations),
             ],
+            critical_projection=IntelligenceProjection(
+                SqlIntelligenceProgressRepository(
+                    self.database,
+                    algorithm_version="race-v1:"
+                    + hashlib.sha256(intelligence_config.model_dump_json().encode()).hexdigest(),
+                ),
+                self.normalized_event_repository,
+                self.race_intelligence,
+                self.race_state,
+                state_publisher=self.event_bus.publish_state,
+            ),
         )
+        self.intelligence_progress = self.processor.critical_projection.repository
+        self.history_details = HistoryDetailReader(
+            self.database, algorithm_version=self.intelligence_progress.algorithm_version
+        )
+        self.race_state.algorithm_version = self.intelligence_progress.algorithm_version
+        self.rooms.intelligence_algorithm_version = self.intelligence_progress.algorithm_version
         self.openf1_live = OpenF1LiveClient(
             settings,
             self.openf1_auth,
@@ -153,6 +230,24 @@ class AppServices:
             room_availability=self.room_repository,
         )
         self.room_finalizer = OpenF1RoomFinalizer(self.database)
+        self.live_ingestion = LiveSessionIngestionService(
+            settings=settings,
+            rooms=self.rooms,
+            client=self.openf1,
+            processor=self.processor,
+            repository=self.room_repository,
+            finalizer=self.room_finalizer,
+            event_bus=self.event_bus,
+            locations=self.session_locations,
+            location_ingestion=self.location_ingestion,
+            mqtt_client=self.openf1_live,
+            race_state=self.race_state,
+        )
+        self.openf1_live.admit_message = self.live_ingestion.admit_mqtt
+        self.processor.consumers.append(self.live_ingestion)
+        self.processor.critical_projection.state_publisher = (
+            self.live_ingestion.publish_recovered_state
+        )
         self.backfill = OpenF1HistoricalBackfillService(
             settings=settings,
             client=self.openf1,
@@ -172,17 +267,115 @@ class AppServices:
             backfill=self.backfill,
         )
         self._recent_reconciliation_task: asyncio.Task[None] | None = None
+        self._replay_reconciliation_task: asyncio.Task[None] | None = None
+        self._intelligence_recovery_task: asyncio.Task[None] | None = None
+        self._intelligence_recovery_cursor = ""
+
+    async def start_intelligence_recovery(self) -> None:
+        """Only the existing singleton worker may sweep pending critical work."""
+        if not self.database.ingestor_lease_owned:
+            return
+        if self._intelligence_recovery_task is None:
+            await self.database.require_ingestion_schema()
+            self._intelligence_recovery_task = asyncio.create_task(
+                self._maintain_intelligence_recovery(),
+                name="intelligence-pending-recovery",
+            )
+
+    async def recover_pending_intelligence(self) -> dict[str, int]:
+        keys = await self.intelligence_progress.pending_sessions(
+            after_session=self._intelligence_recovery_cursor,
+            limit=50,
+        )
+        self._intelligence_recovery_cursor = keys[-1] if keys else ""
+        result = {"attempted": len(keys), "recovered": 0, "failed": 0}
+        for key in keys:
+            try:
+                async with asyncio.timeout(self.settings.intelligence_recovery_timeout_seconds):
+                    await self.processor.recover_session(key)
+                result["recovered"] += 1
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                result["failed"] += 1
+                logger.warning("Intelligence recovery failed error=%s", type(exc).__name__)
+        return result
+
+    async def _maintain_intelligence_recovery(self) -> None:
+        while True:
+            try:
+                await self.recover_pending_intelligence()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning("Intelligence recovery sweep failed error=%s", type(exc).__name__)
+            await asyncio.sleep(self.settings.intelligence_recovery_interval_seconds)
+
+    async def start_replay_recovery(self) -> None:
+        await self.room_replay.reconcile_interrupted_replays()
+        if self._replay_reconciliation_task is None:
+            self._replay_reconciliation_task = asyncio.create_task(
+                self._deferred_replay_recovery(), name="replay-startup-recovery"
+            )
+
+    async def reconcile_interrupted_ingestion_runs(self) -> int:
+        """Run the single age-bounded startup sweep for historical ingestion."""
+        return await self.historical.reconcile_stale_runs(
+            now=datetime.now(UTC),
+            stale_after=INGESTION_RUN_STALE_AFTER,
+        )
+
+    async def _deferred_replay_recovery(self) -> None:
+        # A dead peer can still hold a fresh lease during the initial sweep.
+        # One bounded sweep after its lifetime recovers that startup window.
+        await asyncio.sleep(self.room_replay.lease_seconds)
+        try:
+            await self.room_replay.reconcile_interrupted_replays()
+        except Exception as exc:
+            logger.warning("Deferred replay recovery failed error=%s", type(exc).__name__)
 
     async def start_live_services(self) -> None:
         """Connect live telemetry and reconcile provider sessions in the background."""
         ingestion_mode = getattr(self.settings, "openf1_ingestion_mode", "auto")
         auto_connect = getattr(self.settings, "openf1_live_auto_connect", True)
+        if hasattr(self, "openf1"):
+            self.openf1.min_request_interval_seconds = max(
+                1.1, self.openf1.min_request_interval_seconds
+            )
         if ingestion_mode != "rest" and auto_connect:
             await self.openf1_live.connect()
         if self._live_catalog_task is None or self._live_catalog_task.done():
             self._live_catalog_task = asyncio.create_task(
                 self._maintain_live_catalog(), name="openf1-live-catalog"
             )
+
+    async def provider_status(self) -> dict[str, object]:
+        """Expose the owning worker's state to API processes without provider calls."""
+        status = self.openf1_live.status()
+        if self.settings.app_process_role == "api":
+            try:
+                shared = await self.event_bus.latest_connection_status()
+                if shared is not None:
+                    status.update(shared)
+                    if shared.get("checked_at"):
+                        checked = datetime.fromisoformat(
+                            str(shared["checked_at"]).replace("Z", "+00:00")
+                        )
+                        if checked.tzinfo is None:
+                            checked = checked.replace(tzinfo=UTC)
+                        if (datetime.now(UTC) - checked).total_seconds() > 120:
+                            status.update(
+                                connection_state="STALE",
+                                ingestion_running=False,
+                                provider_connected=False,
+                            )
+            except Exception as exc:
+                status.update(
+                    connection_state="PROVIDER_UNAVAILABLE", degraded_reason=type(exc).__name__
+                )
+        elif self.settings.live_worker_enabled:
+            status.update(self.live_ingestion.status)
+        return status
 
     async def start_recent_reconciliation(self) -> None:
         if not self.settings.recent_session_reconciliation_enabled:
@@ -209,14 +402,25 @@ class AppServices:
     async def _maintain_live_catalog(self) -> None:
         while True:
             try:
-                await self.rooms.force_sync()
+                await self.live_ingestion.run_once()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 logger.warning("Live room catalog refresh failed error=%s", type(exc).__name__)
-            await asyncio.sleep(self.settings.openf1_live_catalog_sync_seconds)
+            await asyncio.sleep(self.settings.openf1_live_poll_seconds)
 
     async def close(self) -> None:
+        await self.history_details.close()
+        if self._intelligence_recovery_task is not None:
+            self._intelligence_recovery_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._intelligence_recovery_task
+            self._intelligence_recovery_task = None
+        if self._replay_reconciliation_task is not None:
+            self._replay_reconciliation_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._replay_reconciliation_task
+            self._replay_reconciliation_task = None
         if self._recent_reconciliation_task is not None:
             self._recent_reconciliation_task.cancel()
             with suppress(asyncio.CancelledError):

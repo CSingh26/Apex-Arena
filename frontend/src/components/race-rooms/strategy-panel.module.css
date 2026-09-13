@@ -1,0 +1,145 @@
+.panel {
+  /*
+   * Accent tokens for the whole strategy family. Children are separate CSS
+   * modules but always render inside .panel, so they inherit these. Light
+   * theme needs darkened variants: the vivid Apex palette is tuned for a dark
+   * ground and does not carry enough contrast as text on a white panel.
+   */
+  --strategy-accent: var(--apex-cyan);
+  --strategy-warn: var(--apex-yellow);
+  --strategy-alert: var(--apex-coral);
+  --strategy-ok: var(--apex-mint, var(--success));
+  margin: 20px 0 24px;
+  padding: 16px 18px 18px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--panel-raised) 94%, var(--apex-cyan) 6%);
+}
+
+.heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.heading span {
+  display: block;
+  color: var(--strategy-accent, var(--apex-cyan));
+  font: 700 .58rem var(--font-mono, ui-monospace), monospace;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.heading h2 {
+  margin: 4px 0 0;
+  font-size: 1.05rem;
+}
+
+.heading small {
+  color: var(--faint);
+  font: 650 .6rem var(--font-mono, ui-monospace), monospace;
+  text-align: right;
+  text-transform: uppercase;
+}
+
+.notice {
+  padding: 16px 18px;
+  border: 1px dashed var(--line-strong, var(--line));
+  border-radius: 10px;
+  background: var(--panel);
+}
+
+.noticeLead {
+  margin: 0;
+  color: var(--foreground);
+  font-size: .92rem;
+  font-weight: 800;
+}
+
+.noticeBody {
+  max-width: 68ch;
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: .8rem;
+  line-height: 1.6;
+}
+
+.noticeSubtitle {
+  margin: 14px 0 6px;
+  color: var(--faint);
+  font: 750 .58rem var(--font-mono, ui-monospace), monospace;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+
+.noticeReasons {
+  display: grid;
+  gap: 5px;
+  margin: 0;
+  padding-left: 18px;
+}
+
+.noticeReasons li {
+  color: var(--muted);
+  font-size: .76rem;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.noticeFooter {
+  max-width: 68ch;
+  margin: 14px 0 0;
+  color: var(--faint);
+  font-size: .73rem;
+  line-height: 1.55;
+}
+
+@media (max-width: 720px) {
+  .panel {
+    padding: 14px;
+  }
+
+  .heading {
+    align-items: start;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .heading small {
+    text-align: left;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .panel,
+  .notice {
+    transition: none;
+    animation: none;
+  }
+}
+
+:global([data-theme="light"]) .panel {
+  --strategy-accent: #0d7d74;
+  --strategy-warn: #8a5a00;
+  --strategy-alert: #b8213b;
+  --strategy-ok: #0a7550;
+}
+
+@media (prefers-color-scheme: light) {
+  .panel {
+    --strategy-accent: #0d7d74;
+    --strategy-warn: #8a5a00;
+    --strategy-alert: #b8213b;
+    --strategy-ok: #0a7550;
+  }
+}
+
+:global([data-theme="dark"]) .panel {
+  --strategy-accent: var(--apex-cyan);
+  --strategy-warn: var(--apex-yellow);
+  --strategy-alert: var(--apex-coral);
+  --strategy-ok: var(--apex-mint, var(--success));
+}

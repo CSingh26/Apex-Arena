@@ -156,7 +156,11 @@ class RecentSessionReconciliationService:
                     summary.last_safe_error_category = "reconciliation_locked"
                     return summary
                 try:
-                    await self.rooms.force_sync()
+                    await self.rooms.force_sync(
+                        now=observed_at,
+                        live_window_only=True,
+                        lookback_days=self.settings.recent_session_reconciliation_lookback_days,
+                    )
                 except Exception as exc:
                     logger.warning(
                         "Recent session catalog refresh failed error=%s",
@@ -170,6 +174,10 @@ class RecentSessionReconciliationService:
                     limit=self.settings.recent_session_auto_backfill_max_sessions,
                 )
                 for room in candidates:
+                    await self.room_repository.mark_recent_reconciliation_attempt(
+                        room.slug,
+                        attempted_at=datetime.now(UTC),
+                    )
                     await self._reconcile_room(room, summary)
         finally:
             self._running = False

@@ -1,0 +1,67 @@
+.evidence {
+  margin-top: 13px;
+  border-top: 1px solid var(--line);
+  padding-top: 9px;
+}
+
+.evidence summary {
+  color: var(--strategy-accent, var(--apex-cyan));
+  cursor: pointer;
+  font: 750 .64rem var(--font-mono, ui-monospace), monospace;
+}
+
+.evidence summary:focus-visible {
+  outline: 2px solid var(--apex-cyan);
+  outline-offset: 3px;
+}
+
+.tableScroll {
+  overflow-x: auto;
+  margin-top: 9px;
+}
+
+.tableScroll table {
+  width: 100%;
+  border-collapse: collapse;
+  font: 650 .64rem var(--font-mono, ui-monospace), monospace;
+}
+
+.tableScroll th,
+.tableScroll td {
+  border-bottom: 1px solid var(--line);
+  padding: 5px 8px 5px 0;
+  color: var(--muted);
+  text-align: left;
+  white-space: nowrap;
+}
+
+.tableScroll th {
+  color: var(--faint);
+  font-weight: 800;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+}
+
+.empty {
+  margin: 11px 0 0;
+  color: var(--muted);
+  font-size: .74rem;
+  line-height: 1.5;
+}
+
+.warning {
+  margin: 9px 0 0;
+  color: var(--strategy-alert, var(--apex-coral));
+  font-size: .71rem;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.visuallyHidden {
+  position: absolute;
+  overflow: hidden;
+  width: 1px;
+  height: 1px;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}

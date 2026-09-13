@@ -6,7 +6,8 @@ from uuid import uuid4
 
 import pytest
 
-from app.domain.models import NormalizedRaceEvent, RaceEventType, RaceStateSnapshot
+from app.domain.intelligence import BattleState, BattleStatus
+from app.domain.models import EventOrigin, NormalizedRaceEvent, RaceEventType, RaceStateSnapshot
 from app.services.race_state import RaceStateEngine, SnapshotPersistResult
 
 
@@ -82,6 +83,31 @@ async def test_position_lap_and_interval_update_driver_state() -> None:
 
 
 @pytest.mark.asyncio
+async def test_driver_profiles_can_be_primed_without_advancing_replay_state() -> None:
+    engine = RaceStateEngine(SnapshotRepository())
+    profile = event(
+        RaceEventType.DRIVER_UPDATE,
+        59,
+        {
+            "resolved_driver_name": "George RUSSELL",
+            "resolved_broadcast_name": "G RUSSELL",
+            "resolved_team_name": "Mercedes",
+        },
+        driver_number=63,
+    )
+
+    primed = await engine.prime_driver_profiles("spa-race", [profile])
+    state = await engine.apply(
+        event(RaceEventType.POSITION_SAMPLE, 1, {"position": 1}, driver_number=63)
+    )
+
+    assert primed.sequence_number == 0
+    assert state.sequence_number == 1
+    assert state.drivers["63"].full_name == "George RUSSELL"
+    assert state.drivers["63"].team_name == "Mercedes"
+
+
+@pytest.mark.asyncio
 async def test_pit_control_and_weather_updates_are_applied() -> None:
     engine = RaceStateEngine(SnapshotRepository())
 
@@ -120,6 +146,52 @@ async def test_repeated_event_is_not_applied_twice() -> None:
 
 
 @pytest.mark.asyncio
+async def test_high_frequency_samples_keep_only_valid_latest_values() -> None:
+    engine = RaceStateEngine(SnapshotRepository())
+
+    await engine.apply(
+        event(
+            RaceEventType.CAR_DATA_SAMPLE,
+            1,
+            {"speed": 312.4, "throttle": 87, "brake": 0, "n_gear": 7, "rpm": 11_420, "drs": 12},
+        )
+    )
+    state = await engine.apply(
+        event(
+            RaceEventType.LOCATION_SAMPLE,
+            2,
+            {"x": 134.2, "y": -22.7, "z": 1.8},
+        )
+    )
+
+    driver = state.drivers["4"]
+    assert driver.telemetry == {
+        "speed": 312.4,
+        "throttle": 87.0,
+        "brake": 0.0,
+        "gear": 7,
+        "rpm": 11_420,
+        "drs": True,
+        "drs_code": 12,
+    }
+    assert driver.location == {"x": 134.2, "y": -22.7, "z": 1.8}
+    assert state.has_telemetry is True
+    assert state.has_locations is True
+
+
+@pytest.mark.asyncio
+async def test_invalid_or_stale_high_frequency_samples_do_not_replace_state() -> None:
+    engine = RaceStateEngine(SnapshotRepository())
+    await engine.apply(event(RaceEventType.CAR_DATA_SAMPLE, 2, {"speed": 300}))
+    state = await engine.apply(
+        event(RaceEventType.CAR_DATA_SAMPLE, 1, {"speed": 999}, dedup_key="stale")
+    )
+
+    assert state.sequence_number == 2
+    assert state.drivers["4"].telemetry == {"speed": 300.0}
+
+
+@pytest.mark.asyncio
 async def test_snapshot_is_persisted_on_configured_interval() -> None:
     snapshots = SnapshotRepository()
     engine = RaceStateEngine(snapshots, snapshot_every_n_events=2)
@@ -132,6 +204,44 @@ async def test_snapshot_is_persisted_on_configured_interval() -> None:
     assert snapshot is not None
     assert snapshot.current_lap == 1
     assert snapshot.sequence_number == 2
+
+
+@pytest.mark.asyncio
+async def test_derived_battle_events_reconstruct_current_battles() -> None:
+    engine = RaceStateEngine(SnapshotRepository(), snapshot_every_n_events=100)
+    now = datetime(2026, 7, 19, 13, tzinfo=UTC)
+    battle = BattleState(
+        id="spa-race:16:4",
+        session_key="spa-race",
+        lead_driver_number=16,
+        chasing_driver_number=4,
+        lead_position=4,
+        chasing_position=5,
+        interval_seconds=0.8,
+        closest_interval_seconds=0.8,
+        interval_history=[1.2, 1.0, 0.8],
+        started_at=now,
+        last_updated_at=now,
+        status=BattleStatus.ACTIVE,
+    )
+    started = event(
+        RaceEventType.BATTLE_STARTED,
+        1,
+        {"battle": battle.model_dump(mode="json")},
+    ).model_copy(update={"event_origin": EventOrigin.DERIVED})
+
+    state = await engine.apply(started)
+    assert [item.id for item in state.current_battles] == ["spa-race:16:4"]
+
+    battle.status = BattleStatus.RESOLVED
+    ended = event(
+        RaceEventType.BATTLE_ENDED,
+        2,
+        {"battle": battle.model_dump(mode="json")},
+    ).model_copy(update={"event_origin": EventOrigin.DERIVED})
+    state = await engine.apply(ended)
+
+    assert state.current_battles == []
 
 
 @pytest.mark.asyncio
@@ -150,3 +260,50 @@ async def test_reset_clears_cached_dedup_state_and_persisted_snapshots() -> None
     assert (await engine.get_state("spa-race")).sequence_number == 0
     replayed = await engine.apply(pit)
     assert len(replayed.pit_stop_history) == 1
+
+
+@pytest.mark.asyncio
+async def test_api_state_refreshes_from_shared_live_state_after_initial_read():
+    from app.services.race_state import RaceState
+
+    latest = RaceState(session_key="live", sequence_number=1)
+
+    async def source(key):
+        return latest
+
+    engine = RaceStateEngine(SnapshotRepository(), live_state_reader=source)
+    assert (await engine.get_state("live")).sequence_number == 1
+    latest = latest.model_copy(update={"sequence_number": 8})
+    assert (await engine.get_state("live")).sequence_number == 8
+
+
+@pytest.mark.asyncio
+async def test_delayed_live_lap_update_does_not_rewind_the_live_clock():
+    engine = RaceStateEngine(SnapshotRepository())
+    first = event(RaceEventType.POSITION_SAMPLE, 1, {"position": 1}).model_copy(
+        update={"is_replay": False}
+    )
+    await engine.apply(first)
+    delayed = event(RaceEventType.LAP_COMPLETED, 2, {"lap_duration": 81.046}).model_copy(
+        update={
+            "is_replay": False,
+            "event_time": datetime(2026, 7, 19, 13, tzinfo=UTC),
+        }
+    )
+    state = await engine.apply(delayed)
+    assert state.last_updated_at == first.event_time
+
+
+@pytest.mark.asyncio
+async def test_replay_reset_does_not_reload_final_live_state_from_redis():
+    from app.services.race_state import RaceState
+
+    async def final_live(key):
+        return RaceState(session_key=key, sequence_number=100, status="finished")
+
+    engine = RaceStateEngine(SnapshotRepository(), live_state_reader=final_live)
+    assert (await engine.get_state("live")).sequence_number == 100
+    await engine.reset_session("live", is_replay=True)
+    state = await engine.get_state("live")
+    assert state.sequence_number == 0
+    assert state.is_replay is True

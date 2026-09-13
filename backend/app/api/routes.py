@@ -6,11 +6,18 @@ import hmac
 import logging
 from datetime import UTC, datetime
 from typing import Annotated
+from uuid import UUID
 
 import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from app.api.room_schemas import (
+    EventWeekendListResponse,
+    SessionBootstrapResponse,
+    SessionCapabilitiesResponse,
+    SessionListResponse,
+)
 from app.api.schemas import (
     AppHealth,
     ChampionshipSummaryResponse,
@@ -22,22 +29,100 @@ from app.api.schemas import (
     HealthResponse,
     HistoricalIngestionRequest,
     HistoricalIngestionResponse,
+    IntelligenceProjectionStatus,
     LiveStatusResponse,
     OpenF1StatusResponse,
+    RaceEventCategory,
     SeasonCalendarSummary,
     SessionEventsResponse,
+    SessionIntelligenceResponse,
+    SessionLocationSamplesResponse,
+    SessionLocationsResponse,
     SessionStateResponse,
+    SessionTelemetryResponse,
+    SessionTimingResponse,
+    SessionTrackResponse,
 )
 from app.api.streaming import session_event_stream
-from app.domain.models import MeetingLifecycleStatus
+from app.domain.models import (
+    EventImportance,
+    EventOrigin,
+    MeetingLifecycleStatus,
+    RaceEventType,
+)
+from app.domain.rooms import SessionBootstrap
 from app.providers.jolpica import JolpicaPayloadError
 from app.services.championship import ChampionshipUnavailableError
 from app.services.container import AppServices
 from app.services.historical import HistoricalIngestionError
 from app.services.openf1_backfill import backfill_job_status
+from app.services.session_realtime import (
+    SessionLocationSamplesState,
+    SessionTrackState,
+    location_state,
+    location_state_from_samples,
+    telemetry_state,
+    timing_state,
+)
+from app.services.strategy_public import sanitize_strategy_frame
+from app.storage.intelligence_progress import IntelligenceWriterConflictError
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+EVENT_CATEGORY_TYPES: dict[RaceEventCategory, set[RaceEventType]] = {
+    RaceEventCategory.BATTLES: {
+        RaceEventType.BATTLE_STARTED,
+        RaceEventType.BATTLE_INTENSIFIED,
+        RaceEventType.BATTLE_ENDED,
+        RaceEventType.DRS_RANGE_ENTERED,
+        RaceEventType.DRS_RANGE_EXITED,
+        RaceEventType.OVERTAKE,
+    },
+    RaceEventCategory.PITS: {
+        RaceEventType.PIT_STOP,
+        RaceEventType.PIT_ENTRY,
+        RaceEventType.PIT_EXIT,
+        RaceEventType.TYRE_CHANGE,
+    },
+    RaceEventCategory.RACE_CONTROL: {
+        RaceEventType.RACE_CONTROL,
+        RaceEventType.SAFETY_CAR,
+        RaceEventType.VIRTUAL_SAFETY_CAR,
+        RaceEventType.RED_FLAG,
+        RaceEventType.YELLOW_FLAG,
+        RaceEventType.PENALTY,
+        RaceEventType.INVESTIGATION,
+    },
+    RaceEventCategory.FAST_LAPS: {
+        RaceEventType.FASTEST_LAP,
+        RaceEventType.PERSONAL_BEST,
+    },
+}
+
+LIVE_PIPELINE_DIAGNOSTIC_FIELDS = {
+    "calendar_state",
+    "checked_at",
+    "connection_state",
+    "current_session_key",
+    "degraded_reason",
+    "error",
+    "event",
+    "ingestion_running",
+    "internal_session_id",
+    "last_event_age",
+    "last_event_at",
+    "meeting_key",
+    "next_catalog_retry_at",
+    "provider",
+    "provider_connected",
+    "provider_session_resolved",
+    "reconnect_attempts",
+    "room_slug",
+    "session",
+    "transport",
+}
+ENDPOINT_DIAGNOSTIC_FIELDS = {"state", "row_count", "error", "next_retry_at"}
 
 
 def get_services(request: Request) -> AppServices:
@@ -45,6 +130,217 @@ def get_services(request: Request) -> AppServices:
 
 
 Services = Annotated[AppServices, Depends(get_services)]
+
+
+def _safe_live_pipeline_diagnostics(status: dict[str, object]) -> dict[str, object]:
+    diagnostics = {
+        key: value for key, value in status.items() if key in LIVE_PIPELINE_DIAGNOSTIC_FIELDS
+    }
+    endpoints = status.get("endpoints")
+    if isinstance(endpoints, dict):
+        diagnostics["endpoints"] = {
+            str(name): {
+                key: value for key, value in detail.items() if key in ENDPOINT_DIAGNOSTIC_FIELDS
+            }
+            for name, detail in endpoints.items()
+            if isinstance(detail, dict)
+        }
+    return diagnostics
+
+
+def _safe_event_bus_diagnostics(diagnostics: dict[str, object] | None = None) -> dict[str, object]:
+    diagnostics = diagnostics or {}
+    last_error = diagnostics.get("last_error")
+    safe_error = (
+        {key: last_error[key] for key in ("type", "at") if key in last_error}
+        if isinstance(last_error, dict)
+        else None
+    )
+    return {
+        "last_successful_event_publish_at": diagnostics.get("last_successful_event_publish_at"),
+        "last_successful_state_publish_at": diagnostics.get("last_successful_state_publish_at"),
+        "last_error": safe_error,
+        "active_session_sse_clients": diagnostics.get("active_session_sse_clients", 0),
+    }
+
+
+async def _session_geometry(services: AppServices, session_key: str):
+    try:
+        return await services.session_locations.geometry(session_key)
+    except Exception as exc:
+        logger.warning(
+            "location_geometry_unavailable session_key=%s error=%s",
+            session_key,
+            type(exc).__name__,
+        )
+        return None
+
+
+async def _location_sample_count(services: AppServices, room: object) -> int | None:
+    """Real stored sample count, or None when it cannot be determined.
+
+    None keeps the capability at ``unknown`` rather than falsely reporting the
+    map as unavailable when the store itself is the thing that failed.
+    """
+
+    session_key = getattr(room, "session_key", None)
+    if not session_key:
+        return None
+    try:
+        return await services.session_locations.sample_count(str(session_key))
+    except Exception as exc:
+        logger.warning(
+            "location_capability_lookup_failed session_key=%s error=%s",
+            session_key,
+            type(exc).__name__,
+        )
+        return None
+
+
+def _ai_component_health(services: AppServices) -> dict[str, str]:
+    """Report whether generation is actually running, not merely configured.
+
+    A stored API key with no explicit opt-in is a disabled generator, and saying
+    "enabled" there would misreport what the rooms are really doing.
+    """
+    policy = getattr(services, "generation_policy", None)
+    if policy is None:
+        return {
+            "status": "disabled",
+            "detail": "Generation is not configured; rooms use deterministic wording",
+        }
+    status = policy.status()
+    return {"status": str(status["status"]), "detail": str(status["detail"])}
+
+
+def _utc(value: datetime | None) -> datetime | None:
+    """Treat naive query timestamps as UTC; provider samples are always UTC."""
+
+    if value is None:
+        return None
+    return value if value.tzinfo else value.replace(tzinfo=UTC)
+
+
+async def _session_intelligence(
+    services: AppServices,
+    session_key: str | None,
+) -> SessionIntelligenceResponse:
+    race_state = getattr(services, "race_state", None)
+    if not session_key or race_state is None:
+        return SessionIntelligenceResponse(session_key=session_key or "")
+    state = await race_state.get_state(session_key)
+    projection = await intelligence_projection_status(
+        services,
+        session_key,
+        view_sequence=state.sequence_number,
+        is_replay=state.is_replay,
+    )
+    response = SessionIntelligenceResponse.from_state(state, projection)
+    response.strategy_frame = sanitize_strategy_frame(response.strategy_frame, response.projection)
+    if (
+        response.strategy_frame is not None
+        and response.strategy_frame.projection_status == "unavailable"
+    ):
+        for battle in response.current_battles:
+            battle.strategy_context = None
+    return response
+
+
+async def intelligence_projection_status(
+    services: AppServices,
+    session_key: str | None,
+    *,
+    view_sequence: int | None = None,
+    is_replay: bool = False,
+) -> IntelligenceProjectionStatus:
+    repository = getattr(services, "intelligence_progress", None)
+    if repository is None or not session_key:
+        return IntelligenceProjectionStatus()
+    try:
+        async with asyncio.timeout(2):
+            progress = await repository.load(session_key)
+        if progress is None:
+            return IntelligenceProjectionStatus()
+        projection_status = progress.status
+        if view_sequence is not None:
+            if is_replay and view_sequence <= progress.completed_through_sequence:
+                projection_status = "replay"
+            elif view_sequence != progress.completed_through_sequence:
+                projection_status = "stale"
+        return IntelligenceProjectionStatus(
+            **progress.model_dump(
+                exclude={
+                    "session_key",
+                    "completed_source_id",
+                    "pending_source_id",
+                }
+            ),
+            status=projection_status,
+        )
+    except Exception:
+        return IntelligenceProjectionStatus(status="unavailable")
+
+
+@router.get("/api/v1/season/{season}/weekends", response_model=EventWeekendListResponse)
+async def season_weekends(season: int, services: Services) -> EventWeekendListResponse:
+    events, total = await services.rooms.grouped_events(season=season, limit=100, offset=0)
+    return EventWeekendListResponse(events=events, total=total, limit=100, offset=0)
+
+
+@router.get("/api/v1/weekends/{event_slug}")
+async def weekend_detail(event_slug: str, services: Services):
+    event = await services.rooms.event_weekend(event_slug)
+    if event is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Weekend not found")
+    return event
+
+
+@router.get("/api/v1/weekends/{event_slug}/sessions", response_model=SessionListResponse)
+async def weekend_sessions(event_slug: str, services: Services) -> SessionListResponse:
+    event = await services.rooms.event_weekend(event_slug)
+    if event is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Weekend not found")
+    return SessionListResponse(sessions=event.sessions)
+
+
+@router.get(
+    "/api/v1/sessions/{session_id}/capabilities", response_model=SessionCapabilitiesResponse
+)
+async def session_capabilities(session_id: UUID, services: Services) -> SessionCapabilitiesResponse:
+    result = await services.rooms.session_bootstrap(session_id)
+    if result is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
+    _, _, room = result
+    return SessionCapabilitiesResponse(
+        **services.rooms.capabilities_for(
+            room, location_samples=await _location_sample_count(services, room)
+        ).model_dump()
+    )
+
+
+@router.get("/api/v1/sessions/{session_id}/room", response_model=SessionBootstrapResponse)
+@router.get("/api/v1/sessions/{session_id}", response_model=SessionBootstrapResponse)
+async def session_detail(session_id: UUID, services: Services) -> SessionBootstrapResponse:
+    result = await services.rooms.session_bootstrap(session_id)
+    if result is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
+    weekend, session, room = result
+    bootstrap = SessionBootstrap(
+        session=session,
+        weekend=weekend,
+        room_status=session.eligibility,
+        capabilities=services.rooms.capabilities_for(
+            room, location_samples=await _location_sample_count(services, room)
+        ),
+        room_slug=session.room_slug,
+    )
+    return SessionBootstrapResponse(
+        **bootstrap.model_dump(),
+        intelligence=await _session_intelligence(
+            services,
+            str(getattr(room, "session_key", "") or "") or None,
+        ),
+    )
 
 
 @router.get("/", include_in_schema=False)
@@ -63,7 +359,7 @@ async def health_live(services: Services) -> dict[str, object]:
 
 
 @router.get("/health/ready", response_model=None)
-async def health_ready(services: Services) -> JSONResponse:
+async def health_ready(services: Services, request: Request = None) -> JSONResponse:
     """Dependency-aware readiness probe suitable for traffic admission."""
     database_result, redis_result = await asyncio.gather(
         services.database.health_check(),
@@ -71,7 +367,10 @@ async def health_ready(services: Services) -> JSONResponse:
     )
     database_ok, _ = database_result
     redis_ok, _ = redis_result
-    ready = database_ok and redis_ok
+    admission_unavailable = request is not None and getattr(
+        request.state, "admission_unavailable", False
+    )
+    ready = database_ok and redis_ok and not admission_unavailable
     return JSONResponse(
         status_code=status.HTTP_200_OK if ready else status.HTTP_503_SERVICE_UNAVAILABLE,
         content={
@@ -80,6 +379,7 @@ async def health_ready(services: Services) -> JSONResponse:
             "dependencies": {
                 "database": "ready" if database_ok else "unavailable",
                 "redis": "ready" if redis_ok else "unavailable",
+                **({"admission": "unavailable"} if admission_unavailable else {}),
             },
             "checked_at": datetime.now(UTC).isoformat(),
         },
@@ -90,26 +390,16 @@ async def health_ready(services: Services) -> JSONResponse:
 @router.get("/health/providers", response_model=None, include_in_schema=False)
 async def health_provider(services: Services) -> JSONResponse:
     """Report the latest OpenF1 ingestion state without exposing credentials or tokens."""
-    provider: dict[str, object] | None
-    source = "local_process"
-    if services.settings.app_process_role == "api":
-        source = "redis_status_stream"
-        try:
-            provider = await services.event_bus.latest_connection_status()
-        except Exception:
-            provider = None
-    else:
-        provider = services.openf1_live.status()
-
-    live_disabled = (
-        not services.settings.live_mode_enabled
-        or services.settings.openf1_ingestion_mode == "rest"
-        or not services.settings.openf1_live_auto_connect
+    source = (
+        "redis_status_stream" if services.settings.app_process_role == "api" else "local_process"
     )
+    provider = await services.provider_status()
+
+    live_disabled = not services.settings.live_worker_enabled
     state = str((provider or {}).get("connection_state") or "unknown").upper()
     if live_disabled and state in {"UNKNOWN", "DISCONNECTED"}:
         state = "DISABLED"
-    healthy = live_disabled or state in {"CONNECTED", "DISABLED"}
+    healthy = live_disabled or state in {"CONNECTED", "DISABLED", "LIVE", "SESSION_COMPLETE"}
     return JSONResponse(
         status_code=status.HTTP_200_OK if healthy else status.HTTP_503_SERVICE_UNAVAILABLE,
         content={
@@ -164,10 +454,7 @@ async def health(services: Services) -> HealthResponse:
         ),
         openf1_live=ComponentHealth(status=live_status, detail=live_detail),
         jolpica=ComponentHealth(status="configured", detail="2026 calendar provider configured"),
-        ai=ComponentHealth(
-            status="enabled" if settings.ai_enabled and not settings.ai_kill_switch else "disabled",
-            detail="AI configuration is available; automated reactions are not running",
-        ),
+        ai=ComponentHealth(**_ai_component_health(services)),
     )
 
 
@@ -193,22 +480,26 @@ async def openf1_backfill_status(
     ):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid internal key")
     latest = await services.backfill_jobs.latest()
-    live = services.openf1_live.status()
+    live = await services.provider_status()
+    session_key = str(live.get("current_session_key") or "") or None
+    event_bus = services.event_bus.diagnostics(session_key) if session_key is not None else None
     return {
         "process_role": services.settings.app_process_role,
         "ingestion_mode": services.settings.openf1_ingestion_mode,
-        "mqtt_state": live["connection_state"],
+        "mqtt_state": live.get("connection_state"),
         "rest_backfill_enabled": services.settings.openf1_rest_backfill_enabled,
         "recent_session_reconciliation": services.recent_reconciliation.status,
         "current_job": backfill_job_status(latest),
         "advisory_lease_owner": services.database.ingestor_lease_owned,
-        "last_provider_event_timestamp": live["last_event_at"],
+        "last_provider_event_timestamp": live.get("last_event_at"),
+        "live_pipeline": _safe_live_pipeline_diagnostics(live),
+        "event_bus": _safe_event_bus_diagnostics(event_bus),
     }
 
 
 @router.get("/api/v1/live/status", response_model=LiveStatusResponse)
 async def live_status(services: Services) -> LiveStatusResponse:
-    return LiveStatusResponse(**services.openf1_live.status())
+    return LiveStatusResponse(**await services.provider_status())
 
 
 @router.get(
@@ -255,8 +546,9 @@ async def championship_summary(services: Services) -> ChampionshipSummaryRespons
 
 @router.get("/api/v1/engine/status", response_model=EngineStatusResponse)
 async def engine_status(services: Services) -> EngineStatusResponse:
+    provider_status = await services.provider_status()
     current_session_key = (
-        services.openf1_live.current_session_key
+        provider_status.get("current_session_key")
         or await services.normalized_event_repository.latest_session_key()
     )
     (
@@ -281,7 +573,7 @@ async def engine_status(services: Services) -> EngineStatusResponse:
     )
     database_ok, database_detail = database_result
     redis_ok, redis_detail = redis_result
-    live = LiveStatusResponse(**services.openf1_live.status())
+    live = LiveStatusResponse(**provider_status)
     return EngineStatusResponse(
         status="ready" if database_ok and redis_ok else "degraded",
         generated_at=datetime.now(UTC),
@@ -310,12 +602,35 @@ async def session_events(
     session_key: str,
     services: Services,
     after_sequence_number: int = Query(default=0, ge=0),
-    limit: int = Query(default=100, ge=1, le=1000),
+    before_sequence_number: int | None = Query(default=None, ge=0),
+    limit: int = Query(default=100, ge=1, le=250),
+    event_type: Annotated[list[RaceEventType] | None, Query()] = None,
+    category: RaceEventCategory | None = None,
+    driver_number: int | None = Query(default=None, ge=1, le=999),
+    lap_number: int | None = Query(default=None, ge=0),
+    minimum_importance: EventImportance | None = None,
+    event_origin: EventOrigin | None = None,
+    before_time: datetime | None = None,
 ) -> SessionEventsResponse:
+    event_types = event_type
+    if category is not None:
+        category_types = EVENT_CATEGORY_TYPES[category]
+        event_types = (
+            [value for value in event_type if value in category_types]
+            if event_type
+            else sorted(category_types, key=lambda value: value.value)
+        )
     events = await services.normalized_event_repository.list_for_session(
         session_key,
         after_sequence=after_sequence_number,
+        before_sequence=before_sequence_number,
         limit=limit,
+        event_types=event_types,
+        driver_number=driver_number,
+        lap_number=lap_number,
+        minimum_importance=minimum_importance,
+        event_origin=event_origin,
+        before_time=_utc(before_time),
     )
     return SessionEventsResponse(
         session_key=session_key,
@@ -330,7 +645,146 @@ async def session_events(
     response_model=SessionStateResponse,
 )
 async def session_state(session_key: str, services: Services) -> SessionStateResponse:
-    return SessionStateResponse(state=await services.race_state.get_state(session_key))
+    from app.services.strategy_public import sanitize_strategy_state
+
+    state = await services.race_state.get_state(session_key)
+    projection = await intelligence_projection_status(
+        services, session_key, view_sequence=state.sequence_number, is_replay=state.is_replay
+    )
+    return SessionStateResponse(state=sanitize_strategy_state(state, projection))
+
+
+@router.get(
+    "/api/v1/sessions/{session_key}/timing",
+    response_model=SessionTimingResponse,
+)
+async def session_timing(session_key: str, services: Services) -> SessionTimingResponse:
+    return SessionTimingResponse(
+        timing=timing_state(await services.race_state.get_state(session_key))
+    )
+
+
+@router.get(
+    "/api/v1/sessions/{session_key}/drivers/{driver_number}/telemetry",
+    response_model=SessionTelemetryResponse,
+)
+async def session_telemetry(
+    session_key: str,
+    driver_number: int,
+    services: Services,
+) -> SessionTelemetryResponse:
+    return SessionTelemetryResponse(
+        telemetry=telemetry_state(await services.race_state.get_state(session_key), driver_number)
+    )
+
+
+@router.get(
+    "/api/v1/sessions/{session_key}/locations",
+    response_model=SessionLocationsResponse,
+)
+async def session_locations(
+    session_key: str,
+    services: Services,
+    at: Annotated[
+        datetime | None,
+        Query(description="Replay clock in UTC; returns the latest fix at or before it"),
+    ] = None,
+) -> SessionLocationsResponse:
+    """Latest known track position per driver.
+
+    Live sessions read the reduced race state; a replay clock (``at``) or an
+    empty live state falls back to the persisted series, so historical and
+    live sessions return the same contract.
+    """
+
+    state = await services.race_state.get_state(session_key)
+    locations = location_state(state)
+    if at is not None or not locations.drivers:
+        try:
+            samples = await services.session_locations.latest(session_key, at=_utc(at))
+        except Exception as exc:
+            logger.error(
+                "location_lookup_failed session_key=%s error=%s",
+                session_key,
+                type(exc).__name__,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Driver track positions are temporarily unavailable",
+            ) from exc
+        if samples:
+            locations = location_state_from_samples(state, samples)
+    # Bounds are an optimisation: without them the map derives its own extent
+    # from the fixes it has, so a geometry gap must not fail the request.
+    geometry = await _session_geometry(services, session_key)
+    if geometry is not None:
+        locations.bounds = geometry.bounds
+    logger.debug(
+        "location_lookup session_key=%s source=%s drivers=%s at=%s",
+        session_key,
+        locations.source,
+        len(locations.drivers),
+        at.isoformat() if at else None,
+    )
+    return SessionLocationsResponse(locations=locations)
+
+
+@router.get(
+    "/api/v1/sessions/{session_key}/locations/samples",
+    response_model=SessionLocationSamplesResponse,
+)
+async def session_location_samples(
+    session_key: str,
+    services: Services,
+    since: datetime | None = None,
+    until: datetime | None = None,
+    driver_number: Annotated[int | None, Query(ge=1, le=199)] = None,
+    limit: Annotated[int, Query(ge=1, le=20_000)] = 6_000,
+) -> SessionLocationSamplesResponse:
+    """Windowed provider fixes so the map can interpolate between samples."""
+
+    samples = await services.session_locations.window(
+        session_key,
+        since=_utc(since),
+        until=_utc(until),
+        driver_number=driver_number,
+        limit=limit,
+    )
+    return SessionLocationSamplesResponse(
+        locations=SessionLocationSamplesState(
+            session_key=session_key,
+            count=len(samples),
+            drivers=sorted({sample.driver_number for sample in samples}),
+            since=since,
+            until=until,
+            samples=samples,
+        )
+    )
+
+
+@router.get(
+    "/api/v1/sessions/{session_key}/track",
+    response_model=SessionTrackResponse,
+)
+async def session_track(session_key: str, services: Services) -> SessionTrackResponse:
+    """Circuit outline traced from this session's own location samples."""
+
+    geometry = await _session_geometry(services, session_key)
+    first_sample_at, last_sample_at = await services.session_locations.time_range(session_key)
+    if geometry is None:
+        return SessionTrackResponse(track=SessionTrackState(session_key=session_key))
+    return SessionTrackResponse(
+        track=SessionTrackState(
+            session_key=session_key,
+            available=bool(geometry.path),
+            bounds=geometry.bounds,
+            path=geometry.path,
+            source_driver_number=geometry.source_driver_number,
+            sample_count=geometry.sample_count,
+            first_sample_at=first_sample_at,
+            last_sample_at=last_sample_at,
+        )
+    )
 
 
 @router.get("/api/v1/stream/sessions/{session_key}")
@@ -380,6 +834,11 @@ async def ingest_historical_session(
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid internal key")
     try:
         result = await services.historical.ingest_session(payload.session_key, payload.endpoints)
+    except IntelligenceWriterConflictError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Another ingestion writer owns this work; retry after it finishes",
+        ) from exc
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -405,7 +864,14 @@ async def season_calendar(year: int, services: Services) -> SeasonCalendarSummar
 
     try:
         races = await services.season.calendar(year)
-    except (httpx.HTTPError, JolpicaPayloadError, KeyError, TypeError, ValueError) as exc:
+    except (
+        httpx.HTTPError,
+        JolpicaPayloadError,
+        KeyError,
+        TypeError,
+        ValueError,
+        TimeoutError,
+    ) as exc:
         logger.warning("Jolpica calendar unavailable: %s", type(exc).__name__)
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,

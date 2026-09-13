@@ -13,6 +13,15 @@ CompetitiveSessionType = SessionType
 
 
 _SESSION_ALIASES: dict[str, CompetitiveSessionType] = {
+    "practice 1": CompetitiveSessionType.PRACTICE_1,
+    "free practice 1": CompetitiveSessionType.PRACTICE_1,
+    "fp1": CompetitiveSessionType.PRACTICE_1,
+    "practice 2": CompetitiveSessionType.PRACTICE_2,
+    "free practice 2": CompetitiveSessionType.PRACTICE_2,
+    "fp2": CompetitiveSessionType.PRACTICE_2,
+    "practice 3": CompetitiveSessionType.PRACTICE_3,
+    "free practice 3": CompetitiveSessionType.PRACTICE_3,
+    "fp3": CompetitiveSessionType.PRACTICE_3,
     "qualifying": CompetitiveSessionType.QUALIFYING,
     "qualification": CompetitiveSessionType.QUALIFYING,
     "qualifying session": CompetitiveSessionType.QUALIFYING,
@@ -27,6 +36,9 @@ _SESSION_ALIASES: dict[str, CompetitiveSessionType] = {
 }
 
 SESSION_DISPLAY_NAMES: dict[CompetitiveSessionType, str] = {
+    CompetitiveSessionType.PRACTICE_1: "Practice 1",
+    CompetitiveSessionType.PRACTICE_2: "Practice 2",
+    CompetitiveSessionType.PRACTICE_3: "Practice 3",
     CompetitiveSessionType.QUALIFYING: "Qualifying",
     CompetitiveSessionType.SPRINT_QUALIFYING: "Sprint Qualifying",
     CompetitiveSessionType.SPRINT: "Sprint",

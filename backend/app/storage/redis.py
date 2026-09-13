@@ -5,6 +5,7 @@ import asyncio
 import json
 import logging
 import re
+from datetime import UTC, datetime
 from typing import Any
 
 from redis.asyncio import Redis
@@ -55,8 +56,41 @@ class RedisPublishError(RuntimeError):
 class EventBus:
     """Redis Streams transport for normalized events, race state, and live status."""
 
+    _MAX_DIAGNOSTIC_SESSIONS = 256
+
     def __init__(self, redis: Redis) -> None:
         self.redis = redis
+        self._diagnostics: dict[str, dict[str, Any]] = {}
+        self._clients: dict[str, int] = {}
+
+    def diagnostics(self, session_key: str) -> dict[str, Any]:
+        key = self._safe_key(session_key)
+        return {
+            "last_successful_event_publish_at": None,
+            "last_successful_state_publish_at": None,
+            "last_error": None,
+            **self._diagnostics.get(key, {}),
+            "active_session_sse_clients": self._clients.get(key, 0),
+        }
+
+    def session_client_connected(self, session_key: str) -> None:
+        key = self._safe_key(session_key)
+        self._clients[key] = self._clients.get(key, 0) + 1
+
+    def session_client_disconnected(self, session_key: str) -> None:
+        key = self._safe_key(session_key)
+        count = self._clients.get(key, 0) - 1
+        if count > 0:
+            self._clients[key] = count
+        else:
+            self._clients.pop(key, None)
+
+    async def latest_state(self, session_key: str) -> RaceState | None:
+        records = await self.redis.xrevrange(self.state_stream(session_key), count=1)
+        if not records:
+            return None
+        state = RaceState.model_validate_json(records[0][1]["data"])
+        return state if state.session_key == session_key else None
 
     async def publish_event(self, event: NormalizedRaceEvent) -> str:
         return await self._publish(
@@ -104,6 +138,7 @@ class EventBus:
             {
                 "kind": "room_message",
                 "sequence_number": str(message.sequence),
+                "discussion_generation": str(message.discussion_generation),
                 "data": message.model_dump_json(),
             },
             maxlen=5000,
@@ -115,6 +150,7 @@ class EventBus:
             {
                 "kind": "playback_state",
                 "sequence_number": str(state.get("current_message_sequence") or 0),
+                "discussion_generation": str(state.get("discussion_generation") or 1),
                 "data": json.dumps(state, default=str),
             },
             maxlen=5000,
@@ -124,6 +160,22 @@ class EventBus:
         return await self._publish(
             self.room_stream(room_id),
             {"kind": "room_status", "data": json.dumps(status, default=str)},
+            maxlen=5000,
+        )
+
+    async def publish_room_generation(self, room_id: str, discussion_generation: int) -> str:
+        return await self._publish(
+            self.room_stream(room_id),
+            {
+                "kind": "discussion_generation",
+                "discussion_generation": str(discussion_generation),
+                "data": json.dumps(
+                    {
+                        "room_id": room_id,
+                        "discussion_generation": discussion_generation,
+                    }
+                ),
+            },
             maxlen=5000,
         )
 
@@ -184,11 +236,28 @@ class EventBus:
         return f"apex:rooms:{cls._safe_key(room_id)}"
 
     async def _publish(self, stream: str, values: dict[str, str], maxlen: int) -> str:
+        kind = values.get("kind")
+        key = stream.rsplit(":", 1)[-1]
         try:
-            return await self.redis.xadd(stream, values, maxlen=maxlen, approximate=True)
+            result = await self.redis.xadd(stream, values, maxlen=maxlen, approximate=True)
+            if kind in {"event", "state"}:
+                details = self._diagnostic_details(key)
+                details[f"last_successful_{kind}_publish_at"] = datetime.now(UTC).isoformat()
+                details["last_error"] = None
+            return result
         except Exception as exc:
+            if kind in {"event", "state"}:
+                self._diagnostic_details(key)["last_error"] = {
+                    "type": type(exc).__name__,
+                    "at": datetime.now(UTC).isoformat(),
+                }
             logger.error("Redis publish failed stream=%s error=%s", stream, type(exc).__name__)
             raise RedisPublishError(f"Redis publish failed ({type(exc).__name__})") from exc
+
+    def _diagnostic_details(self, key: str) -> dict[str, Any]:
+        if key not in self._diagnostics and len(self._diagnostics) >= self._MAX_DIAGNOSTIC_SESSIONS:
+            self._diagnostics.pop(next(iter(self._diagnostics)))
+        return self._diagnostics.setdefault(key, {})
 
     @staticmethod
     def _decode_streams(streams: list[object]) -> list[dict[str, Any]]:
@@ -201,6 +270,11 @@ class EventBus:
                         "stream_id": stream_id,
                         "kind": values.get("kind", "event"),
                         "sequence_number": int(values.get("sequence_number", 0)),
+                        "discussion_generation": (
+                            int(values["discussion_generation"])
+                            if values.get("discussion_generation") is not None
+                            else None
+                        ),
                         "data": json.loads(values["data"]),
                     }
                 )
@@ -217,6 +291,12 @@ class RaceEventRedisPublisher:
         self.state_engine = state_engine
 
     async def consume(self, event: NormalizedRaceEvent) -> None:
+        await self.consume_committed_event(event)
+        await self.finish_committed_bundle(event.session_key)
+
+    async def consume_committed_event(self, event: NormalizedRaceEvent) -> None:
         await self.event_bus.publish_event(event)
-        state = await self.state_engine.get_state(event.session_key)
+
+    async def finish_committed_bundle(self, session_key: str) -> None:
+        state = await self.state_engine.get_state(session_key)
         await self.event_bus.publish_state(state)

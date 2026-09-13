@@ -16,6 +16,10 @@ def test_settings_exposes_only_safe_runtime_metadata(settings: Settings) -> None
     assert metadata["openf1_credentials_present"] is False
     assert "test-password" not in repr(settings)
     assert "database_url" not in metadata
+    # Reported generation state must follow the explicit opt-in, not the legacy
+    # ai_enabled default, or operators read the wrong thing from logs.
+    assert metadata["ai_generation_active"] is False
+    assert "ai_enabled" not in metadata
     assert settings.stream_backend == "sse"
     assert settings.race_state_snapshot_every_n_events == 10
     assert "v1/laps" in settings.openf1_topics
@@ -83,6 +87,7 @@ def test_production_combined_role_requires_tls_and_direct_worker_dsn(
     values.update(
         app_env="production",
         app_process_role="combined",
+        apex_arena_proxy_token="test-proxy-token",
         debug_ingestion_enabled=False,
         openf1_live_auto_connect=False,
         recent_session_reconciliation_enabled=True,
@@ -109,13 +114,13 @@ def test_api_role_cannot_enable_recent_reconciliation(settings: Settings) -> Non
     values.update(
         app_env="production",
         app_process_role="api",
+        apex_arena_proxy_token="test-proxy-token",
         recent_session_reconciliation_enabled=True,
         openf1_live_auto_connect=False,
         database_url="postgresql://u:p@pooler.neon.tech/apex?ssl=require",
         redis_url="rediss://default:t@x.upstash.io:6379",
         postgres_password=None,
         debug_ingestion_enabled=False,
-        development_fixture_enabled=False,
         room_diagnostics_enabled=False,
     )
     with pytest.raises(ValidationError, match="reconciliation requires"):
@@ -126,6 +131,7 @@ def test_managed_dsn_ignores_unrelated_local_postgres_password() -> None:
     """Ambient local Compose credentials do not invalidate an external DSN."""
     managed = Settings(
         app_env="staging",
+        apex_arena_proxy_token="test-proxy-token",
         database_url="postgresql://neon_user:neon_pw@ep-example.neon.tech/apex?ssl=require",
         redis_url="rediss://default:token@example.upstash.io:6379",
         postgres_password="unrelated-local-password",
@@ -139,6 +145,7 @@ def test_managed_dsn_ignores_unrelated_local_postgres_password() -> None:
 def test_managed_direct_migration_dsn_ignores_local_postgres_password() -> None:
     managed = Settings(
         app_env="staging",
+        apex_arena_proxy_token="test-proxy-token",
         database_url="postgresql://u:pooled@pooler.example.net/apex?ssl=require",
         database_migration_url="postgresql://u:direct@direct.example.net/apex?ssl=require",
         redis_url="rediss://default:token@example.upstash.io:6379",
@@ -217,13 +224,13 @@ def test_production_api_cannot_enable_historical_backfill(settings: Settings) ->
     values.update(
         app_env="production",
         app_process_role="api",
+        apex_arena_proxy_token="test-proxy-token",
         openf1_live_auto_connect=False,
         openf1_rest_backfill_enabled=True,
         database_url="postgresql://u:p@pooler.neon.tech/apex?ssl=require",
         redis_url="rediss://default:t@x.upstash.io:6379",
         postgres_password=None,
         debug_ingestion_enabled=False,
-        development_fixture_enabled=False,
         room_diagnostics_enabled=False,
     )
     with pytest.raises(ValidationError, match="API processes cannot enable"):
@@ -234,6 +241,7 @@ def test_neon_libpq_parameters_are_translated_for_asyncpg() -> None:
     """Neon's copy button emits sslmode/channel_binding, which asyncpg rejects."""
     neon = Settings(
         app_env="staging",
+        apex_arena_proxy_token="test-proxy-token",
         database_url=(
             "postgresql://u:p@ep-example.neon.tech/apex?sslmode=require&channel_binding=require"
         ),
@@ -288,6 +296,7 @@ def test_direct_migration_url_is_preferred_when_configured(settings: Settings) -
 def test_upstash_tls_url_is_accepted_and_masked() -> None:
     upstash = Settings(
         app_env="staging",
+        apex_arena_proxy_token="test-proxy-token",
         database_url="postgresql://u:p@ep-example.neon.tech/apex?ssl=require",
         redis_url="rediss://default:secret-token@example.upstash.io:6379",
         postgres_password=None,
@@ -305,6 +314,21 @@ def test_conservative_pool_defaults_suit_a_small_managed_database(settings: Sett
     assert settings.db_pool_recycle_seconds == 300
     assert settings.redis_socket_timeout_seconds == 5
     assert settings.redis_health_check_interval_seconds == 30
+
+
+def test_race_intelligence_thresholds_are_centralized_and_validated(
+    settings: Settings,
+) -> None:
+    assert settings.battle_start_interval_seconds == 2.0
+    assert settings.battle_end_interval_seconds == 3.0
+    assert settings.battle_start_samples == 3
+    assert settings.overtake_confirmation_seconds == 2.0
+    assert settings.proximity_exit_seconds == 1.2
+
+    values = settings.model_dump()
+    values["battle_start_interval_seconds"] = 0
+    with pytest.raises(ValidationError):
+        Settings(**values)
 
 
 def test_base_path_normalizes_to_a_single_leading_slash() -> None:
@@ -357,6 +381,7 @@ def test_combined_role_also_requires_the_direct_endpoint(settings: Settings) -> 
     values.update(
         app_env="staging",
         app_process_role="all",
+        apex_arena_proxy_token="test-proxy-token",
         openf1_live_auto_connect=True,
         database_url="postgresql://u:p@pooler.neon.tech/apex?ssl=require",
         redis_url="rediss://default:t@x.upstash.io:6379",
@@ -393,6 +418,7 @@ def test_production_rejects_api_auto_ingestion(settings: Settings) -> None:
     values.update(
         app_env="production",
         app_process_role="api",
+        apex_arena_proxy_token="test-proxy-token",
         openf1_live_auto_connect=True,
         debug_ingestion_enabled=False,
         database_url="postgresql://apex:test-password@localhost:5432/apex_arena?ssl=require",
@@ -401,3 +427,31 @@ def test_production_rejects_api_auto_ingestion(settings: Settings) -> None:
 
     with pytest.raises(ValidationError, match="cannot auto-connect"):
         Settings.model_validate(values)
+
+
+def test_runtime_metadata_reports_generation_only_when_fully_enabled() -> None:
+    from pydantic import SecretStr
+
+    base = {
+        "app_env": "test",
+        "database_url": "postgresql://apex:local-password@postgres:5432/apex_arena",
+        "postgres_password": "local-password",
+        "redis_url": "redis://localhost:6379/15",
+    }
+    opted_in = Settings(
+        **base,
+        ai_generation_opt_in=True,
+        ai_enabled=True,
+        openai_api_key=SecretStr("synthetic-not-a-real-key"),
+    )
+    assert opted_in.safe_runtime_metadata["ai_generation_active"] is True
+
+    # Each gate alone is enough to keep generation off.
+    for override in (
+        {"ai_generation_opt_in": False},
+        {"ai_enabled": False},
+        {"ai_kill_switch": True},
+        {"openai_api_key": None},
+    ):
+        configured = opted_in.model_copy(update=override)
+        assert configured.safe_runtime_metadata["ai_generation_active"] is False

@@ -1,0 +1,11 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Keep this browser version aligned with package-lock.json's @playwright/test.
+FROM mcr.microsoft.com/playwright:v1.61.1-noble
+
+WORKDIR /tests
+COPY package.json package-lock.json ./
+RUN npm ci
+COPY playwright.config.ts ./
+COPY e2e ./e2e
+
+CMD ["npm", "run", "test:e2e"]

@@ -8,7 +8,7 @@ from alembic import context
 from sqlalchemy import pool
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
-from app.core.settings import get_settings
+from app.core.settings import get_migration_settings
 from app.storage import models  # noqa: F401
 from app.storage.database import Base
 
@@ -21,7 +21,7 @@ target_metadata = Base.metadata
 
 def run_migrations_offline() -> None:
     context.configure(
-        url=get_settings().async_migration_database_url,
+        url=get_migration_settings().async_migration_database_url,
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
@@ -38,7 +38,7 @@ def do_run_migrations(connection: object) -> None:
 
 
 async def run_async_migrations() -> None:
-    configuration = {"sqlalchemy.url": get_settings().async_migration_database_url}
+    configuration = {"sqlalchemy.url": get_migration_settings().async_migration_database_url}
     connectable = async_engine_from_config(
         configuration,
         prefix="sqlalchemy.",

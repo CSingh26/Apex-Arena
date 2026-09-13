@@ -32,7 +32,7 @@ from tests.fixtures.race_room_events import race_room_event, ten_lap_fixture
 
 class FakeRoomRepository:
     def __init__(self) -> None:
-        self.room = SimpleNamespace(id=uuid4(), slug="fixture-room")
+        self.room = SimpleNamespace(id=uuid4(), slug="fixture-room", discussion_generation=1)
         self.messages: list[RoomMessage] = []
         self.evidence: dict[str, list[MessageEvidence]] = {}
 
@@ -40,8 +40,13 @@ class FakeRoomRepository:
         return self.room if session_key == "test-race-room" else None
 
     async def insert_message(
-        self, message: RoomMessage, evidence: list[MessageEvidence]
+        self,
+        message: RoomMessage,
+        evidence: list[MessageEvidence],
+        *,
+        expected_generation: int,
     ) -> tuple[RoomMessage, bool]:
+        assert expected_generation == self.room.discussion_generation
         stored = message.model_copy(update={"sequence": len(self.messages) + 1})
         self.messages.append(stored)
         self.evidence[str(stored.id)] = evidence
@@ -55,13 +60,21 @@ class OutcomeRoomRepository(FakeRoomRepository):
         self.attempts = 0
 
     async def insert_message(
-        self, message: RoomMessage, evidence: list[MessageEvidence]
+        self,
+        message: RoomMessage,
+        evidence: list[MessageEvidence],
+        *,
+        expected_generation: int,
     ) -> tuple[RoomMessage, bool]:
         self.attempts += 1
         inserted = self.outcomes.pop(0)
         if not inserted:
             return message, False
-        return await super().insert_message(message, evidence)
+        return await super().insert_message(
+            message,
+            evidence,
+            expected_generation=expected_generation,
+        )
 
 
 def test_roster_has_five_distinct_enabled_specialists() -> None:
@@ -194,6 +207,7 @@ async def test_chain_result_counts_all_inserted_messages() -> None:
         event,
         trigger,
         engine.context_builder.build(event, None),
+        discussion_generation=1,
     )
 
     assert result.attempted_count == 3
@@ -216,6 +230,7 @@ async def test_chain_result_counts_mixed_inserted_and_skipped_messages() -> None
         event,
         trigger,
         engine.context_builder.build(event, None),
+        discussion_generation=1,
     )
 
     assert result.attempted_count == 3
@@ -238,6 +253,7 @@ async def test_chain_result_counts_existing_primary_as_skipped() -> None:
         event,
         trigger,
         engine.context_builder.build(event, None),
+        discussion_generation=1,
     )
 
     assert result.attempted_count == 1
@@ -260,9 +276,9 @@ def test_deterministic_pit_message_only_claims_available_fields() -> None:
     trigger = DiscussionTriggerEvaluator(topic_cooldown_seconds=0).evaluate(event)
     assert trigger is not None
     generated = DeterministicRoomGenerator().generate(event, trigger, "mira-vale")
-    assert "2.41 seconds" in generated.content
-    assert "My call" in generated.content
-    assert "do not celebrate" in generated.content
+    assert "2.410" in generated.content
+    assert "My call" not in generated.content
+    assert "next position update" in generated.content
     assert generated.evidence_status is EvidenceStatus.GROUNDED
     assert generated.confidence is Confidence.HIGH
 
@@ -454,7 +470,7 @@ async def test_mira_pace_reply_is_classified_as_strategy_analysis() -> None:
         "mira-vale",
     ]
     assert repository.messages[1].topic is MessageTopic.STRATEGY
-    assert "0.42-second pace gain" in repository.messages[1].content
+    assert "0.42s pace gain" in repository.messages[1].content
     assert "speed can still become a trap" in repository.messages[1].content
 
 

@@ -6,8 +6,10 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, model_validator
 
+from app.api.schemas import SessionIntelligenceResponse
 from app.domain.circuits import CircuitIntelligence, SessionWeather
 from app.domain.rooms import (
+    MAX_DISCUSSION_GENERATION,
     AgentProfile,
     EventWeekend,
     MessageEvidence,
@@ -16,6 +18,9 @@ from app.domain.rooms import (
     RaceRoom,
     RoomMessage,
     RoomPlaybackState,
+    SessionBootstrap,
+    SessionCapabilities,
+    SessionRoomSummary,
 )
 
 
@@ -33,17 +38,32 @@ class EventWeekendListResponse(BaseModel):
     offset: int
 
 
+class SessionListResponse(BaseModel):
+    sessions: list[SessionRoomSummary]
+
+
+class SessionBootstrapResponse(SessionBootstrap):
+    intelligence: SessionIntelligenceResponse
+
+
+class SessionCapabilitiesResponse(SessionCapabilities):
+    pass
+
+
 class RaceRoomDetailResponse(BaseModel):
     room: RaceRoom
     agents: list[AgentProfile]
     playback: RoomPlaybackState
     circuit: CircuitIntelligence
     weather: SessionWeather
+    intelligence: SessionIntelligenceResponse
     data_notice: str
     diagnostics_available: bool = False
 
 
 class RoomMessagesResponse(BaseModel):
+    discussion_generation: int = Field(ge=1, le=MAX_DISCUSSION_GENERATION)
+    reset_required: bool = False
     messages: list[RoomMessage]
     next_cursor: int | None
 
@@ -135,5 +155,6 @@ class RoomDiagnosticsResponse(BaseModel):
     connection_state: str
     latest_events: list[dict[str, Any]]
     race_state: dict[str, Any]
+    intelligence: dict[str, Any] = Field(default_factory=dict)
     playback: RoomPlaybackState
     discussion: dict[str, int]

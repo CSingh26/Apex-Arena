@@ -66,7 +66,7 @@ def test_completed_provider_session_is_eligible_for_historical_room() -> None:
     assert result.can_replay is True
 
 
-def test_started_session_without_provider_data_remains_pending() -> None:
+def test_started_session_without_provider_data_opens_waiting_live_room() -> None:
     result = RoomEligibilityService().evaluate(
         scheduled_start=datetime(2026, 7, 18, 11, tzinfo=UTC),
         actual_status="live",
@@ -74,6 +74,27 @@ def test_started_session_without_provider_data_remains_pending() -> None:
         now=NOW,
     )
 
-    assert result.status is RoomEligibilityStatus.PROVIDER_PENDING
+    assert result.status is RoomEligibilityStatus.ELIGIBLE_LIVE
+    assert result.can_create is True
+    assert result.can_open is True
+    assert result.can_replay is False
+
+
+def test_existing_live_waiting_room_is_openable_but_not_creatable() -> None:
+    room = existing_room(
+        scheduled_start=datetime(2026, 7, 18, 11, tzinfo=UTC),
+        status=RoomStatus.LIVE,
+    )
+
+    result = RoomEligibilityService().evaluate(
+        scheduled_start=room.scheduled_start,
+        actual_status=room.status,
+        provider_session_available=False,
+        existing_room=room,
+        now=NOW,
+    )
+
+    assert result.status is RoomEligibilityStatus.ALREADY_EXISTS
     assert result.can_create is False
-    assert result.can_open is False
+    assert result.can_open is True
+    assert result.can_replay is False

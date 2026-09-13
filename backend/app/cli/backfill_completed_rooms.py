@@ -51,11 +51,21 @@ class CompletedRoomBackfillSummary(BaseModel):
 
 def parser() -> argparse.ArgumentParser:
     command = argparse.ArgumentParser(
-        description="Backfill all completed 2026 competitive rooms before chat generation."
+        description=(
+            "Backfill every completed 2026 weekend session room, practice included, "
+            "before chat generation."
+        )
     )
     command.add_argument("--season", type=int, default=2026)
     command.add_argument("--room-slug")
     command.add_argument("--max-rooms", type=int)
+    command.add_argument(
+        "--endpoints",
+        help=(
+            "Comma-separated OpenF1 endpoints; use with --include-high-frequency for "
+            "car_data,location."
+        ),
+    )
     command.add_argument("--resume", action="store_true")
     command.add_argument("--force-retry-failed", action="store_true")
     command.add_argument("--include-high-frequency", action="store_true")
@@ -109,6 +119,11 @@ async def _room_result(
     summary = await backfill.run(
         season=args.season,
         room_slug=room.slug,
+        endpoints=(
+            [item.strip() for item in args.endpoints.split(",") if item.strip()]
+            if args.endpoints
+            else None
+        ),
         include_high_frequency=args.include_high_frequency,
         dry_run=args.dry_run,
         resume=args.resume,

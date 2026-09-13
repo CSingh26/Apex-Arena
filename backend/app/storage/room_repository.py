@@ -1,11 +1,17 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from uuid import UUID
 
-from sqlalchemy import and_, case, delete, func, or_, select, update
-from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy import and_, case, delete, func, literal, or_, select, text, update
+from sqlalchemy.dialects.postgresql import JSONB, insert
+from sqlalchemy.exc import DBAPIError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.rooms import (
     AgentProfile,
@@ -32,14 +38,125 @@ from app.storage.models import (
     RaceRoomRecord,
     RoomMessageRecord,
     RoomPlaybackStateRecord,
+    SessionIntelligenceProgressRecord,
 )
+
+
+@dataclass(frozen=True)
+class HistoryRoomFence:
+    room_id: UUID
+    session_key: str | None
+    mode: str
+    discussion_generation: int
+    current_event_sequence: int | None
+
+    def delivery_key(self) -> tuple:
+        return (
+            self.room_id,
+            self.session_key,
+            self.mode,
+            self.discussion_generation,
+            self.current_event_sequence if self.mode != "live" else None,
+        )
+
+
+# The manual batch backfill repairs every completed weekend session, practice included,
+# so operators and bounded recent-session recovery can repair every weekend session.
+COMPLETED_BACKFILL_SESSION_TYPES: tuple[SessionType, ...] = (
+    SessionType.PRACTICE_1,
+    SessionType.PRACTICE_2,
+    SessionType.PRACTICE_3,
+    SessionType.SPRINT_QUALIFYING,
+    SessionType.SPRINT,
+    SessionType.QUALIFYING,
+    SessionType.RACE,
+)
+
+
+class ReplayOwnershipLostError(RuntimeError):
+    """The replay lease expired or another worker now owns the playback row."""
+
+
+class ReplayWriteBusyError(RuntimeError):
+    """A transaction was rolled back so its worker's heartbeat can keep renewing."""
+
+
+class DiscussionGenerationChangedError(RuntimeError):
+    """A discussion writer observed an obsolete room generation."""
+
+
+@dataclass(frozen=True)
+class DiscussionPage:
+    discussion_generation: int
+    messages: list[RoomMessage]
+    next_cursor: int | None
+    reset_required: bool = False
 
 
 class SqlRaceRoomRepository:
     def __init__(self, database: Database) -> None:
         self.database = database
 
+    async def confirmed_terminal_sessions(
+        self, session_keys: list[str], *, algorithm_version: str
+    ) -> set[str]:
+        """Read committed observed terminals, never a selected replay/cache view.
+
+        Legacy terminal families alone are not enough: older normalization used
+        schedule/phase messages as whole-session finishes. Only the explicit
+        observed control contract and compatible verified progress certify this.
+        """
+        return await self._confirmed_capture_observations(
+            session_keys, algorithm_version=algorithm_version
+        )
+
+    async def confirmed_cancelled_sessions(
+        self, session_keys: list[str], *, algorithm_version: str
+    ) -> set[str]:
+        """Cancellation is sticky; absent/false metadata cannot reinstate a session."""
+        return await self._confirmed_capture_observations(
+            session_keys, algorithm_version=algorithm_version, cancelled=True
+        )
+
+    async def _confirmed_capture_observations(
+        self, session_keys: list[str], *, algorithm_version: str, cancelled: bool = False
+    ) -> set[str]:
+        if len(session_keys) > 500:
+            raise ValueError("Terminal lookup is limited to 500 session identities")
+        if not session_keys:
+            return set()
+        fact = NormalizedRaceEventRecord
+        progress = SessionIntelligenceProgressRecord
+        terminal = (
+            select(fact.id)
+            .where(
+                fact.session_key == progress.session_key,
+                fact.sequence_number <= progress.completed_through_sequence,
+                fact.event_origin == "SOURCE_FACT",
+                fact.payload["control_schema"].as_string() == "observed-v1",
+                fact.payload["is_cancelled"] == literal(True, type_=JSONB)
+                if cancelled
+                else fact.payload["control"]["lifecycle"].as_string() == "finished",
+            )
+            .exists()
+        )
+        async with self.database.session_factory() as session:
+            return set(
+                await session.scalars(
+                    select(progress.session_key)
+                    .where(
+                        progress.session_key.in_(session_keys),
+                        progress.algorithm_version == algorithm_version,
+                        progress.historical_effects_unverified.is_(False),
+                        progress.pending_source_id.is_(None),
+                        terminal,
+                    )
+                    .limit(500)
+                )
+            )
+
     async def seed_agents(self, agents: list[AgentProfile]) -> None:
+        await self.database.require_ingestion_schema()
         async with self.database.session_factory() as session:
             for agent in agents:
                 values = agent.model_dump()
@@ -51,8 +168,24 @@ class SqlRaceRoomRepository:
                 )
             await session.commit()
 
+    async def observe_catalog_cancellation(self, room_id: UUID, session_key: str) -> bool:
+        """Retain same-identity metadata without granting room/navigation rights."""
+        await self.database.require_ingestion_schema()
+        async with self.database.session_factory() as session:
+            result = await session.execute(
+                update(RaceRoomRecord)
+                .where(RaceRoomRecord.id == room_id, RaceRoomRecord.session_key == session_key)
+                .values(provider_cancelled=True)
+                .returning(RaceRoomRecord.id)
+            )
+            observed = result.scalar_one_or_none() is not None
+            await session.commit()
+            return observed
+
     async def upsert_room(self, room: RaceRoom, agent_ids: list[str]) -> RaceRoom:
+        await self.database.require_ingestion_schema()
         values = room.model_dump(exclude={"created_at", "updated_at"})
+        values["capture_anchor_start"] = room.capture_anchor_start or room.scheduled_start
         values["event_slug"] = room.event_slug or room.slug.rsplit("-", 1)[0]
         values["session_type"] = room.session_type.value
         values["status"] = room.status.value
@@ -64,6 +197,7 @@ class SqlRaceRoomRepository:
         values["agent_count"] = len(agent_ids)
         dynamic_fields = {
             "id",
+            "discussion_generation",
             "message_count",
             "generated_message_count",
             "last_generated_sequence",
@@ -77,8 +211,24 @@ class SqlRaceRoomRepository:
             "updated_at",
         }
         update_values = {key: value for key, value in values.items() if key not in dynamic_fields}
+        update_values["capture_anchor_start"] = func.coalesce(
+            RaceRoomRecord.capture_anchor_start, RaceRoomRecord.scheduled_start
+        )
         update_values["session_key"] = func.coalesce(
             values.get("session_key"), RaceRoomRecord.session_key
+        )
+        # Preserve cancellation only for this provider identity. A separately
+        # identified replacement session must not inherit its predecessor's flag.
+        update_values["provider_cancelled"] = case(
+            (
+                and_(
+                    RaceRoomRecord.session_key.is_not(None),
+                    values.get("session_key") is not None,
+                    RaceRoomRecord.session_key != values.get("session_key"),
+                ),
+                values["provider_cancelled"],
+            ),
+            else_=or_(RaceRoomRecord.provider_cancelled, values["provider_cancelled"]),
         )
         preserve_provider_state = or_(
             RaceRoomRecord.message_count > 0,
@@ -139,12 +289,9 @@ class SqlRaceRoomRepository:
         sort: str = "race_date_desc",
         limit: int = 20,
         offset: int = 0,
-        include_development: bool = False,
         include_unavailable: bool = False,
     ) -> tuple[list[RaceRoom], int]:
         filters = []
-        if not include_development:
-            filters.append(RaceRoomRecord.is_development.is_(False))
         if not include_unavailable:
             filters.append(
                 RaceRoomRecord.status.not_in(
@@ -195,59 +342,90 @@ class SqlRaceRoomRepository:
         grace_minutes: int,
         limit: int,
     ) -> list[RaceRoom]:
-        """Find completed competitive rooms that may improve after provider delay."""
+        """Return never-attempted then least-recently-attempted completed rooms."""
 
-        lower_bound = now - timedelta(days=lookback_days)
-        upper_bound = now - timedelta(minutes=grace_minutes)
         statement = (
             select(RaceRoomRecord)
-            .where(
-                RaceRoomRecord.is_development.is_(False),
-                RaceRoomRecord.session_type.in_(
-                    [
-                        SessionType.QUALIFYING.value,
-                        SessionType.SPRINT_QUALIFYING.value,
-                        SessionType.SPRINT.value,
-                        SessionType.RACE.value,
-                    ]
-                ),
-                RaceRoomRecord.scheduled_start >= lower_bound,
-                RaceRoomRecord.scheduled_start <= upper_bound,
-                or_(
-                    RaceRoomRecord.session_key.is_(None),
-                    RaceRoomRecord.replay_available.is_(False),
-                    RaceRoomRecord.status.in_(
-                        [
-                            RoomStatus.PENDING.value,
-                            RoomStatus.INGESTING.value,
-                            RoomStatus.UNAVAILABLE.value,
-                            RoomStatus.FAILED.value,
-                        ]
-                    ),
-                    RaceRoomRecord.ingestion_status.in_(
-                        [
-                            IngestionStatus.PENDING.value,
-                            IngestionStatus.MATCHING.value,
-                            IngestionStatus.PARTIAL.value,
-                            IngestionStatus.FAILED.value,
-                            IngestionStatus.UNAVAILABLE.value,
-                        ]
-                    ),
-                    RaceRoomRecord.source_availability.in_(
-                        [
-                            SourceAvailability.UNAVAILABLE.value,
-                            SourceAvailability.RESULTS_ONLY.value,
-                            SourceAvailability.TIMING_ONLY.value,
-                        ]
-                    ),
-                ),
+            .where(*self._recent_reconciliation_filters(now, lookback_days, grace_minutes))
+            .order_by(
+                RaceRoomRecord.reconciliation_attempted_at.asc().nulls_first(),
+                RaceRoomRecord.scheduled_start.desc(),
+                RaceRoomRecord.slug.asc(),
             )
-            .order_by(RaceRoomRecord.scheduled_start.desc(), RaceRoomRecord.slug.asc())
             .limit(limit)
         )
         async with self.database.session_factory() as session:
             records = (await session.execute(statement)).scalars().all()
             return [RaceRoom.model_validate(record, from_attributes=True) for record in records]
+
+    async def mark_recent_reconciliation_attempt(
+        self, slug: str, *, attempted_at: datetime
+    ) -> None:
+        """Advance durable fair ordering before any fallible provider work."""
+
+        await self.database.require_ingestion_schema()
+        async with self.database.session_factory() as session:
+            await session.execute(
+                update(RaceRoomRecord)
+                .where(RaceRoomRecord.slug == slug)
+                .values(reconciliation_attempted_at=attempted_at)
+            )
+            await session.commit()
+
+    @staticmethod
+    def _recent_reconciliation_filters(
+        now: datetime,
+        lookback_days: int,
+        grace_minutes: int,
+    ) -> tuple[Any, ...]:
+        lower_bound = now - timedelta(days=lookback_days)
+        upper_bound = now - timedelta(minutes=grace_minutes)
+        return (
+            RaceRoomRecord.session_type.in_(
+                [item.value for item in COMPLETED_BACKFILL_SESSION_TYPES]
+            ),
+            RaceRoomRecord.scheduled_start >= lower_bound,
+            RaceRoomRecord.scheduled_start <= upper_bound,
+            or_(
+                RaceRoomRecord.status == RoomStatus.COMPLETED.value,
+                and_(
+                    RaceRoomRecord.session_type == SessionType.RACE.value,
+                    RaceRoomRecord.scheduled_start <= upper_bound - timedelta(hours=4),
+                ),
+                and_(
+                    RaceRoomRecord.session_type != SessionType.RACE.value,
+                    RaceRoomRecord.scheduled_start <= upper_bound - timedelta(hours=2),
+                ),
+            ),
+            or_(
+                RaceRoomRecord.session_key.is_(None),
+                RaceRoomRecord.replay_available.is_(False),
+                RaceRoomRecord.status.in_(
+                    [
+                        RoomStatus.PENDING.value,
+                        RoomStatus.INGESTING.value,
+                        RoomStatus.UNAVAILABLE.value,
+                        RoomStatus.FAILED.value,
+                    ]
+                ),
+                RaceRoomRecord.ingestion_status.in_(
+                    [
+                        IngestionStatus.PENDING.value,
+                        IngestionStatus.MATCHING.value,
+                        IngestionStatus.PARTIAL.value,
+                        IngestionStatus.FAILED.value,
+                        IngestionStatus.UNAVAILABLE.value,
+                    ]
+                ),
+                RaceRoomRecord.source_availability.in_(
+                    [
+                        SourceAvailability.UNAVAILABLE.value,
+                        SourceAvailability.RESULTS_ONLY.value,
+                        SourceAvailability.TIMING_ONLY.value,
+                    ]
+                ),
+            ),
+        )
 
     async def get_room(self, slug: str) -> RaceRoom | None:
         async with self.database.session_factory() as session:
@@ -285,7 +463,6 @@ class SqlRaceRoomRepository:
     ) -> list[RaceRoom]:
         filters = [
             RaceRoomRecord.season == season,
-            RaceRoomRecord.is_development.is_(False),
             RaceRoomRecord.session_key.is_not(None),
             RaceRoomRecord.session_type.in_(
                 [
@@ -331,8 +508,9 @@ class SqlRaceRoomRepository:
         room_slug: str | None = None,
         limit: int | None = None,
     ) -> list[RaceRoom]:
-        """Find completed competitive rooms that still need provider backfill repair."""
+        """Find completed rooms of any session type that still need provider backfill repair."""
 
+        now = datetime.now(UTC)
         event_counts = (
             select(
                 NormalizedRaceEventRecord.session_key.label("session_key"),
@@ -343,16 +521,29 @@ class SqlRaceRoomRepository:
         )
         filters = [
             RaceRoomRecord.season == season,
-            RaceRoomRecord.is_development.is_(False),
             RaceRoomRecord.session_type.in_(
-                [
-                    SessionType.QUALIFYING.value,
-                    SessionType.SPRINT_QUALIFYING.value,
-                    SessionType.SPRINT.value,
-                    SessionType.RACE.value,
-                ]
+                [session_type.value for session_type in COMPLETED_BACKFILL_SESSION_TYPES]
             ),
-            RaceRoomRecord.scheduled_start <= datetime.now(UTC),
+            RaceRoomRecord.status != RoomStatus.LIVE.value,
+            or_(
+                RaceRoomRecord.status.in_(
+                    [
+                        RoomStatus.READY.value,
+                        RoomStatus.REPLAYING.value,
+                        RoomStatus.COMPLETED.value,
+                    ]
+                ),
+                and_(
+                    RaceRoomRecord.session_type == SessionType.RACE.value,
+                    func.coalesce(RaceRoomRecord.actual_start, RaceRoomRecord.scheduled_start)
+                    <= now - timedelta(hours=4),
+                ),
+                and_(
+                    RaceRoomRecord.session_type != SessionType.RACE.value,
+                    func.coalesce(RaceRoomRecord.actual_start, RaceRoomRecord.scheduled_start)
+                    <= now - timedelta(hours=2),
+                ),
+            ),
             or_(
                 RaceRoomRecord.session_key.is_(None),
                 RaceRoomRecord.replay_available.is_(False),
@@ -412,14 +603,8 @@ class SqlRaceRoomRepository:
         )
         filters = [
             RaceRoomRecord.season == season,
-            RaceRoomRecord.is_development.is_(False),
             RaceRoomRecord.session_type.in_(
-                [
-                    SessionType.QUALIFYING.value,
-                    SessionType.SPRINT_QUALIFYING.value,
-                    SessionType.SPRINT.value,
-                    SessionType.RACE.value,
-                ]
+                [session_type.value for session_type in COMPLETED_BACKFILL_SESSION_TYPES]
             ),
             RaceRoomRecord.scheduled_start <= datetime.now(UTC),
         ]
@@ -483,6 +668,7 @@ class SqlRaceRoomRepository:
         self, slug: str, *, meeting_key: str | None, session_key: str
     ) -> RaceRoom:
         """Persist only a confidently resolved provider identity."""
+        await self.database.require_ingestion_schema()
         async with self.database.session_factory() as session:
             conflict = (
                 await session.execute(
@@ -569,14 +755,26 @@ class SqlRaceRoomRepository:
             return int((await session.execute(statement)).scalar_one_or_none() or 0) + 1
 
     async def insert_message(
-        self, message: RoomMessage, evidence: list[MessageEvidence]
+        self,
+        message: RoomMessage,
+        evidence: list[MessageEvidence],
+        *,
+        expected_generation: int,
     ) -> tuple[RoomMessage, bool]:
         async with self.database.session_factory() as session:
-            await session.execute(
-                select(RaceRoomRecord.id)
-                .where(RaceRoomRecord.id == message.room_id)
-                .with_for_update()
-            )
+            generation = (
+                await session.execute(
+                    select(RaceRoomRecord.discussion_generation)
+                    .where(RaceRoomRecord.id == message.room_id)
+                    .with_for_update()
+                )
+            ).scalar_one_or_none()
+            if generation is None:
+                raise DiscussionGenerationChangedError("Race room no longer exists")
+            if generation != expected_generation:
+                raise DiscussionGenerationChangedError(
+                    "Discussion generation changed; discard stale generated output"
+                )
             sequence = (
                 int(
                     (
@@ -590,8 +788,13 @@ class SqlRaceRoomRepository:
                 )
                 + 1
             )
-            stored_message = message.model_copy(update={"sequence": sequence})
-            values = stored_message.model_dump()
+            stored_message = message.model_copy(
+                update={
+                    "sequence": sequence,
+                    "discussion_generation": expected_generation,
+                }
+            )
+            values = stored_message.model_dump(exclude={"discussion_generation"})
             for key in ("topic", "message_type", "confidence", "evidence_status"):
                 values[key] = getattr(stored_message, key).value
             statement = (
@@ -637,34 +840,86 @@ class SqlRaceRoomRepository:
         sequence_to: int | None = None,
         limit: int = 100,
     ) -> list[RoomMessage]:
-        filters = [
-            RoomMessageRecord.room_id == room_id,
-            RoomMessageRecord.sequence > after_sequence,
-            RoomMessageRecord.archived_at.is_(None),
-        ]
-        if agent_id:
-            filters.append(RoomMessageRecord.agent_id == agent_id)
-        if topic:
-            filters.append(RoomMessageRecord.topic == topic.value)
-        if message_type:
-            filters.append(RoomMessageRecord.message_type == message_type.value)
-        if lap_from is not None:
-            filters.append(RoomMessageRecord.lap_number >= lap_from)
-        if lap_to is not None:
-            filters.append(RoomMessageRecord.lap_number <= lap_to)
-        if sequence_from is not None:
-            filters.append(RoomMessageRecord.sequence >= sequence_from)
-        if sequence_to is not None:
-            filters.append(RoomMessageRecord.sequence <= sequence_to)
-        statement = (
-            select(RoomMessageRecord)
-            .where(and_(*filters))
-            .order_by(RoomMessageRecord.sequence)
-            .limit(limit)
+        page = await self.list_message_page(
+            room_id,
+            after_sequence=after_sequence,
+            agent_id=agent_id,
+            topic=topic,
+            message_type=message_type,
+            lap_from=lap_from,
+            lap_to=lap_to,
+            sequence_from=sequence_from,
+            sequence_to=sequence_to,
+            limit=limit,
         )
+        return page.messages
+
+    async def list_message_page(
+        self,
+        room_id: UUID,
+        *,
+        expected_generation: int | None = None,
+        after_sequence: int = 0,
+        agent_id: str | None = None,
+        topic: MessageTopic | None = None,
+        message_type: MessageType | None = None,
+        lap_from: int | None = None,
+        lap_to: int | None = None,
+        sequence_from: int | None = None,
+        sequence_to: int | None = None,
+        limit: int = 100,
+    ) -> DiscussionPage:
         async with self.database.session_factory() as session:
+            generation = (
+                await session.execute(
+                    select(RaceRoomRecord.discussion_generation)
+                    .where(RaceRoomRecord.id == room_id)
+                    .with_for_update(read=True)
+                )
+            ).scalar_one_or_none()
+            if generation is None:
+                raise DiscussionGenerationChangedError("Race room no longer exists")
+            generation = int(generation)
+            reset_required = expected_generation is not None and expected_generation != generation
+            effective_after = 0 if reset_required else after_sequence
+            filters = [
+                RoomMessageRecord.room_id == room_id,
+                RoomMessageRecord.sequence > effective_after,
+                RoomMessageRecord.archived_at.is_(None),
+            ]
+            if agent_id:
+                filters.append(RoomMessageRecord.agent_id == agent_id)
+            if topic:
+                filters.append(RoomMessageRecord.topic == topic.value)
+            if message_type:
+                filters.append(RoomMessageRecord.message_type == message_type.value)
+            if lap_from is not None:
+                filters.append(RoomMessageRecord.lap_number >= lap_from)
+            if lap_to is not None:
+                filters.append(RoomMessageRecord.lap_number <= lap_to)
+            if sequence_from is not None:
+                filters.append(RoomMessageRecord.sequence >= sequence_from)
+            if sequence_to is not None:
+                filters.append(RoomMessageRecord.sequence <= sequence_to)
+            statement = (
+                select(RoomMessageRecord)
+                .where(and_(*filters))
+                .order_by(RoomMessageRecord.sequence)
+                .limit(limit)
+            )
             records = (await session.execute(statement)).scalars().all()
-            return [RoomMessage.model_validate(record, from_attributes=True) for record in records]
+            messages = [
+                RoomMessage.model_validate(record, from_attributes=True).model_copy(
+                    update={"discussion_generation": generation}
+                )
+                for record in records
+            ]
+            return DiscussionPage(
+                discussion_generation=generation,
+                messages=messages,
+                next_cursor=messages[-1].sequence if len(messages) == limit else None,
+                reset_required=reset_required,
+            )
 
     async def message_evidence(self, message_id: UUID) -> list[MessageEvidence]:
         statement = (
@@ -701,15 +956,240 @@ class SqlRaceRoomRepository:
                 else None
             )
 
+    async def _lock_replay(self, session: AsyncSession, room_id: UUID):
+        return (
+            await session.execute(
+                select(RoomPlaybackStateRecord)
+                .where(RoomPlaybackStateRecord.room_id == room_id)
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+
+    async def _require_replay_owner(
+        self, session: AsyncSession, room_id: UUID, owner_token: UUID
+    ) -> RoomPlaybackStateRecord:
+        record = await self._lock_replay(session, room_id)
+        # clock_timestamp is evaluated AFTER acquiring the row lock: transaction
+        # start time can predate a long lock wait and must not revive an expired lease.
+        now = await session.scalar(select(func.clock_timestamp()))
+        if (
+            record is None
+            or record.replay_owner_token != owner_token
+            or record.replay_owner_expires_at is None
+            or record.replay_owner_expires_at <= now
+        ):
+            raise ReplayOwnershipLostError("Replay ownership expired; retry the control request")
+        return record
+
+    async def _try_lock_replay_room(self, session: AsyncSession, room_id: UUID):
+        # Never wait on a second row while holding playback: its heartbeat needs
+        # that first lock. The caller rolls back/defer-retries if room is busy.
+        await session.execute(text("SET LOCAL lock_timeout = '100ms'"))
+        try:
+            return (
+                await session.execute(
+                    select(RaceRoomRecord)
+                    .where(RaceRoomRecord.id == room_id)
+                    .with_for_update(skip_locked=True)
+                )
+            ).scalar_one_or_none()
+        except DBAPIError as exc:
+            if getattr(exc.orig, "sqlstate", None) == "55P03":
+                # SKIP LOCKED handles row locks, not an exclusive table lock.
+                # Every caller exits/rolls back when this returns None.
+                return None
+            raise
+
+    @asynccontextmanager
+    async def _replay_mutation(
+        self, room_id: UUID, owner_token: UUID | None, *, lock_room: bool
+    ) -> AsyncIterator[AsyncSession]:
+        async with self.database.session_factory() as session:
+            try:
+                if owner_token is not None:
+                    await self._require_replay_owner(session, room_id, owner_token)
+                    if lock_room:
+                        if await self._try_lock_replay_room(session, room_id) is None:
+                            raise ReplayWriteBusyError(
+                                "Replay room is busy; retry the control request"
+                            )
+                        await self._require_replay_owner(session, room_id, owner_token)
+                    # Message/evidence writes can meet further locks. Bound each
+                    # wait, roll back the whole transaction, and let renewal run.
+                    await session.execute(text("SET LOCAL lock_timeout = '100ms'"))
+                yield session
+                if owner_token is not None:
+                    await session.flush()
+                    # Earlier validation cannot authorize a transaction that
+                    # expired during a subsequent UPDATE/DELETE/trigger await.
+                    await self._require_replay_owner(session, room_id, owner_token)
+                await session.commit()
+            except DBAPIError as exc:
+                if getattr(exc.orig, "sqlstate", None) == "55P03":
+                    raise ReplayWriteBusyError(
+                        "Replay storage is busy; retry the control request"
+                    ) from exc
+                raise
+
+    async def claim_replay(self, room_id: UUID, owner_token: UUID, *, lease_seconds: float) -> bool:
+        async with self.database.session_factory() as session:
+            record = await self._lock_replay(session, room_id)
+            if record is None:
+                # Creating playback can wait on the room FK before the row
+                # exists. Bound that case too, without shortening the initial
+                # lock wait for an existing playback row.
+                await session.execute(text("SET LOCAL lock_timeout = '100ms'"))
+                try:
+                    await session.execute(
+                        insert(RoomPlaybackStateRecord)
+                        .values(room_id=room_id)
+                        .on_conflict_do_nothing(index_elements=["room_id"])
+                    )
+                    record = await self._lock_replay(session, room_id)
+                except DBAPIError as exc:
+                    if getattr(exc.orig, "sqlstate", None) == "55P03":
+                        return False
+                    raise
+            now = await session.scalar(select(func.clock_timestamp()))
+            if (
+                record.replay_owner_token is not None
+                and record.replay_owner_expires_at is not None
+                and record.replay_owner_expires_at > now
+            ):
+                return False
+            room = await self._try_lock_replay_room(session, room_id)
+            if room is None or room.mode not in {RoomMode.REPLAY.value, RoomMode.ARCHIVED.value}:
+                return False
+            now = await session.scalar(select(func.clock_timestamp()))
+            record.replay_owner_token = owner_token
+            record.replay_owner_expires_at = now + timedelta(seconds=lease_seconds)
+            await session.commit()
+            return True
+
+    async def renew_replay(self, room_id: UUID, owner_token: UUID, *, lease_seconds: float) -> bool:
+        async with self.database.session_factory() as session:
+            try:
+                record = await self._require_replay_owner(session, room_id, owner_token)
+            except ReplayOwnershipLostError:
+                return False
+            now = await session.scalar(select(func.clock_timestamp()))
+            record.replay_owner_expires_at = now + timedelta(seconds=lease_seconds)
+            await session.commit()
+            return True
+
+    async def release_replay(self, room_id: UUID, owner_token: UUID) -> bool:
+        async with self.database.session_factory() as session:
+            try:
+                record = await self._require_replay_owner(session, room_id, owner_token)
+            except ReplayOwnershipLostError:
+                return False
+            record.replay_owner_token = None
+            record.replay_owner_expires_at = None
+            await session.commit()
+            return True
+
+    async def pause_orphaned_running_rows(self) -> int:
+        """Pause existing orphan rows; callers must first drain pre-lease workers."""
+        async with self.database.session_factory() as session:
+            await session.execute(text("SET LOCAL lock_timeout = '100ms'"))
+            try:
+                candidates = (
+                    await session.scalars(
+                        select(RoomPlaybackStateRecord.room_id)
+                        .join(RaceRoomRecord, RaceRoomRecord.id == RoomPlaybackStateRecord.room_id)
+                        .where(
+                            RoomPlaybackStateRecord.is_paused.is_(False),
+                            RaceRoomRecord.status == RoomStatus.REPLAYING.value,
+                            RaceRoomRecord.mode.in_(
+                                [RoomMode.REPLAY.value, RoomMode.ARCHIVED.value]
+                            ),
+                        )
+                        .order_by(RoomPlaybackStateRecord.room_id)
+                    )
+                ).all()
+            except DBAPIError as exc:
+                if getattr(exc.orig, "sqlstate", None) == "55P03":
+                    return 0
+                raise
+        recovered = 0
+        for room_id in candidates:
+            # Same lock order as claims and fenced writes: playback, then room.
+            # One short transaction per candidate; recheck after both locks.
+            async with self.database.session_factory() as session:
+                record = await self._lock_replay(session, room_id)
+                now = await session.scalar(select(func.clock_timestamp()))
+                if (
+                    record is None
+                    or record.is_paused
+                    or (
+                        record.replay_owner_token is not None
+                        and record.replay_owner_expires_at is not None
+                        and record.replay_owner_expires_at > now
+                    )
+                ):
+                    continue
+                room = await self._try_lock_replay_room(session, room_id)
+                if (
+                    room is None
+                    or room.status != RoomStatus.REPLAYING.value
+                    or room.mode not in {RoomMode.REPLAY.value, RoomMode.ARCHIVED.value}
+                ):
+                    continue
+                record.is_paused = True
+                record.replay_owner_token = None
+                record.replay_owner_expires_at = None
+                room.status = RoomStatus.PAUSED.value
+                await session.commit()
+                recovered += 1
+        return recovered
+
     async def get_playback(self, room_id: UUID) -> RoomPlaybackState:
         async with self.database.session_factory() as session:
-            record = await session.get(RoomPlaybackStateRecord, room_id)
-            if record is None:
-                record = RoomPlaybackStateRecord(room_id=room_id)
-                session.add(record)
+            projection = (
+                select(RoomPlaybackStateRecord, RaceRoomRecord.discussion_generation)
+                .join(RaceRoomRecord, RaceRoomRecord.id == RoomPlaybackStateRecord.room_id)
+                .where(RoomPlaybackStateRecord.room_id == room_id)
+            )
+            row = (await session.execute(projection)).one_or_none()
+            if row is None:
+                await session.execute(
+                    insert(RoomPlaybackStateRecord)
+                    .values(room_id=room_id)
+                    .on_conflict_do_nothing(index_elements=["room_id"])
+                )
                 await session.commit()
-                await session.refresh(record)
-            return RoomPlaybackState.model_validate(record, from_attributes=True)
+                row = (await session.execute(projection)).one()
+            # Both fields belong to one READ COMMITTED statement snapshot.
+            record, generation = row
+            return RoomPlaybackState.model_validate(record, from_attributes=True).model_copy(
+                update={"discussion_generation": int(generation)}
+            )
+
+    async def get_history_fence(self, slug: str) -> HistoryRoomFence | None:
+        """One SQL statement, no playback creation or catalog/provider side effects.
+
+        Playback generation is projected from the room's single durable generation
+        column (as in get_playback), not a separately stored independent counter.
+        """
+        async with self.database.session_factory() as session:
+            await session.execute(text("SET LOCAL statement_timeout = '500ms'"))
+            row = (
+                await session.execute(
+                    select(
+                        RaceRoomRecord.id,
+                        RaceRoomRecord.session_key,
+                        RaceRoomRecord.mode,
+                        RaceRoomRecord.discussion_generation,
+                        RoomPlaybackStateRecord.current_event_sequence,
+                    )
+                    .outerjoin(
+                        RoomPlaybackStateRecord,
+                        RoomPlaybackStateRecord.room_id == RaceRoomRecord.id,
+                    )
+                    .where(RaceRoomRecord.slug == slug)
+                )
+            ).one_or_none()
+            return HistoryRoomFence(*row) if row is not None else None
 
     async def update_playback(
         self,
@@ -721,8 +1201,12 @@ class SqlRaceRoomRepository:
         playback_speed: float | None = None,
         is_paused: bool | None = None,
         started_at: datetime | None = None,
+        owner_token: UUID | None = None,
+        room_status: RoomStatus | None = None,
+        last_event_at: datetime | None = None,
     ) -> RoomPlaybackState:
-        await self.get_playback(room_id)
+        if owner_token is None:
+            await self.get_playback(room_id)
         values = {"updated_at": datetime.now(UTC)}
         if current_event_sequence is not None:
             values["current_event_sequence"] = current_event_sequence
@@ -736,14 +1220,31 @@ class SqlRaceRoomRepository:
             values["is_paused"] = is_paused
         if started_at is not None:
             values["started_at"] = started_at
-        async with self.database.session_factory() as session:
+        async with self._replay_mutation(
+            room_id, owner_token, lock_room=room_status is not None
+        ) as session:
             await session.execute(
                 update(RoomPlaybackStateRecord)
                 .where(RoomPlaybackStateRecord.room_id == room_id)
                 .values(**values)
             )
-            await session.commit()
-        return await self.get_playback(room_id)
+            if room_status is not None:
+                room_values: dict[str, object] = {"status": room_status.value}
+                if current_lap is not None:
+                    room_values["current_lap"] = current_lap
+                if last_event_at is not None:
+                    room_values["last_event_at"] = last_event_at
+                await session.execute(
+                    update(RaceRoomRecord).where(RaceRoomRecord.id == room_id).values(**room_values)
+                )
+            record = await session.get(RoomPlaybackStateRecord, room_id)
+            generation = await session.scalar(
+                select(RaceRoomRecord.discussion_generation).where(RaceRoomRecord.id == room_id)
+            )
+            result = RoomPlaybackState.model_validate(record, from_attributes=True).model_copy(
+                update={"discussion_generation": int(generation or 1)}
+            )
+            return result
 
     async def max_message_sequence(self, room_id: UUID) -> int:
         statement = select(func.max(RoomMessageRecord.sequence)).where(
@@ -781,26 +1282,27 @@ class SqlRaceRoomRepository:
         *,
         current_lap: int | None = None,
         last_event_at: datetime | None = None,
+        owner_token: UUID | None = None,
     ) -> None:
         values: dict[str, object] = {"status": status.value, "updated_at": datetime.now(UTC)}
         if current_lap is not None:
             values["current_lap"] = current_lap
         if last_event_at is not None:
             values["last_event_at"] = last_event_at
-        async with self.database.session_factory() as session:
+        async with self._replay_mutation(room_id, owner_token, lock_room=True) as session:
             await session.execute(
                 update(RaceRoomRecord).where(RaceRoomRecord.id == room_id).values(**values)
             )
-            await session.commit()
 
     async def mark_generation_status(
         self,
         room_id: UUID,
         status: ChatGenerationStatus,
         *,
+        expected_generation: int,
         generation_version: str,
         error: str | None = None,
-    ) -> None:
+    ) -> bool:
         now = datetime.now(UTC)
         values: dict[str, object | None] = {
             "chat_generation_status": status.value,
@@ -819,15 +1321,38 @@ class SqlRaceRoomRepository:
         }:
             values["generation_completed_at"] = now
         async with self.database.session_factory() as session:
-            await session.execute(
-                update(RaceRoomRecord).where(RaceRoomRecord.id == room_id).values(**values)
+            result = await session.execute(
+                update(RaceRoomRecord)
+                .where(
+                    RaceRoomRecord.id == room_id,
+                    RaceRoomRecord.discussion_generation == expected_generation,
+                )
+                .values(**values)
             )
             await session.commit()
+            return bool(result.rowcount)
 
-    async def archive_generated_messages(self, room_id: UUID, generation_version: str) -> int:
+    async def archive_generated_messages(
+        self,
+        room_id: UUID,
+        generation_version: str,
+        *,
+        expected_generation: int,
+    ) -> int:
         """Soft-hide one generated version without deleting evidence or user content."""
         now = datetime.now(UTC)
         async with self.database.session_factory() as session:
+            generation = (
+                await session.execute(
+                    select(RaceRoomRecord.discussion_generation)
+                    .where(RaceRoomRecord.id == room_id)
+                    .with_for_update()
+                )
+            ).scalar_one_or_none()
+            if generation != expected_generation:
+                raise DiscussionGenerationChangedError(
+                    "Discussion generation changed; do not archive current messages"
+                )
             result = await session.execute(
                 update(RoomMessageRecord)
                 .where(
@@ -883,9 +1408,16 @@ class SqlRaceRoomRepository:
             await session.commit()
             return int(result.rowcount or 0)
 
-    async def reset_discussion(self, room_id: UUID) -> None:
+    async def begin_discussion_restart(
+        self,
+        room_id: UUID,
+        *,
+        owner_token: UUID,
+        started_at: datetime,
+    ) -> RoomPlaybackState:
+        """Atomically start a new empty discussion generation in a safe paused state."""
         message_ids = select(RoomMessageRecord.id).where(RoomMessageRecord.room_id == room_id)
-        async with self.database.session_factory() as session:
+        async with self._replay_mutation(room_id, owner_token, lock_room=True) as session:
             await session.execute(
                 delete(MessageEvidenceRecord).where(
                     MessageEvidenceRecord.message_id.in_(message_ids)
@@ -897,35 +1429,34 @@ class SqlRaceRoomRepository:
             await session.execute(
                 update(RaceRoomRecord)
                 .where(RaceRoomRecord.id == room_id)
-                .values(message_count=0, current_lap=None, last_event_at=None)
-            )
-            await session.commit()
-
-    async def delete_empty_development_room(self, slug: str) -> bool:
-        """Retire a superseded fixture without touching rooms that contain discussion."""
-        async with self.database.session_factory() as session:
-            room_id = (
-                await session.execute(
-                    select(RaceRoomRecord.id)
-                    .where(
-                        RaceRoomRecord.slug == slug,
-                        RaceRoomRecord.is_development.is_(True),
-                        RaceRoomRecord.message_count == 0,
-                        ~select(RoomMessageRecord.id)
-                        .where(RoomMessageRecord.room_id == RaceRoomRecord.id)
-                        .exists(),
-                    )
-                    .with_for_update()
+                .values(
+                    discussion_generation=RaceRoomRecord.discussion_generation + 1,
+                    message_count=0,
+                    generated_message_count=0,
+                    last_generated_sequence=0,
+                    current_lap=None,
+                    last_event_at=None,
+                    status=RoomStatus.PAUSED.value,
+                    updated_at=started_at,
                 )
-            ).scalar_one_or_none()
-            if room_id is None:
-                return False
-            await session.execute(
-                delete(RoomPlaybackStateRecord).where(RoomPlaybackStateRecord.room_id == room_id)
             )
             await session.execute(
-                delete(RaceRoomAgentRecord).where(RaceRoomAgentRecord.room_id == room_id)
+                update(RoomPlaybackStateRecord)
+                .where(RoomPlaybackStateRecord.room_id == room_id)
+                .values(
+                    current_event_sequence=0,
+                    current_message_sequence=0,
+                    current_lap=0,
+                    playback_speed=1,
+                    is_paused=True,
+                    started_at=started_at,
+                    updated_at=started_at,
+                )
             )
-            await session.execute(delete(RaceRoomRecord).where(RaceRoomRecord.id == room_id))
-            await session.commit()
-            return True
+            playback = await session.get(RoomPlaybackStateRecord, room_id)
+            generation = await session.scalar(
+                select(RaceRoomRecord.discussion_generation).where(RaceRoomRecord.id == room_id)
+            )
+            return RoomPlaybackState.model_validate(playback, from_attributes=True).model_copy(
+                update={"discussion_generation": int(generation)}
+            )

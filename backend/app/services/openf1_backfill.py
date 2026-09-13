@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 from __future__ import annotations
 
-import re
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
@@ -21,6 +20,7 @@ from app.domain.rooms import (
 )
 from app.providers.openf1 import OPENF1_HIGH_FREQUENCY_ENDPOINTS, OpenF1RestClient
 from app.services.historical import HistoricalOpenF1Adapter
+from app.services.provider_matching import MatchConfidence, OpenF1SessionMatcher
 from app.storage.backfill_repository import SqlOpenF1BackfillJobRepository
 from app.storage.database import Database
 from app.storage.models import (
@@ -108,7 +108,17 @@ class OpenF1RoomFinalizer:
     def __init__(self, database: Database) -> None:
         self.database = database
 
-    async def finalize(self, session_key: str) -> RoomFinalizationResult:
+    async def finalize(
+        self,
+        session_key: str,
+        *,
+        live: bool = False,
+        live_capture: bool = False,
+        terminal_confirmed: bool = False,
+        partial: bool = False,
+    ) -> RoomFinalizationResult:
+        if live_capture and not live and not terminal_confirmed:
+            raise ValueError("Live completion requires consumed terminal control")
         async with self.database.session_factory() as session:
             room = (
                 await session.execute(
@@ -150,38 +160,18 @@ class OpenF1RoomFinalizer:
             has_results = counts.get("session_result", 0) > 0
             current = SourceAvailability(room.source_availability)
             availability = self.classify(counts, normalized_count, current=current)
-            replay_available = availability in {
-                SourceAvailability.LIMITED,
-                SourceAvailability.TELEMETRY,
-            }
-            values: dict[str, Any] = {
-                "ingestion_status": (
-                    IngestionStatus.READY.value
-                    if replay_available
-                    else IngestionStatus.PARTIAL.value
-                    if availability is not SourceAvailability.UNAVAILABLE
-                    else IngestionStatus.UNAVAILABLE.value
-                ),
-                "source_availability": availability.value,
-                "replay_available": replay_available,
-                "results_available": bool(room.results_available or has_results),
-                "telemetry_quality": availability.value,
-                "last_event_at": last_event_at or room.last_event_at,
-                "is_development": False,
-                "updated_at": datetime.now(UTC),
-            }
-            if replay_available:
-                values.update(
-                    status=RoomStatus.COMPLETED.value,
-                    mode=RoomMode.ARCHIVED.value,
-                    eligibility_status=RoomEligibilityStatus.ELIGIBLE_HISTORICAL.value,
-                )
-            elif availability is SourceAvailability.UNAVAILABLE:
-                values.update(
-                    status=RoomStatus.PENDING.value,
-                    replay_available=False,
-                    eligibility_status=RoomEligibilityStatus.PROVIDER_PENDING.value,
-                )
+            values, replay_available = self.room_values(
+                availability=availability,
+                live=live,
+                has_results=has_results,
+                prior_results_available=room.results_available,
+                last_event_at=last_event_at,
+                prior_last_event_at=room.last_event_at,
+            )
+            if (live_capture or partial) and availability is not SourceAvailability.UNAVAILABLE:
+                # Bounded live windows are usable immediately, but still need
+                # the historical reconciler to fill earlier and late-published rows.
+                values["ingestion_status"] = IngestionStatus.PARTIAL.value
             await session.execute(
                 update(RaceRoomRecord).where(RaceRoomRecord.id == room.id).values(**values)
             )
@@ -194,6 +184,60 @@ class OpenF1RoomFinalizer:
                 replay_available=replay_available,
                 results_available=bool(room.results_available or has_results),
             )
+
+    @staticmethod
+    def room_values(
+        *,
+        availability: SourceAvailability,
+        live: bool,
+        has_results: bool,
+        prior_results_available: bool,
+        last_event_at: datetime | None,
+        prior_last_event_at: datetime | None,
+    ) -> tuple[dict[str, Any], bool]:
+        has_stored_data = availability is not SourceAvailability.UNAVAILABLE
+        replay_available = (
+            availability
+            in {
+                SourceAvailability.TIMING_ONLY,
+                SourceAvailability.LIMITED,
+                SourceAvailability.TELEMETRY,
+            }
+            and not live
+        )
+        values: dict[str, Any] = {
+            "ingestion_status": (
+                IngestionStatus.READY.value
+                if availability in {SourceAvailability.LIMITED, SourceAvailability.TELEMETRY}
+                else IngestionStatus.PARTIAL.value
+                if has_stored_data
+                else IngestionStatus.UNAVAILABLE.value
+            ),
+            "source_availability": availability.value,
+            "replay_available": replay_available,
+            "results_available": bool(prior_results_available or has_results),
+            "telemetry_quality": availability.value,
+            "last_event_at": last_event_at or prior_last_event_at,
+            "updated_at": datetime.now(UTC),
+        }
+        if live:
+            values.update(
+                status=RoomStatus.LIVE.value,
+                mode=RoomMode.LIVE.value,
+                eligibility_status=RoomEligibilityStatus.ELIGIBLE_LIVE.value,
+            )
+        elif has_stored_data:
+            values.update(
+                status=RoomStatus.COMPLETED.value,
+                mode=RoomMode.ARCHIVED.value,
+                eligibility_status=RoomEligibilityStatus.ELIGIBLE_HISTORICAL.value,
+            )
+        else:
+            values.update(
+                status=RoomStatus.PENDING.value,
+                eligibility_status=RoomEligibilityStatus.PROVIDER_PENDING.value,
+            )
+        return values, replay_available
 
     @classmethod
     def classify(
@@ -235,6 +279,7 @@ class OpenF1HistoricalBackfillService:
         rooms: SqlRaceRoomRepository,
         database: Database,
         finalizer: OpenF1RoomFinalizer,
+        matcher: OpenF1SessionMatcher | None = None,
         cli_safe: bool = False,
     ) -> None:
         self.settings = settings
@@ -244,6 +289,7 @@ class OpenF1HistoricalBackfillService:
         self.rooms = rooms
         self.database = database
         self.finalizer = finalizer
+        self.matcher = matcher or OpenF1SessionMatcher()
         self.cli_safe = cli_safe
 
     async def resolve(
@@ -262,50 +308,51 @@ class OpenF1HistoricalBackfillService:
             rows = await self.client.sessions(session_key=resolved_key)
             if len(rows) != 1:
                 raise ValueError("Existing session_key did not resolve uniquely")
-            return self._resolution(rows[0], room, "existing_session_key", 1)
+            row = rows[0]
+            if str(row.get("session_key")) != str(resolved_key):
+                raise ValueError("Provider returned a different session_key")
+            if row.get("year") is not None and str(row["year"]) != str(season):
+                raise ValueError("Existing session_key belongs to a different season")
+            if room is not None:
+                if self._session_type(row) is not room.session_type:
+                    raise ValueError("Existing session_key has the wrong session type")
+                if room.meeting_key is not None and str(row.get("meeting_key")) != str(
+                    room.meeting_key
+                ):
+                    raise ValueError("Existing session_key belongs to a different meeting")
+                start = self._date(row.get("date_start"))
+                if (
+                    start is None
+                    or abs((start - self._aware(room.scheduled_start)).total_seconds()) > 12 * 3600
+                ):
+                    raise ValueError("Existing session_key has an incompatible session date")
+            return self._resolution(row, room, "existing_session_key", 1)
 
         sessions = await self.client.sessions(year=season)
-        expected_type = room.session_type if room else None
-        candidates = [
-            row
-            for row in sessions
-            if expected_type is None or self._session_type(row) is expected_type
-        ]
-        expected_meeting = meeting_key or (room.meeting_key if room else None)
-        if expected_meeting:
-            exact = [
-                row for row in candidates if str(row.get("meeting_key")) == str(expected_meeting)
-            ]
-            if len(exact) == 1:
-                return self._resolution(exact[0], room, "meeting_key_and_session_type", 1)
-            if len(exact) > 1:
-                candidates = exact
-
         if room is None:
             raise ValueError("A room slug is required when session_key is not supplied")
-        ranked: list[tuple[float, float, dict[str, Any]]] = []
-        for row in candidates:
-            start = self._date(row.get("date_start"))
-            if start is None:
-                continue
-            delta = abs((start - self._aware(room.scheduled_start)).total_seconds()) / 3600
-            if delta > 72:
-                continue
-            provider_text = self._text(
-                " ".join(
-                    str(row.get(key) or "")
-                    for key in ("meeting_name", "circuit_short_name", "country_name")
-                )
-            )
-            room_text = self._text(f"{room.race_name} {room.circuit_name} {room.country}")
-            overlap = len(set(provider_text.split()) & set(room_text.split()))
-            ranked.append((overlap - delta / 100, delta, row))
-        ranked.sort(key=lambda item: item[0], reverse=True)
-        if not ranked:
-            raise ValueError("No confident OpenF1 session match was found")
-        if len(ranked) > 1 and abs(ranked[0][0] - ranked[1][0]) < 0.05:
+        if meeting_key is not None and room.meeting_key != meeting_key:
+            room = room.model_copy(update={"meeting_key": meeting_key})
+        match = self.matcher.match_room(room, sessions)
+        if match.confidence is MatchConfidence.AMBIGUOUS:
             raise ValueError("OpenF1 session match is ambiguous")
-        return self._resolution(ranked[0][2], room, "metadata_date_type", len(ranked), ranked[0][1])
+        if not match.resolved or match.session is None:
+            raise ValueError(f"No confident OpenF1 session match was found: {match.reason}")
+        method = "meeting_key_and_session_type" if room.meeting_key else "metadata_date_type"
+        start = self._date(match.session.get("date_start"))
+        delta = (
+            abs((start - self._aware(room.scheduled_start)).total_seconds()) / 3600
+            if start is not None
+            else None
+        )
+        return self._resolution(
+            match.session,
+            room,
+            method,
+            len(sessions),
+            delta,
+            confidence=match.confidence.value,
+        )
 
     async def run(
         self,
@@ -369,13 +416,16 @@ class OpenF1HistoricalBackfillService:
             completed = set(job.completed_endpoints)
             skipped: list[str] = []
             for endpoint in ["sessions", *selected]:
-                if endpoint in completed:
+                if resume and endpoint in completed:
                     skipped.append(endpoint)
                     continue
                 try:
                     await self.jobs.start_endpoint(season, resolution.session_key, endpoint)
                     result = await self.adapter.ingest_session(
-                        resolution.session_key, [endpoint], update_room=False
+                        resolution.session_key,
+                        [endpoint],
+                        update_room=False,
+                        session_type_hint=resolution.normalized_provider_session_name,
                     )
                     await self.jobs.complete_endpoint(
                         season,
@@ -392,10 +442,13 @@ class OpenF1HistoricalBackfillService:
                     # Durable successful checkpoints are never discarded merely
                     # because one optional OpenF1 dataset is unavailable.
                     continue
-            final = await self.finalizer.finalize(resolution.session_key)
             refreshed = await self.jobs.get(season, resolution.session_key)
             assert refreshed is not None
-            partial = bool(refreshed.failed_endpoint)
+            partial = bool(refreshed.failed_endpoint) or any(
+                endpoint not in refreshed.completed_endpoints
+                for endpoint in ["sessions", *selected]
+            )
+            final = await self.finalizer.finalize(resolution.session_key, partial=partial)
             await self.jobs.finish(season, resolution.session_key, partial=partial)
             summary = self._summary(
                 BackfillStatus.PARTIAL if partial else BackfillStatus.COMPLETED,
@@ -440,6 +493,7 @@ class OpenF1HistoricalBackfillService:
         method: str,
         candidates: int,
         delta: float | None = None,
+        confidence: str | None = None,
     ) -> SessionResolution:
         key = row.get("session_key")
         if key is None:
@@ -450,7 +504,8 @@ class OpenF1HistoricalBackfillService:
             meeting_key=str(row["meeting_key"]) if row.get("meeting_key") is not None else None,
             room_slug=room.slug if room else None,
             match_method=method,
-            confidence="high" if method != "metadata_date_type" or (delta or 0) <= 12 else "medium",
+            confidence=confidence
+            or ("high" if method != "metadata_date_type" or (delta or 0) <= 12 else "medium"),
             candidate_count=candidates,
             date_delta_hours=delta,
             normalized_provider_session_name=(session_type.value if session_type else "unknown"),
@@ -482,10 +537,6 @@ class OpenF1HistoricalBackfillService:
     @staticmethod
     def _aware(value: datetime) -> datetime:
         return value if value.tzinfo else value.replace(tzinfo=UTC)
-
-    @staticmethod
-    def _text(value: str) -> str:
-        return re.sub(r"[^a-z0-9]+", " ", value.casefold()).strip()
 
 
 def backfill_job_status(record: OpenF1BackfillJobRecord | None) -> dict[str, Any] | None:

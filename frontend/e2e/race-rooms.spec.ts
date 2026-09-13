@@ -2,8 +2,15 @@
 import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
 
 const API_BASE_URL = process.env.E2E_API_URL ?? "http://localhost:8764";
-const DEVELOPMENT_FIXTURE_ENABLED = process.env.E2E_DEVELOPMENT_FIXTURE === "true";
 const VIEWPORT_WIDTHS = [1440, 1280, 1024, 768, 390, 320] as const;
+const RACE_SCENARIO_CANDIDATE_LIMIT = 5;
+const REPLAY_OPERATOR_PASSWORD = process.env.E2E_REPLAY_OPERATOR_PASSWORD;
+
+function replayOperatorHeaders(): Record<string, string> | undefined {
+  return REPLAY_OPERATOR_PASSWORD
+    ? { "X-Apex-Replay-Password": Buffer.from(REPLAY_OPERATOR_PASSWORD, "utf-8").toString("base64") }
+    : undefined;
+}
 
 type SessionSummary = {
   session_type: string;
@@ -18,6 +25,7 @@ type SessionSummary = {
 type EventWeekend = {
   event_slug: string;
   event_name: string;
+  round: number;
   weekend_start: string;
   weekend_status: "live" | "completed" | "upcoming";
   is_sprint_weekend: boolean;
@@ -26,6 +34,16 @@ type EventWeekend = {
 
 type EventResponse = { events: EventWeekend[]; total: number };
 type RoomListResponse = { total: number };
+type ScenarioRoom = { ingestion_status: string; session_key: string | null };
+type RoomDetailResponse = {
+  room: ScenarioRoom;
+  intelligence: { current_battles: unknown[] };
+};
+type PlaybackResponse = {
+  room: ScenarioRoom;
+  playback: { current_event_sequence: number };
+};
+type EventFactsResponse = { count: number };
 
 function collectBrowserErrors(page: Page): string[] {
   const errors: string[] = [];
@@ -54,30 +72,59 @@ async function replayRoom(request: APIRequestContext): Promise<{ event: EventWee
     const session = event.sessions.find((item) => item.room_slug && item.replay_available);
     if (session) return { event, session };
   }
-  if (DEVELOPMENT_FIXTURE_ENABLED) {
-    const fixture = await request.get(`${API_BASE_URL}/api/v1/race-rooms/day3-validation-room`);
-    expect(fixture.ok(), "the isolated CI replay fixture should be available").toBeTruthy();
-    return {
-      event: {
-        event_slug: "day3-validation",
-        event_name: "Day 3 Validation",
-        weekend_start: "2026-07-17T10:00:00Z",
-        weekend_status: "completed",
-        is_sprint_weekend: false,
-        sessions: [],
-      },
-      session: {
-        session_type: "RACE",
-        display_name: "Day 3 Validation Room",
-        scheduled_start: "2026-07-17T10:00:00Z",
-        status: "completed",
-        room_slug: "day3-validation-room",
-        eligibility: "replay_ready",
-        replay_available: true,
-      },
-    };
-  }
   throw new Error("The production smoke test needs at least one completed replay-ready session");
+}
+
+async function raceLikeReplayRoom(
+  request: APIRequestContext,
+): Promise<{ event: EventWeekend; session: SessionSummary }> {
+  const catalog = await eventCatalog(request);
+  const candidates = [...catalog.events]
+    .filter((event) => event.weekend_status === "completed")
+    .sort((left, right) => compareWeekendChronology(left, right) || left.event_slug.localeCompare(right.event_slug))
+    .flatMap((event) => event.sessions
+      .filter((session) => session.room_slug && session.replay_available && session.session_type === "RACE")
+      .map((session) => ({ event, session })))
+    .slice(0, RACE_SCENARIO_CANDIDATE_LIMIT);
+
+  for (const candidate of candidates) {
+    const { event, session } = candidate;
+    if (!session.room_slug) continue;
+    const detailUrl = `${API_BASE_URL}/api/v1/race-rooms/${session.room_slug}`;
+    const initialDetail = await request.get(detailUrl);
+    if (!initialDetail.ok()) continue;
+    const initial = await initialDetail.json() as RoomDetailResponse;
+    if (initial.room.ingestion_status !== "ready" || !initial.room.session_key) continue;
+
+    const seek = await request.post(`${detailUrl}/playback`, {
+      headers: replayOperatorHeaders(),
+      data: { action: "seek_to_lap", lap_number: 6 },
+    });
+    if (!seek.ok()) continue;
+    const sought = await seek.json() as PlaybackResponse;
+    const cursor = sought.playback.current_event_sequence;
+    if (!Number.isSafeInteger(cursor) || cursor <= 0) continue;
+
+    const lapSixDetail = await request.get(detailUrl);
+    if (!lapSixDetail.ok()) continue;
+    const lapSix = await lapSixDetail.json() as RoomDetailResponse;
+    if (!lapSix.intelligence.current_battles.length) continue;
+
+    const params = new URLSearchParams({
+      category: "PITS",
+      limit: "1",
+      before_sequence_number: String(cursor),
+    });
+    const pits = await request.get(
+      `${API_BASE_URL}/api/v1/sessions/${encodeURIComponent(initial.room.session_key)}/events?${params}`,
+    );
+    if (!pits.ok()) continue;
+    const pitFacts = await pits.json() as EventFactsResponse;
+    if (pitFacts.count > 0) return { event, session };
+  }
+  throw new Error(
+    `The Sprint 3 smoke test needs a ready completed Grand Prix race with lap-six battles and pit history; checked at most ${RACE_SCENARIO_CANDIDATE_LIMIT} candidates`,
+  );
 }
 
 async function expectNoHorizontalOverflow(page: Page): Promise<void> {
@@ -90,7 +137,89 @@ function expectAscending(values: number[]): void {
   expect(values).toEqual([...values].sort((left, right) => left - right));
 }
 
+function weekendTime(event: Pick<EventWeekend, "weekend_start">): number {
+  const time = new Date(event.weekend_start).getTime();
+  return Number.isFinite(time) ? time : Number.POSITIVE_INFINITY;
+}
+
+// Keep this identical to the catalog's completed-weekend comparator.
+function compareWeekendChronology(
+  left: Pick<EventWeekend, "weekend_start" | "round">,
+  right: Pick<EventWeekend, "weekend_start" | "round">,
+): number {
+  return weekendTime(left) - weekendTime(right) || left.round - right.round;
+}
+
 test.describe.configure({ mode: "serial" });
+
+test("normalizes completed chronology for invalid dates and equal timestamps", () => {
+  const events = [
+    { event_name: "Invalid Five", weekend_start: "not-a-date", round: 5 },
+    { event_name: "Equal Four", weekend_start: "2026-03-27T02:00:00Z", round: 4 },
+    { event_name: "Earlier", weekend_start: "2026-03-06T01:00:00Z", round: 1 },
+    { event_name: "Invalid Two", weekend_start: "still-not-a-date", round: 2 },
+    { event_name: "Equal Two", weekend_start: "2026-03-27T02:00:00Z", round: 2 },
+  ];
+
+  const names = [...events]
+    .sort(compareWeekendChronology)
+    .map((event) => event.event_name);
+
+  expect(names).toEqual(["Earlier", "Equal Two", "Equal Four", "Invalid Two", "Invalid Five"]);
+});
+
+test("selects a bounded replay candidate with lap-six battles and pit history", async () => {
+  const events = ["no-facts", "with-facts"].map((slug, index) => ({
+    event_slug: `${slug}-event`,
+    event_name: `${slug} Grand Prix`,
+    round: index + 1,
+    weekend_start: `2026-03-0${index + 1}T00:00:00Z`,
+    weekend_status: "completed" as const,
+    is_sprint_weekend: false,
+    sessions: [{
+      session_type: "RACE",
+      display_name: "Race",
+      scheduled_start: `2026-03-0${index + 1}T12:00:00Z`,
+      status: "completed",
+      room_slug: slug,
+      eligibility: "already_exists",
+      replay_available: true,
+    }],
+  }));
+  const calls: string[] = [];
+  const response = (body: unknown) => ({
+    ok: () => true,
+    status: () => 200,
+    json: async () => body,
+  });
+  const request = {
+    get: async (url: string) => {
+      calls.push(`GET ${url}`);
+      if (url.includes("/sessions/with-facts-session/events")) return response({ count: 1, events: [{ event_type: "PIT_STOP" }] });
+      if (url.includes("/race-rooms/events?")) return response({ events, total: events.length });
+      const slug = url.endsWith("/with-facts") ? "with-facts" : "no-facts";
+      return response({
+        room: { ingestion_status: "ready", session_key: `${slug}-session` },
+        intelligence: { current_battles: slug === "with-facts" ? [{ id: "battle" }] : [] },
+      });
+    },
+    post: async (url: string, options: { data?: unknown }) => {
+      calls.push(`POST ${url} ${JSON.stringify(options.data)}`);
+      const slug = url.includes("with-facts") ? "with-facts" : "no-facts";
+      return response({
+        room: { ingestion_status: "ready", session_key: `${slug}-session` },
+        playback: { current_event_sequence: 60 },
+      });
+    },
+  } as unknown as APIRequestContext;
+
+  const selected = await raceLikeReplayRoom(request);
+
+  expect(selected.session.room_slug).toBe("with-facts");
+  expect(calls).toContain(`POST ${API_BASE_URL}/api/v1/race-rooms/with-facts/playback {"action":"seek_to_lap","lap_number":6}`);
+  expect(calls.some((call) => call.includes("category=PITS") && call.includes("before_sequence_number=60"))).toBe(true);
+  expect(calls.length).toBeLessThanOrEqual(9);
+});
 
 test("introduces Apex Arena on a responsive, theme-aware landing page", async ({ page }) => {
   const browserErrors = collectBrowserErrors(page);
@@ -125,10 +254,17 @@ test("groups real standard and Sprint weekends in chronological public categorie
   const sprint = catalog.events.find((event) => event.is_sprint_weekend);
 
   expect(catalog.events.length).toBeGreaterThan(0);
-  expectAscending(completed.map((event) => Date.parse(event.weekend_start)));
+  expect(completed.length, "the 2026 calendar should contain completed weekends").toBeGreaterThan(0);
   expectAscending(upcoming.map((event) => Date.parse(event.weekend_start)));
-  expect(standard?.sessions.map((session) => session.session_type)).toEqual(["QUALIFYING", "RACE"]);
+  expect(standard?.sessions.map((session) => session.session_type)).toEqual([
+    "PRACTICE_1",
+    "PRACTICE_2",
+    "PRACTICE_3",
+    "QUALIFYING",
+    "RACE",
+  ]);
   expect(sprint?.sessions.map((session) => session.session_type)).toEqual([
+    "PRACTICE_1",
     "SPRINT_QUALIFYING",
     "SPRINT",
     "QUALIFYING",
@@ -142,12 +278,14 @@ test("groups real standard and Sprint weekends in chronological public categorie
   await expect(page.getByRole("heading", { name: "Live This Weekend" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Completed Events" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Upcoming Events" })).toBeVisible();
-  await expect(page.getByText("Day 3 Validation Room")).toHaveCount(0);
+  const completedNames = [...completed]
+    .sort(compareWeekendChronology)
+    .map((event) => event.event_name);
+  await expect(page.locator('section[aria-labelledby="completed-events-title"]').getByRole("heading", { level: 3 }))
+    .toHaveText(completedNames);
   if (sprint) {
     await expect(page.locator(".event-card").filter({ hasText: sprint.event_name }).getByText("Sprint weekend")).toBeVisible();
   }
-  const fixture = await request.get(`${API_BASE_URL}/api/v1/race-rooms/day3-validation-room`);
-  expect(fixture.status()).toBe(DEVELOPMENT_FIXTURE_ENABLED ? 200 : 404);
   await expectNoHorizontalOverflow(page);
   expect(browserErrors).toEqual([]);
 });
@@ -188,16 +326,19 @@ test("keeps a replay conversation compact, inspectable, and session-aware", asyn
   await page.setViewportSize({ width: 1280, height: 800 });
   await page.goto(`/rooms/${session.room_slug}`);
   await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
-  await expect(page.getByRole("img", { name: /2026 circuit layout/ })).toBeVisible();
+  await expect(page.getByRole("region", { name: "Circuit map" }).getByRole("img", { name: /2026 circuit layout/ })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Session conversation" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Session timeline" })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Track dossier" })).toBeVisible();
-  if (!DEVELOPMENT_FIXTURE_ENABLED || session.room_slug !== "day3-validation-room") {
-    await expect(page.locator(".circuit-records > div")).toHaveCount(3);
-  }
-  await expect(page.getByRole("heading", { name: "Track weather" })).toBeVisible();
-  await expect(page.locator(".weather-card__notice")).toBeVisible();
+  const dossier = page.locator(".circuit-dossier");
+    await expect(dossier.locator("summary")).toContainText("Track dossier");
+  await dossier.locator("summary").click();
+  await expect(dossier.locator(".circuit-records > div")).toHaveCount(3);
+  const weather = page.locator(".weather-card");
+  await weather.locator("summary").click();
+  await expect(weather.locator(".weather-card__notice")).toBeVisible();
   await expect(page.getByTestId("playback-controls")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Unlock controls" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Start replay" })).toHaveCount(0);
   await expect(page.getByTestId("agent-roster").locator(".agent-profile")).toHaveCount(0);
   await page.getByTestId("agent-roster").getByRole("button", { name: /agents in this room/ }).click();
   await expect(page.getByTestId("agent-roster").locator(".agent-profile")).toHaveCount(5);
@@ -222,6 +363,71 @@ test("keeps a replay conversation compact, inspectable, and session-aware", asyn
   expect(browserErrors).toEqual([]);
 });
 
+test("turns a race replay into persistent Fan and Analyst intelligence", async ({ page, request }) => {
+  test.skip(!REPLAY_OPERATOR_PASSWORD, "E2E_REPLAY_OPERATOR_PASSWORD is required for replay mutations");
+  const browserErrors = collectBrowserErrors(page);
+  const { session } = await raceLikeReplayRoom(request);
+  const seek = await request.post(
+    `${API_BASE_URL}/api/v1/race-rooms/${session.room_slug}/playback`,
+    {
+      headers: replayOperatorHeaders(),
+      data: { action: "seek_to_lap", lap_number: 6 },
+    },
+  );
+  expect(seek.ok(), `lap seek returned HTTP ${seek.status()}`).toBeTruthy();
+
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto(`/rooms/${session.room_slug}`);
+  const fan = page.getByRole("button", { name: "Fan" });
+  const analyst = page.getByRole("button", { name: "Analyst" });
+  await expect(fan).toHaveAttribute("aria-pressed", "true");
+
+  const battleCards = page.locator('article[aria-label^="Battle for position"]');
+  await expect.poll(() => battleCards.count()).toBeGreaterThan(0);
+  expect(await battleCards.count()).toBeLessThanOrEqual(3);
+  await expect(async () => {
+    const firstBattle = battleCards.first();
+    await expect(firstBattle).toContainText(/closing|stable|falling back/i, { timeout: 1_000 });
+    const selectedBattleDriver = firstBattle.getByRole("button").last();
+    await selectedBattleDriver.scrollIntoViewIfNeeded({ timeout: 1_000 });
+    await expect(selectedBattleDriver).toBeInViewport({ timeout: 1_000 });
+    await selectedBattleDriver.click({ timeout: 1_000 });
+    await expect(selectedBattleDriver).toHaveAttribute("aria-pressed", "true", { timeout: 1_000 });
+  }).toPass({ timeout: 10_000 });
+
+  const feed = page.locator("section").filter({
+    has: page.getByRole("heading", { name: "Important events" }),
+  });
+  await feed.getByRole("button", { name: "Race control" }).click();
+  await expect(feed.getByText("Timing fact").first()).toBeVisible();
+  await feed.getByRole("button", { name: "Pits" }).click();
+  for (let pageNumber = 0; pageNumber < 15 && await feed.locator("li").count() === 0; pageNumber += 1) {
+    const loadMore = feed.getByRole("button", { name: "Load more events" });
+    await expect(loadMore).toBeVisible();
+    const response = page.waitForResponse((candidate) => (
+      candidate.url().includes(`/api/sessions/`)
+      && candidate.url().includes("after_sequence_number=")
+    ));
+    await loadMore.click();
+    await response;
+  }
+  await expect(feed.locator("li").first()).toContainText(/pit/i);
+
+  await analyst.click();
+  await expect(analyst).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByText("Battle evidence").first()).toBeVisible();
+  await expect(page.getByText("Timing-only view")).toBeVisible();
+  await page.reload();
+  await expect(analyst).toHaveAttribute("aria-pressed", "true");
+
+  await fan.click();
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(page.getByRole("heading", { name: "Current battles" })).toBeVisible();
+  expect(await battleCards.count()).toBeLessThanOrEqual(3);
+  await expectNoHorizontalOverflow(page);
+  expect(browserErrors).toEqual([]);
+});
+
 for (const width of VIEWPORT_WIDTHS) {
   test(`keeps navigation, grouped events, and a real room usable at ${width}px`, async ({ page, request }) => {
     const browserErrors = collectBrowserErrors(page);
@@ -229,12 +435,12 @@ for (const width of VIEWPORT_WIDTHS) {
     await page.setViewportSize({ width, height: width <= 768 ? 844 : 800 });
     await page.goto("/rooms");
     await expect(page.getByRole("heading", { name: "Race Rooms" })).toBeVisible();
-    await expect(page.locator(".app-nav")).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
-    await expect(page.locator(".app-nav")).toHaveCSS("position", "absolute");
+    const navigationShell = page.locator("main > header").first();
+    await expect(navigationShell).toHaveCSS("position", "sticky");
     await expectNoHorizontalOverflow(page);
 
     const menuButton = page.getByRole("button", { name: "Open navigation menu" });
-    if (width <= 800) {
+    if (width <= 720) {
       await expect(menuButton).toBeVisible();
       await menuButton.click();
       await expect(page.getByRole("dialog", { name: "Mobile navigation" })).toBeVisible();

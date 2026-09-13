@@ -1,0 +1,4 @@
+.toggle { display: inline-grid; grid-template-columns: 1fr 1fr; min-width: 150px; padding: 2px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); }
+.toggle button { min-height: 30px; padding: 5px 10px; border: 0; border-radius: 4px; background: transparent; color: var(--muted); cursor: pointer; font: 750 .58rem var(--font-mono, ui-monospace), monospace; text-transform: uppercase; }
+.toggle button[aria-pressed="true"] { background: var(--foreground); color: var(--background); }
+.toggle button:focus-visible { outline: 2px solid var(--apex-cyan); outline-offset: 2px; }

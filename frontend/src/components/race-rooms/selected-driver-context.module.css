@@ -1,0 +1,14 @@
+.context { min-width: 0; padding: 14px; border-block: 1px solid var(--line); background: color-mix(in srgb, var(--panel) 88%, var(--apex-cyan) 12%); }
+.context > header { display: flex; align-items: start; justify-content: space-between; gap: 12px; }
+.context header span { color: var(--faint); font: 700 .56rem var(--font-mono, ui-monospace), monospace; letter-spacing: .08em; text-transform: uppercase; }
+.context h2 { margin: 4px 0 0; font-size: .95rem; }
+.context header b { color: var(--apex-gold); font: 800 1rem var(--font-mono, ui-monospace), monospace; }
+.status { display: inline-block; margin: 12px 0 8px; color: var(--muted); font: 800 .64rem var(--font-mono, ui-monospace), monospace; }
+.status_closing, .status_battling { color: var(--apex-mint); }
+.status_under_pressure { color: var(--apex-coral); }
+.context dl { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 0; }
+.context dl div { min-width: 0; }
+.context dt { color: var(--faint); font: 700 .54rem var(--font-mono, ui-monospace), monospace; text-transform: uppercase; }
+.context dd { overflow: hidden; margin: 3px 0 0; font-size: .7rem; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
+.analyst { display: flex; flex-wrap: wrap; gap: 5px 12px; margin-top: 10px; padding-top: 9px; border-top: 1px solid var(--line); color: var(--muted); font: 600 .58rem var(--font-mono, ui-monospace), monospace; }
+@media (max-width: 420px) { .context dl { grid-template-columns: 1fr; } }

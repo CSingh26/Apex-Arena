@@ -7,6 +7,7 @@ from typing import Any
 
 from sqlalchemy import (
     JSON,
+    BigInteger,
     Boolean,
     Date,
     DateTime,
@@ -32,6 +33,24 @@ class TimestampMixin:
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class SessionIntelligenceProgressRecord(Base, TimestampMixin):
+    __tablename__ = "session_intelligence_progress"
+
+    session_key: Mapped[str] = mapped_column(String(80), primary_key=True)
+    algorithm_version: Mapped[str] = mapped_column(String(100))
+    completed_source_id: Mapped[uuid.UUID | None] = mapped_column(nullable=True)
+    completed_source_sequence: Mapped[int] = mapped_column(BigInteger, default=0)
+    completed_through_sequence: Mapped[int] = mapped_column(BigInteger, default=0)
+    pending_source_id: Mapped[uuid.UUID | None] = mapped_column(nullable=True, index=True)
+    pending_source_sequence: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    historical_effects_unverified: Mapped[bool] = mapped_column(Boolean, default=False)
+    failure_code: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    history_reference: Mapped[dict[str, Any] | None] = mapped_column(JSON_TYPE, nullable=True)
+    history_detail_status: Mapped[str] = mapped_column(
+        String(32), default="legacy_history_unverified", server_default="legacy_history_unverified"
     )
 
 
@@ -156,9 +175,19 @@ class NormalizedRaceEventRecord(Base):
     sequence_number: Mapped[int] = mapped_column(Integer)
     event_type: Mapped[str] = mapped_column(String(40), index=True)
     driver_numbers: Mapped[list[int]] = mapped_column(JSON_TYPE, default=list)
+    event_origin: Mapped[str] = mapped_column(String(20), default="SOURCE_FACT", index=True)
+    primary_driver_number: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    secondary_driver_number: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    position_before: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    position_after: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    gap_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    interval_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
     lap_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
     importance: Mapped[float | None] = mapped_column(Float, nullable=True)
+    importance_level: Mapped[str] = mapped_column(String(20), default="LOW", index=True)
     confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    confidence_level: Mapped[str] = mapped_column(String(20), default="HIGH")
+    derivation: Mapped[dict[str, Any] | None] = mapped_column(JSON_TYPE, nullable=True)
     payload: Mapped[dict[str, Any]] = mapped_column(JSON_TYPE)
     dedup_key: Mapped[str] = mapped_column(String(64), index=True)
     is_replay: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -184,6 +213,50 @@ class RaceStateSnapshotRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class SessionHistoryCheckpointRecord(Base):
+    __tablename__ = "session_history_checkpoints"
+    __table_args__ = (
+        UniqueConstraint(
+            "session_key",
+            "algorithm_version",
+            "schema_version",
+            "source_sequence",
+            name="uq_history_checkpoint_revision",
+        ),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    session_key: Mapped[str] = mapped_column(String(80), index=True)
+    algorithm_version: Mapped[str] = mapped_column(String(160))
+    schema_version: Mapped[int] = mapped_column(Integer)
+    source_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
+    source_sequence: Mapped[int] = mapped_column(Integer)
+    checksum: Mapped[str] = mapped_column(String(64))
+    encoded: Mapped[str] = mapped_column(Text)
+    encoded_bytes: Mapped[int] = mapped_column(Integer)
+
+
+class BattleSummaryRecord(Base):
+    __tablename__ = "battle_summaries"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    battle_key: Mapped[str] = mapped_column(String(180), unique=True, index=True)
+    session_key: Mapped[str] = mapped_column(String(80), index=True)
+    lead_driver_number: Mapped[int] = mapped_column(Integer, index=True)
+    chasing_driver_number: Mapped[int] = mapped_column(Integer, index=True)
+    lead_position: Mapped[int] = mapped_column(Integer)
+    chasing_position: Mapped[int] = mapped_column(Integer)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    ended_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    closest_interval_seconds: Mapped[float] = mapped_column(Float)
+    peak_intensity: Mapped[str] = mapped_column(String(20))
+    outcome: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    context: Mapped[dict[str, Any]] = mapped_column(JSON_TYPE, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
 class IngestionRunRecord(Base):
     __tablename__ = "ingestion_runs"
 
@@ -192,6 +265,9 @@ class IngestionRunRecord(Base):
     session_key: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
     status: Mapped[str] = mapped_column(String(30), index=True)
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    heartbeat_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, server_default=func.now()
+    )
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_event_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_error: Mapped[str | None] = mapped_column(String(500), nullable=True)
@@ -284,6 +360,10 @@ class RaceRoomRecord(Base, TimestampMixin):
     country_code: Mapped[str | None] = mapped_column(String(3), nullable=True)
     session_type: Mapped[str] = mapped_column(String(60), default="RACE")
     scheduled_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    capture_anchor_start: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    provider_cancelled: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     actual_start: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     weekend_start: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     weekend_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -303,6 +383,7 @@ class RaceRoomRecord(Base, TimestampMixin):
     chat_generation_status: Mapped[str] = mapped_column(String(30), default="pending")
     generated_message_count: Mapped[int] = mapped_column(Integer, default=0)
     last_generated_sequence: Mapped[int] = mapped_column(Integer, default=0)
+    discussion_generation: Mapped[int] = mapped_column(BigInteger, default=1)
     generation_version: Mapped[str] = mapped_column(String(80), default="rooms-v1")
     generation_error: Mapped[str | None] = mapped_column(String(500), nullable=True)
     generation_started_at: Mapped[datetime | None] = mapped_column(
@@ -311,9 +392,11 @@ class RaceRoomRecord(Base, TimestampMixin):
     generation_completed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    reconciliation_attempted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
     last_event_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     is_featured: Mapped[bool] = mapped_column(Boolean, default=False)
-    is_development: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 class RaceRoomAgentRecord(Base):
@@ -405,6 +488,93 @@ class MessageEvidenceRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class AgentClaimRecord(Base):
+    """Bounded per-generation recall of what each agent actually asserted.
+
+    Scoped to the discussion generation so a replay reset starts a clean memory,
+    and ordered by the source sequence that produced the claim so recall can be
+    cut to the consumed cursor rather than to wall time.
+    """
+
+    __tablename__ = "agent_claims"
+    __table_args__ = (
+        Index(
+            "ix_agent_claims_recall",
+            "room_id",
+            "discussion_generation",
+            "source_sequence",
+        ),
+        Index("ix_agent_claims_room_agent", "room_id", "agent_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    room_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("race_rooms.id"), index=True)
+    discussion_generation: Mapped[int] = mapped_column(BigInteger, default=1)
+    agent_id: Mapped[str] = mapped_column(ForeignKey("agent_profiles.id"), index=True)
+    message_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("room_messages.id"), nullable=True
+    )
+    kind: Mapped[str] = mapped_column(String(40))
+    status: Mapped[str] = mapped_column(String(20), default="standing")
+    outcome: Mapped[str] = mapped_column(String(20), default="undecided")
+    source_sequence: Mapped[int] = mapped_column(BigInteger)
+    lap_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    subjects: Mapped[list[int]] = mapped_column(JSON_TYPE, default=list)
+    summary: Mapped[str] = mapped_column(String(400))
+    evidence_keys: Mapped[list[str]] = mapped_column(JSON_TYPE, default=list)
+    superseded_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("agent_claims.id"), nullable=True
+    )
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class SessionLocationSampleRecord(Base):
+    """Downsampled driver track positions in raw OpenF1 circuit coordinates.
+
+    Location arrives at roughly 4 Hz per car, so a race is hundreds of
+    thousands of provider rows. Keeping the series here rather than in
+    normalized_race_events stops it from swamping the replay event sequence
+    while still giving replay a time-indexed position for every driver.
+    """
+
+    __tablename__ = "session_location_samples"
+    __table_args__ = (
+        UniqueConstraint(
+            "session_key",
+            "driver_number",
+            "sample_time",
+            name="uq_location_sample_session_driver_time",
+        ),
+        Index("ix_location_sample_session_time", "session_key", "sample_time"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    session_key: Mapped[str] = mapped_column(String(80), index=True)
+    driver_number: Mapped[int] = mapped_column(Integer)
+    sample_time: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    x: Mapped[float] = mapped_column(Float)
+    y: Mapped[float] = mapped_column(Float)
+    z: Mapped[float | None] = mapped_column(Float, nullable=True)
+    source: Mapped[str] = mapped_column(String(20), default="historical")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class SessionTrackGeometryRecord(Base, TimestampMixin):
+    """Circuit outline traced from this session's own location samples."""
+
+    __tablename__ = "session_track_geometry"
+
+    session_key: Mapped[str] = mapped_column(String(80), primary_key=True)
+    min_x: Mapped[float] = mapped_column(Float)
+    max_x: Mapped[float] = mapped_column(Float)
+    min_y: Mapped[float] = mapped_column(Float)
+    max_y: Mapped[float] = mapped_column(Float)
+    path: Mapped[list[Any]] = mapped_column(JSON_TYPE, default=list)
+    source_driver_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    sample_count: Mapped[int] = mapped_column(Integer, default=0)
+
+
 class RoomPlaybackStateRecord(Base):
     __tablename__ = "room_playback_states"
 
@@ -415,6 +585,10 @@ class RoomPlaybackStateRecord(Base):
     playback_speed: Mapped[float] = mapped_column(Float, default=1.0)
     is_paused: Mapped[bool] = mapped_column(Boolean, default=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    replay_owner_token: Mapped[uuid.UUID | None] = mapped_column(nullable=True)
+    replay_owner_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )

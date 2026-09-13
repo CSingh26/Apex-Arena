@@ -12,6 +12,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from app.domain.claims import ClaimOutcome
 from app.domain.models import NormalizedRaceEvent, RaceEventType
 from app.domain.rooms import (
     Confidence,
@@ -19,15 +20,32 @@ from app.domain.rooms import (
     MessageEvidence,
     MessageTopic,
     MessageType,
+    RaceRoom,
     RoomMessage,
 )
+from app.providers.language import MAX_PROMPT_FACTS, LanguageRequest
+from app.services.agent_claims import AgentClaimMemory
+from app.services.agent_grounding import AgentEventEnvelope
+from app.services.claim_reasoning import claim_for_situation, closes, revision_text
 from app.services.discussion_triggers import DiscussionTrigger, DiscussionTriggerEvaluator
 from app.services.driver_identity import DriverIdentityResolver
+from app.services.generation_policy import GenerationOutcome, GenerationPolicy
 from app.services.race_state import RaceState
 from app.services.session_semantics import is_qualifying_session
+from app.services.timing import format_lap_time, format_pit_stop
 from app.storage.room_repository import SqlRaceRoomRepository
 
 logger = logging.getLogger(__name__)
+
+# Voice hints for optional rephrasing. Keeping them here rather than in the
+# agent profile avoids a provider prompt depending on editable seed data.
+AGENT_VOICES = {
+    "mira-vale": "Strategy engineer; qualitative, uses a number only when it decides the point",
+    "theo-voss": "Telemetry analyst; precise and cautious about what a trace can prove",
+    "lena-cross": "Former racer; racecraft-first, direct and physical in description",
+    "arjun-reyes": "Historian; reaches for precedent and long-run context",
+    "nova": "Host; concise, keeps the room honest and moves it along",
+}
 
 RoomPublisher = Callable[[RoomMessage], Awaitable[object]]
 StateReader = Callable[[str], Awaitable[RaceState]]
@@ -49,6 +67,7 @@ class GeneratedRoomMessage(BaseModel):
 class GroundingContext(BaseModel):
     evidence: dict[str, Any]
     data_quality: str
+    envelope: AgentEventEnvelope | None = None
 
 
 class DiscussionMetrics(BaseModel):
@@ -72,6 +91,8 @@ class MessageChainResult:
     attempted_count: int = 0
     inserted_count: int = 0
     skipped_count: int = 0
+    # The message a recorded claim is attributed to, when one was published.
+    primary: RoomMessage | None = None
 
     def add(self, result: MessageStoreResult) -> None:
         self.attempted_count += result.attempted_count
@@ -81,29 +102,12 @@ class MessageChainResult:
 
 class GroundingContextBuilder:
     def build(self, event: NormalizedRaceEvent, state: RaceState | None) -> GroundingContext:
-        evidence: dict[str, Any] = {
-            "event_type": event.event_type.value,
-            "event_sequence": event.sequence_number,
-            "lap_number": event.lap_number,
-            "driver_numbers": event.driver_numbers,
-        }
-        evidence.update(event.payload)
-        if state is not None:
-            evidence["race_status"] = state.status
-            evidence["race_current_lap"] = state.current_lap
-            if state.session_type is not None:
-                evidence["session_type"] = state.session_type
-            if state.current_phase is not None:
-                evidence["session_phase"] = state.current_phase
-            relevant = {
-                driver: driver_state.model_dump(mode="json")
-                for driver, driver_state in state.drivers.items()
-                if int(driver) in event.driver_numbers
-            }
-            if relevant:
-                evidence["relevant_driver_state"] = relevant
-        quality = str(event.payload.get("data_quality") or "partial")
-        return GroundingContext(evidence=evidence, data_quality=quality)
+        envelope = AgentEventEnvelope.from_event(event, state)
+        return GroundingContext(
+            evidence=envelope.as_evidence(),
+            data_quality=envelope.data_quality,
+            envelope=envelope,
+        )
 
 
 class GroundingValidator:
@@ -199,6 +203,18 @@ class PublicMessageShaper:
 class DeterministicRoomGenerator:
     """Specialist templates that can only state values present in grounded context."""
 
+    @staticmethod
+    def _variant(seed: str, variants: list[str]) -> str:
+        """Pick a phrasing deterministically so identical events replay identically.
+
+        A single fixed sentence repeated on every lap or every flag reads like a
+        log line, not a person. Hashing a stable per-event seed (not randomness)
+        keeps regeneration idempotent while spreading phrasing across replays.
+        """
+
+        index = int(sha256(seed.encode("utf-8")).hexdigest(), 16) % len(variants)
+        return variants[index]
+
     def generate(
         self,
         event: NormalizedRaceEvent,
@@ -219,6 +235,64 @@ class DeterministicRoomGenerator:
         )
         phase = evidence.get("session_phase")
         base_keys = ["event_type", "event_sequence"]
+        if event.event_type == RaceEventType.STRATEGY_SITUATION:
+            from app.services.strategy_events import validated_strategy
+
+            strategy = validated_strategy(event)
+            if strategy is not None:
+                item = strategy.situation
+                p = item.payload
+                descriptions = {
+                    "stint_divergence": (
+                        "The recorded compound or stint observations differ. The drivers'"
+                        " future stop plans remain unknown."
+                    ),
+                    "relative_pace": (
+                        "The drivers' recent clean lap samples show a pace difference."
+                        " Fuel, traffic and weather have not been isolated."
+                    ),
+                    "pit_window": (
+                        "Repeating the measured same-driver pit loss gives a conditional"
+                        " rejoin range. Rival gaps are held constant and absolute rank is"
+                        " unavailable with partial coverage."
+                    ),
+                    "undercut_condition": (
+                        "Under equal stop losses, cumulative relative gain must exceed the"
+                        f" observed {p.required_gain_seconds or 0:g}s gap. New-tyre pace,"
+                        " warmup and the rival's stop timing are unknown."
+                    ),
+                    "overcut_condition": (
+                        "An actual rival stop anchors this stay-out comparison against their"
+                        " pre-stop pace. This does not establish a successful overcut."
+                    ),
+                    "neutralized_pit_context": (
+                        "Observed reduced-speed running changes the pit context. Any saving"
+                        " remains unquantified; an ending signal is still neutralized running."
+                    ),
+                    "extra_stop_consequence": (
+                        "The supplied remaining distance gives a conditional average gain"
+                        " needed to break even. Expected tyre performance is unknown."
+                    ),
+                    "weather_change": (
+                        "The consumed weather observations changed. Compound choice may need"
+                        " reassessment, but these readings do not establish track wetness or"
+                        " the best tyre."
+                    ),
+                }
+                text = (
+                    "The earlier strategy observation has been withdrawn because its"
+                    " factual premise changed."
+                    if item.status == "withdrawn"
+                    else descriptions[item.kind.value]
+                )
+                return self._message(
+                    MessageType.ANALYSIS,
+                    text,
+                    Confidence.LOW,
+                    EvidenceStatus.GROUNDED,
+                    "A bounded source-supported strategy observation.",
+                    ["strategy"],
+                )
         if host_summary:
             return self._message(
                 MessageType.SUMMARY,
@@ -233,9 +307,12 @@ class DeterministicRoomGenerator:
             return self._reply(event, agent_id, context)
         if event.event_type in {RaceEventType.SESSION_START, RaceEventType.RACE_START}:
             start_detail = (
-                "My call: the first valid laps will separate genuine speed from warm-up noise."
+                "The first valid laps will separate genuine speed from warm-up noise."
                 if qualifying
-                else "My call: ignore the launch hype until the first gaps and lap times land."
+                else (
+                    "Let the first gaps and representative laps settle before reading too much "
+                    "into the launch."
+                )
             )
             return self._message(
                 MessageType.OBSERVATION,
@@ -250,27 +327,26 @@ class DeterministicRoomGenerator:
             if trend is not None:
                 return self._message(
                     MessageType.ANALYSIS,
-                    f"{driver} has found {abs(float(trend)):.2f} seconds across the recent "
-                    "representative laps. I'm buying this pace shift: it is a real trend until "
-                    "traffic or the next sample proves otherwise.",
+                    f"{driver} is {abs(float(trend)):.2f}s quicker across the recent "
+                    "representative laps. That is enough for Theo to flag a pace shift, not "
+                    "enough to call the race without another clean sample.",
                     Confidence.HIGH,
                     EvidenceStatus.GROUNDED,
                     "The representative-lap sample contains a pace trend.",
                     ["driver_numbers", "pace_trend_seconds", "representative_laps"],
                 )
             duration = evidence.get("lap_duration")
-            duration_text = (
-                f" in {self._format_seconds(duration)} seconds" if duration is not None else ""
-            )
+            lap_time = format_lap_time(duration)
+            duration_text = f" with a {lap_time}" if lap_time else ""
             if qualifying:
                 phase_text = f" in {phase}" if phase else ""
                 position = evidence.get("position")
                 position_text = f" and is P{position}" if position is not None else ""
                 return self._message(
                     MessageType.OBSERVATION,
-                    f"{driver} clocks{duration_text}{phase_text}{position_text}. My stand: that is "
-                    "a serious lap, but calling it safe before the elimination cutoff settles "
-                    "is asking for trouble.",
+                    f"{driver} posts{duration_text}{phase_text}{position_text}. It puts real "
+                    "pressure on the elimination cutoff, although the remaining runs can still "
+                    "move the target.",
                     Confidence.MEDIUM,
                     EvidenceStatus.PARTIAL,
                     "A qualifying lap was completed.",
@@ -279,10 +355,21 @@ class DeterministicRoomGenerator:
                     + (["lap_duration"] if duration is not None else [])
                     + (["position"] if position is not None else []),
                 )
+            closer = self._variant(
+                event.dedup_key,
+                [
+                    "Theo's filing it away — one lap doesn't make a trend, but he's watching "
+                    "for a repeat.",
+                    "That's one data point for Theo's notebook. He won't call it a trend "
+                    "until it repeats.",
+                    "Theo clocks it, but he's not reading much into a single lap yet.",
+                    "On Theo's radar now, though he'll want to see that pace again before "
+                    "calling it real.",
+                ],
+            )
             return self._message(
                 MessageType.OBSERVATION,
-                f"{driver}: lap {lap}{duration_text}. I am not calling that a trend yet—one lap "
-                "is a headline, the next representative laps are the argument.",
+                f"{driver} completes lap {lap}{duration_text}. {closer}",
                 Confidence.MEDIUM,
                 EvidenceStatus.PARTIAL,
                 "A lap was completed.",
@@ -295,14 +382,17 @@ class DeterministicRoomGenerator:
                 fact += f" on lap {lap}"
             keys = ["driver_numbers", "event_type"]
             if duration is not None:
-                fact += f" with a recorded duration of {self._format_seconds(duration)} seconds"
+                stop_time = format_pit_stop(duration)
+                if stop_time:
+                    fact += f" with a recorded {stop_time} stop"
                 keys.append(
                     "pit_duration" if evidence.get("pit_duration") is not None else "duration"
                 )
             return self._message(
                 MessageType.ANALYSIS,
-                fact + ". My call: do not celebrate the strategy yet. The next position update "
-                "decides whether that time bought an advantage or just burned track position.",
+                fact
+                + ". Mira is watching the next position update: that tells us whether the call "
+                "created clean air or simply traded away track position.",
                 Confidence.HIGH,
                 EvidenceStatus.GROUNDED,
                 "A pit stop was recorded.",
@@ -315,7 +405,7 @@ class DeterministicRoomGenerator:
                 "the argument if the lap times hold through the stint."
                 if compound
                 else f"{driver} changed tyres, but the compound is missing. No compound, no bold "
-                "strategy verdict—I am sitting this prediction out."
+                "strategy verdict—I'm sitting this prediction out."
             )
             keys = ["driver_numbers", "event_type"] + (["compound"] if compound else [])
             return self._message(
@@ -328,7 +418,8 @@ class DeterministicRoomGenerator:
             )
         if event.event_type == RaceEventType.FASTEST_LAP:
             duration = evidence.get("lap_duration")
-            detail = f" at {self._format_seconds(duration)} seconds" if duration is not None else ""
+            lap_time = format_lap_time(duration)
+            detail = f" at {lap_time}" if lap_time else ""
             keys = ["driver_numbers", "event_type"] + (["lap_duration"] if duration else [])
             consequence = (
                 f"That throws the pressure straight at the elimination line in {phase}."
@@ -361,18 +452,17 @@ class DeterministicRoomGenerator:
             if qualifying:
                 return self._message(
                     MessageType.ANALYSIS,
-                    f"{driver} jumps{update} in the qualifying order. That is a direct hit on the "
-                    "cutoff fight—fast on the sheet, even though this is not an on-track pass.",
+                    f"{driver} jumps{update} in the qualifying order. That's a direct hit on the "
+                    "cutoff fight—fast on the sheet, even though this isn't an on-track pass.",
                     Confidence.MEDIUM,
                     EvidenceStatus.GROUNDED,
                     "The qualifying order changed.",
                     keys,
                 )
             racecraft = (
-                "That is a clean track-position win, and I am giving the driver credit."
+                "That's a clean track-position win, and I'm giving the driver credit."
                 if event.event_type == RaceEventType.OVERTAKE
-                else "The gain is real; I will not call it an overtake without an explicit "
-                "pass event."
+                else "The gain is real; I won't call it an overtake without an explicit pass event."
             )
             return self._message(
                 MessageType.ANALYSIS,
@@ -385,16 +475,77 @@ class DeterministicRoomGenerator:
                 keys,
             )
         if event.event_type in {
+            RaceEventType.BATTLE_STARTED,
+            RaceEventType.BATTLE_INTENSIFIED,
+            RaceEventType.DRS_RANGE_ENTERED,
+        }:
+            opponent_number = event.secondary_driver_number or (
+                event.driver_numbers[1] if len(event.driver_numbers) > 1 else None
+            )
+            opponent = DriverIdentityResolver.public_label(evidence, opponent_number)
+            interval = evidence.get("interval_seconds")
+            interval_text = (
+                f" at {float(interval):.2f}s" if isinstance(interval, (int, float)) else ""
+            )
+            battle = evidence.get("battle")
+            trend = battle.get("trend") if isinstance(battle, dict) else None
+            trend_text = " and the recent interval trend is closing" if trend == "CLOSING" else ""
+            return self._message(
+                MessageType.ANALYSIS,
+                f"{driver} is in a sustained fight with {opponent}{interval_text}{trend_text}. "
+                "The timing supports the battle; it does not prove a pass until the order changes.",
+                Confidence.HIGH,
+                EvidenceStatus.GROUNDED,
+                "A timing-confirmed battle became important.",
+                ["event_type", "driver_numbers"]
+                + (["interval_seconds"] if interval is not None else [])
+                + (["battle"] if battle is not None else []),
+            )
+        if event.event_type in {
+            RaceEventType.QUALIFYING_CUTOFF_CHANGE,
+            RaceEventType.ELIMINATION_RISK,
+            RaceEventType.PROVISIONAL_POLE,
+        }:
+            if event.event_type == RaceEventType.PROVISIONAL_POLE:
+                text = f"{driver} has provisional pole. The remaining valid runs can still move it."
+            elif event.event_type == RaceEventType.ELIMINATION_RISK:
+                text = f"{driver} is near the elimination cutoff. That is risk, not a final result."
+            else:
+                text = (
+                    f"{driver} changed the qualifying cutoff order. The classification moved, "
+                    "but this is not an on-track overtake."
+                )
+            return self._message(
+                MessageType.ANALYSIS,
+                text,
+                Confidence.HIGH,
+                EvidenceStatus.GROUNDED,
+                "A qualifying intelligence event was supplied.",
+                ["event_type", "driver_numbers"],
+            )
+        if event.event_type in {
             RaceEventType.SAFETY_CAR,
             RaceEventType.VIRTUAL_SAFETY_CAR,
             RaceEventType.RED_FLAG,
             RaceEventType.YELLOW_FLAG,
         }:
             label = event.event_type.value.replace("_", " ").title()
+            reaction = self._variant(
+                event.dedup_key,
+                [
+                    "That reshuffles the pit window — who actually gains is still up in the "
+                    "air until the field cycles through.",
+                    "Strategy calls get harder from here. Nobody knows who benefits until "
+                    "we see the pit cycle play out.",
+                    "This changes the math on pit strategy, though it's too early to say "
+                    "who it favors.",
+                    "The window just moved. We'll know who it favored once everyone's "
+                    "cycled through the pits.",
+                ],
+            )
             return self._message(
                 MessageType.OBSERVATION,
-                f"{label}. This is the strategy reset everyone wanted to claim in advance. My "
-                "stand: the pit window is now the argument, but its winner is not known yet.",
+                f"{label}. {reaction}",
                 Confidence.HIGH,
                 EvidenceStatus.GROUNDED,
                 f"{label} was recorded.",
@@ -403,8 +554,8 @@ class DeterministicRoomGenerator:
         if event.event_type in {RaceEventType.WEATHER_UPDATE, RaceEventType.WEATHER_CHANGE}:
             return self._message(
                 MessageType.UNCERTAINTY,
-                "No complete rainfall number, no wet-track prophecy. I am calling out the hype: "
-                "this weather sample does not prove the grip has changed.",
+                "No complete rainfall number, no wet-track prophecy. I'm calling out the hype: "
+                "this weather sample doesn't prove the grip has changed.",
                 Confidence.LOW,
                 EvidenceStatus.PARTIAL,
                 "The weather sample is incomplete.",
@@ -413,7 +564,7 @@ class DeterministicRoomGenerator:
         if event.event_type == RaceEventType.RETIREMENT:
             return self._message(
                 MessageType.OBSERVATION,
-                f"{driver} is recorded as retired. The supplied event does not establish a cause.",
+                f"{driver} is recorded as retired. The supplied event doesn't establish a cause.",
                 Confidence.HIGH,
                 EvidenceStatus.GROUNDED,
                 "A retirement was recorded.",
@@ -424,7 +575,7 @@ class DeterministicRoomGenerator:
             return self._message(
                 MessageType.SUMMARY,
                 f"{phase_text} is now under way. Drivers need a valid lap before the phase ends; "
-                "the slowest will not progress.",
+                "the slowest won't progress.",
                 Confidence.HIGH if phase else Confidence.MEDIUM,
                 EvidenceStatus.GROUNDED if phase else EvidenceStatus.PARTIAL,
                 "The qualifying phase changed.",
@@ -460,7 +611,7 @@ class DeterministicRoomGenerator:
             return self._message(
                 MessageType.SUMMARY,
                 "The session is recorded as finished. The room will use only the supplied "
-                "classification and will not infer championship consequences.",
+                "classification and won't infer championship consequences.",
                 Confidence.HIGH,
                 EvidenceStatus.GROUNDED,
                 "The session finished.",
@@ -468,7 +619,7 @@ class DeterministicRoomGenerator:
             )
         return self._message(
             MessageType.UNCERTAINTY,
-            "The feed moved, but the stat line did not give us enough to take an honest side. "
+            "The feed moved, but the stat line didn't give us enough to take an honest side. "
             "No empty hot take—bring the next timing sample.",
             Confidence.LOW,
             EvidenceStatus.PARTIAL,
@@ -488,8 +639,8 @@ class DeterministicRoomGenerator:
         if qualifying:
             lap_duration = evidence.get("lap_duration")
             lap_stat = (
-                f"{driver}'s {self._format_seconds(lap_duration)}-second lap"
-                if lap_duration is not None
+                f"{driver}'s {format_lap_time(lap_duration)} lap"
+                if format_lap_time(lap_duration)
                 else f"{driver}'s timing update"
             )
             if agent_id == "lena-cross":
@@ -506,7 +657,7 @@ class DeterministicRoomGenerator:
             if agent_id == "theo-voss":
                 return self._message(
                     MessageType.QUESTION,
-                    f"{lap_stat} is real; the verdict is not. Does the next valid lap confirm "
+                    f"{lap_stat} is real; the verdict isn't. Does the next valid lap confirm "
                     "this pace, or expose it as a single-run peak?",
                     Confidence.MEDIUM,
                     EvidenceStatus.PARTIAL,
@@ -545,9 +696,9 @@ class DeterministicRoomGenerator:
             trend = abs(float(evidence["pace_trend_seconds"]))
             return self._message(
                 MessageType.DISAGREEMENT,
-                f"I see the {trend:.2f}-second pace gain, but calling it a strategy advantage is "
-                "premature. "
-                "Without a usable traffic gap or pit-loss estimate, speed can still become a trap.",
+                f"I see the {trend:.2f}s pace gain, but I wouldn't convert it into a strategy "
+                "advantage yet. Without a traffic gap or pit-loss estimate, that speed can still "
+                "become a trap.",
                 Confidence.MEDIUM,
                 EvidenceStatus.PARTIAL,
                 "Representative laps support the trend but not a strategy call.",
@@ -559,7 +710,7 @@ class DeterministicRoomGenerator:
         }:
             return self._message(
                 MessageType.DISAGREEMENT,
-                "Do not call this a free stop for everyone. The neutralisation is confirmed; "
+                "Don't call this a free stop for everyone. The neutralisation is confirmed; "
                 "who actually benefits still depends on track position and the pit cycle.",
                 Confidence.MEDIUM,
                 EvidenceStatus.PARTIAL,
@@ -568,14 +719,11 @@ class DeterministicRoomGenerator:
             )
         if agent_id == "theo-voss" and event.event_type == RaceEventType.PIT_STOP:
             duration = evidence.get("pit_duration") or evidence.get("duration")
-            duration_text = (
-                f"The recorded {self._format_seconds(duration)} seconds"
-                if duration is not None
-                else "The recorded stop"
-            )
+            stop_time = format_pit_stop(duration)
+            duration_text = f"The recorded {stop_time} stop" if stop_time else "The recorded stop"
             return self._message(
                 MessageType.CORRECTION,
-                f"{duration_text} is not a strategy verdict. The timing record confirms "
+                f"{duration_text} isn't a strategy verdict. The timing record confirms "
                 "the service; the next position sample decides whether the call worked.",
                 Confidence.MEDIUM,
                 EvidenceStatus.PARTIAL,
@@ -598,16 +746,6 @@ class DeterministicRoomGenerator:
                 "One fastest lap does not prove sustainable race pace.",
                 ["event_type"],
             )
-        if agent_id == "arjun-reyes" and "season_context" in context.evidence:
-            return self._message(
-                MessageType.REPLY,
-                "The supplied context explicitly marks this as a synthetic validation race, so "
-                "no championship comparison or points implication is valid.",
-                Confidence.HIGH,
-                EvidenceStatus.GROUNDED,
-                "No championship points apply to the fixture.",
-                ["season_context"],
-            )
         return self._message(
             MessageType.QUESTION,
             "The event is real, but the easy conclusion is still on trial. What does the next "
@@ -617,14 +755,6 @@ class DeterministicRoomGenerator:
             "The triggering event is supported.",
             ["event_type"],
         )
-
-    @staticmethod
-    def _format_seconds(value: object) -> str:
-        try:
-            formatted = f"{float(value):.2f}"
-        except (TypeError, ValueError):
-            return str(value)
-        return formatted.rstrip("0").rstrip(".")
 
     @staticmethod
     def _message(
@@ -652,11 +782,15 @@ class RaceRoomDiscussionEngine:
         publisher: RoomPublisher | None = None,
         state_reader: StateReader | None = None,
         generation_version: str = "rooms-v4-stat-debate",
+        claims: AgentClaimMemory | None = None,
+        generation_policy: GenerationPolicy | None = None,
     ) -> None:
         self.repository = repository
         self.evaluator = evaluator
         self.publisher = publisher
         self.state_reader = state_reader
+        self.claims = claims
+        self.generation_policy = generation_policy
         self.generator = DeterministicRoomGenerator()
         self.validator = GroundingValidator()
         self.context_builder = GroundingContextBuilder()
@@ -678,7 +812,14 @@ class RaceRoomDiscussionEngine:
             state = await self.state_reader(event.session_key) if self.state_reader else None
             context = self.context_builder.build(event, state)
             async with self._locks[room.slug]:
-                await self._generate_chain(room.id, event, trigger, context)
+                chain = await self._generate_chain(
+                    room.id,
+                    event,
+                    trigger,
+                    context,
+                    discussion_generation=room.discussion_generation,
+                )
+                await self._reconcile_claims(room, event, chain, context)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -688,6 +829,106 @@ class RaceRoomDiscussionEngine:
                 event.event_type.value,
                 type(exc).__name__,
             )
+
+    async def _reconcile_claims(
+        self,
+        room: RaceRoom,
+        event: NormalizedRaceEvent,
+        chain: MessageChainResult,
+        context: GroundingContext,
+    ) -> None:
+        """Record what an agent committed to, and let it revise itself later.
+
+        Claim bookkeeping is an enhancement to how the room reads. A failure
+        here must never suppress a factual message that was already published,
+        so every problem is logged and swallowed.
+        """
+        if self.claims is None or event.event_type != RaceEventType.STRATEGY_SITUATION:
+            return
+        try:
+            from app.services.strategy_events import validated_strategy
+
+            strategy = validated_strategy(event)
+            if strategy is None:
+                return
+            situation = strategy.situation
+            await self._close_decided_claims(room, event, situation, context)
+            if chain.primary is None:
+                return
+            claim = claim_for_situation(
+                situation,
+                room_id=room.id,
+                discussion_generation=room.discussion_generation,
+                agent_id=chain.primary.agent_id,
+                message_id=chain.primary.id,
+                lap_number=event.lap_number,
+            )
+            if claim is not None:
+                await self.claims.record(claim)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "Claim reconciliation failed session=%s error=%s",
+                event.session_key,
+                type(exc).__name__,
+            )
+
+    async def _close_decided_claims(
+        self,
+        room: RaceRoom,
+        event: NormalizedRaceEvent,
+        situation,
+        context: GroundingContext,
+    ) -> None:
+        """Publish the agent taking back a position the facts have moved past."""
+        open_claims = await self.claims.recall(
+            room.id,
+            discussion_generation=room.discussion_generation,
+            cursor=event.sequence_number,
+            subjects=situation.participants or None,
+        )
+        for claim in open_claims:
+            if not closes(claim, situation):
+                continue
+            await self.claims.revise(
+                claim.claim_id,
+                outcome=(
+                    ClaimOutcome.UNDECIDED
+                    if situation.status == "withdrawn"
+                    else ClaimOutcome.CONTRADICTED
+                ),
+            )
+            revision = RoomMessage(
+                room_id=room.id,
+                agent_id=claim.agent_id,
+                sequence=0,
+                discussion_generation=room.discussion_generation,
+                lap_number=event.lap_number,
+                wall_time=event.event_time,
+                topic=MessageTopic.STRATEGY,
+                message_type=MessageType.CORRECTION,
+                content=f"{revision_text(claim, situation)} {claim.summary}",
+                confidence=Confidence.LOW,
+                evidence_status=EvidenceStatus.GROUNDED,
+                reply_to_message_id=claim.message_id,
+                trigger_event_id=event.id,
+                generated_by="deterministic",
+                prompt_version=self.generation_version,
+                generation_key=self._generation_key(
+                    room_id=room.id,
+                    event=event,
+                    agent_id=claim.agent_id,
+                    message_type=MessageType.CORRECTION.value,
+                    role=f"revision:{claim.claim_id}",
+                    generation_version=self.generation_version,
+                ),
+                generation_version=self.generation_version,
+                source_provider=event.source,
+                source_reference=str(event.id),
+                generation_metadata={"revised_claim_id": str(claim.claim_id)},
+            )
+            await self._store(revision, event, context)
 
     def reset_session(self, session_key: str, room_id: str) -> None:
         self.evaluator.reset_session(session_key)
@@ -699,10 +940,17 @@ class RaceRoomDiscussionEngine:
         event: NormalizedRaceEvent,
         trigger: DiscussionTrigger,
         context: GroundingContext,
+        *,
+        discussion_generation: int,
     ) -> MessageChainResult:
         result = MessageChainResult()
         primary = await self._build_message(
-            room_id, event, trigger, trigger.agent_candidates[0], context
+            room_id,
+            event,
+            trigger,
+            trigger.agent_candidates[0],
+            context,
+            discussion_generation=discussion_generation,
         )
         if primary is None:
             return result
@@ -711,6 +959,7 @@ class RaceRoomDiscussionEngine:
         primary = primary_result.message
         if primary is None:
             return result
+        result.primary = primary
         if trigger.needs_reply and len(trigger.agent_candidates) > 1:
             reply = await self._build_message(
                 room_id,
@@ -718,6 +967,7 @@ class RaceRoomDiscussionEngine:
                 trigger,
                 trigger.agent_candidates[1],
                 context,
+                discussion_generation=discussion_generation,
                 reply_to=primary,
             )
             if reply is not None:
@@ -729,12 +979,43 @@ class RaceRoomDiscussionEngine:
                 trigger,
                 "nova",
                 context,
+                discussion_generation=discussion_generation,
                 reply_to=primary,
                 host_summary=True,
             )
             if summary is not None:
                 result.add(await self._store(summary, event, context))
         return result
+
+    async def _phrase(
+        self,
+        generated: GeneratedRoomMessage,
+        event: NormalizedRaceEvent,
+        agent_id: str,
+    ) -> GenerationOutcome:
+        """Optionally restate an already-grounded conclusion in the agent's voice.
+
+        This runs after grounding validation, so generation can only change how
+        a supported claim reads, never what it asserts. Every refusal path
+        returns the deterministic wording unchanged.
+        """
+        policy = self.generation_policy
+        if policy is None or not policy.enabled:
+            return GenerationOutcome(
+                text=generated.content, generated=False, reason="not_configured"
+            )
+        try:
+            request = LanguageRequest(
+                purpose=generated.message_type.value,
+                agent_voice=AGENT_VOICES.get(agent_id, agent_id),
+                conclusion=generated.content,
+                facts=tuple(claim.claim for claim in generated.claims)[:MAX_PROMPT_FACTS],
+            )
+        except ValueError:
+            return GenerationOutcome(
+                text=generated.content, generated=False, reason="unsupported_claim"
+            )
+        return await policy.compose(request, session_key=event.session_key)
 
     async def _build_message(
         self,
@@ -744,6 +1025,7 @@ class RaceRoomDiscussionEngine:
         agent_id: str,
         context: GroundingContext,
         *,
+        discussion_generation: int,
         reply_to: RoomMessage | None = None,
         host_summary: bool = False,
     ) -> RoomMessage | None:
@@ -759,15 +1041,25 @@ class RaceRoomDiscussionEngine:
             update={"content": self.message_shaper.shape(generated.content)}
         )
         fingerprint = " ".join(generated.content.lower().split())
-        if fingerprint in self._recent_content[str(room_id)] or not self.validator.validate(
-            generated, context
-        ):
+        recent_content = self._recent_content[str(room_id)]
+        duplicate = fingerprint in recent_content
+        grounded = self.validator.validate(generated, context)
+        if duplicate or not grounded:
             self.metrics.rejected_message_count += 1
+            logger.debug(
+                "Room message suppressed event_type=%s agent=%s duplicate=%s grounded=%s",
+                event.event_type.value,
+                agent_id,
+                duplicate,
+                grounded,
+            )
             return None
+        phrasing = await self._phrase(generated, event, agent_id)
         message = RoomMessage(
             room_id=room_id,
             agent_id=agent_id,
             sequence=0,
+            discussion_generation=discussion_generation,
             lap_number=event.lap_number,
             wall_time=event.event_time,
             topic=(
@@ -782,12 +1074,12 @@ class RaceRoomDiscussionEngine:
                 else trigger.topic
             ),
             message_type=generated.message_type,
-            content=generated.content,
+            content=phrasing.text,
             confidence=generated.confidence,
             evidence_status=generated.evidence_status,
             reply_to_message_id=reply_to.id if reply_to else None,
             trigger_event_id=event.id,
-            generated_by="deterministic",
+            generated_by=phrasing.mode,
             prompt_version=self.generation_version,
             generation_key=self._generation_key(
                 room_id=room_id,
@@ -806,9 +1098,16 @@ class RaceRoomDiscussionEngine:
                 "dedup_key": event.dedup_key,
                 "trigger_priority": trigger.priority.value,
                 "role": "host" if host_summary else ("reply" if reply_to else "primary"),
+                "recent_message_count": len(recent_content),
             },
         )
-        self._recent_content[str(room_id)].append(fingerprint)
+        logger.debug(
+            "Room message generated event_type=%s agent=%s role=%s priority=%s",
+            event.event_type.value,
+            agent_id,
+            "host" if host_summary else ("reply" if reply_to else "primary"),
+            trigger.priority.name,
+        )
         return message
 
     @staticmethod
@@ -841,7 +1140,9 @@ class RaceRoomDiscussionEngine:
         context: GroundingContext,
     ) -> MessageStoreResult:
         stored, inserted = await self.repository.insert_message(
-            message, self._evidence(event, message, context)
+            message,
+            self._evidence(event, message, context),
+            expected_generation=message.discussion_generation,
         )
         if not inserted:
             return MessageStoreResult(
@@ -850,6 +1151,7 @@ class RaceRoomDiscussionEngine:
                 inserted_count=0,
                 skipped_count=1,
             )
+        self._recent_content[str(message.room_id)].append(" ".join(stored.content.lower().split()))
         self.metrics.generated_message_count += 1
         self.metrics.deterministic_fallback_count += 1
         if self.publisher is not None:

@@ -93,7 +93,6 @@ export function RoomContext({ slug, detail, playback }: RoomContextProps) {
         <div><dt>Telemetry quality</dt><dd>{room.telemetry_quality.replaceAll("_", " ")}</dd></div>
         <div><dt>Current event</dt><dd>#{playback.current_event_sequence}</dd></div>
       </dl></details>
-      {room.is_development && <p className="fixture-notice"><b>Validation fixture</b><span>This room uses deterministic synthetic race data. It does not represent a real event or championship result.</span></p>}
     </section>
     <details className="context-card context-disclosure circuit-dossier">
       <summary><span><span className="section-kicker">Circuit intelligence</span><b>Track dossier</b></span><span aria-hidden>+</span></summary>

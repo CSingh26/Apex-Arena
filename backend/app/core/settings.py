@@ -19,6 +19,7 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
+        hide_input_in_errors=True,
     )
 
     app_name: str = "Apex Arena"
@@ -80,6 +81,7 @@ class Settings(BaseSettings):
     openf1_rest_include_high_frequency: bool = False
     openf1_mqtt_connect_timeout_seconds: int = Field(default=10, ge=1, le=120)
     openf1_live_catalog_sync_seconds: int = Field(default=60, ge=15, le=900)
+    openf1_live_poll_seconds: int = Field(default=5, ge=1, le=30)
     recent_session_reconciliation_enabled: bool = False
     recent_session_auto_backfill_enabled: bool = False
     recent_session_reconciliation_lookback_days: int = Field(default=14, ge=1, le=60)
@@ -89,7 +91,7 @@ class Settings(BaseSettings):
     recent_session_auto_backfill_max_concurrent: int = Field(default=1, ge=1, le=3)
     openf1_live_topics: str = (
         "v1/sessions,v1/drivers,v1/position,v1/intervals,v1/laps,v1/pit,"
-        "v1/stints,v1/race_control,v1/weather"
+        "v1/stints,v1/race_control,v1/weather,v1/location,v1/car_data"
     )
 
     jolpica_base_url: str = "https://api.jolpi.ca/ergast/f1"
@@ -104,10 +106,15 @@ class Settings(BaseSettings):
     ai_request_timeout_ms: int = 20000
     ai_daily_token_budget: int = 1000000
     ai_kill_switch: bool = False
+    # Separate from ai_enabled on purpose. ai_enabled and openai_api_key both
+    # predate a working generation path, so an upgrade must not turn an existing
+    # configuration into live paid traffic. Generation requires this explicitly.
+    ai_generation_opt_in: bool = False
 
     live_mode_enabled: bool = True
     live_stale_after_seconds: int = 15
     live_degraded_after_seconds: int = 45
+    live_session_capture_window_seconds: int = Field(default=43200, ge=3600, le=172800)
     event_dedup_ttl_seconds: int = 3600
     event_ordering_buffer_ms: int = 1500
     event_importance_min_for_ai: float = Field(default=0.55, ge=0, le=1)
@@ -119,11 +126,22 @@ class Settings(BaseSettings):
     sse_heartbeat_seconds: int = Field(default=15, ge=1, le=120)
     race_state_snapshot_every_n_events: int = Field(default=10, ge=1, le=1000)
     engine_recent_events_limit: int = Field(default=100, ge=1, le=1000)
+    overtake_confirmation_seconds: float = Field(default=2.0, ge=0, le=30)
+    overtake_confirmation_samples: int = Field(default=2, ge=1, le=20)
+    overtake_max_interval_seconds: float = Field(default=2.5, gt=0, le=30)
+    battle_start_interval_seconds: float = Field(default=2.0, gt=0, le=30)
+    battle_start_samples: int = Field(default=3, ge=1, le=20)
+    battle_intense_interval_seconds: float = Field(default=1.0, gt=0, le=10)
+    battle_end_interval_seconds: float = Field(default=3.0, gt=0, le=60)
+    battle_end_samples: int = Field(default=3, ge=1, le=20)
+    battle_trend_window: int = Field(default=5, ge=3, le=20)
+    battle_trend_minimum_change: float = Field(default=0.15, ge=0, le=10)
+    proximity_exit_seconds: float = Field(default=1.2, gt=0, le=10)
+    intelligence_event_cooldown_seconds: float = Field(default=20.0, ge=0, le=600)
     room_topic_cooldown_seconds: int = Field(default=20, ge=0, le=600)
     room_stream_backlog_limit: int = Field(default=250, ge=1, le=1000)
     room_replay_interval_seconds: float = Field(default=0.6, ge=0.05, le=10)
     room_diagnostics_enabled: bool = False
-    development_fixture_enabled: bool = False
     historical_ingestion_enabled: bool = True
     historical_ingestion_max_records_per_endpoint: int = Field(default=5000, ge=1, le=50000)
     historical_provider_retry_attempts: int = Field(default=3, ge=1, le=6)
@@ -131,6 +149,11 @@ class Settings(BaseSettings):
     historical_provider_min_interval_ms: int = Field(default=25, ge=0, le=5000)
     historical_provider_cache_ttl_seconds: int = Field(default=900, ge=0, le=86400)
     debug_ingestion_enabled: bool = True
+    # Location arrives at ~4 Hz per car. One fix per second per driver is plenty
+    # for a map that interpolates, and keeps a full race inside ~150k rows.
+    location_sample_interval_ms: int = Field(default=1000, ge=0, le=60_000)
+    location_fetch_window_seconds: int = Field(default=120, ge=10, le=600)
+    location_max_samples_per_session: int = Field(default=250_000, ge=1000, le=2_000_000)
 
     enable_live_rooms: bool = True
     enable_historical_replay: bool = True
@@ -168,6 +191,25 @@ class Settings(BaseSettings):
 
     log_level: str = "info"
     log_format: Literal["pretty", "json"] = "pretty"
+    rate_limit_enabled: bool = True
+    rate_limit_namespace: str = Field(default="", pattern=r"^[A-Za-z0-9:_-]{0,80}$")
+    rate_limit_timeout_seconds: float = Field(default=0.2, gt=0, le=2, allow_inf_nan=False)
+    rate_limit_read_per_minute: int = Field(default=600, ge=1, le=1_000_000)
+    rate_limit_read_burst: int = Field(default=120, ge=1, le=100_000)
+    rate_limit_auth_per_minute: int = Field(default=20, ge=1, le=1000)
+    rate_limit_auth_burst: int = Field(default=5, ge=1, le=100)
+    rate_limit_mutation_per_minute: int = Field(default=30, ge=1, le=10000)
+    rate_limit_mutation_burst: int = Field(default=5, ge=1, le=1000)
+    rate_limit_sse_per_minute: int = Field(default=60, ge=1, le=10000)
+    rate_limit_sse_burst: int = Field(default=20, ge=1, le=1000)
+    rate_limit_stream_capacity: int = Field(default=200, ge=1, le=10000)
+    rate_limit_stream_ttl_seconds: int = Field(default=30, ge=3, le=120)
+    intelligence_recovery_interval_seconds: float = Field(
+        default=5, ge=1, le=300, allow_inf_nan=False
+    )
+    intelligence_recovery_timeout_seconds: float = Field(
+        default=15, ge=1, le=60, allow_inf_nan=False
+    )
     sentry_dsn: SecretStr | None = None
     next_public_sentry_dsn: str | None = None
 
@@ -273,7 +315,25 @@ class Settings(BaseSettings):
 
         if self.openf1_reconnect_base_delay_ms > self.openf1_reconnect_max_delay_ms:
             raise ValueError("OpenF1 reconnect base delay cannot exceed maximum delay")
+        if self.rate_limit_timeout_seconds >= self.rate_limit_stream_ttl_seconds / 3:
+            raise ValueError("Rate-limit Redis deadline must leave stream renewal margin (TTL / 3)")
         worker_role = self.app_process_role in {"ingestor", "combined", "all"}
+        api_serving_role = self.app_process_role in {"api", "combined", "all"}
+        proxy_token = (
+            self.apex_arena_proxy_token.get_secret_value()
+            if self.apex_arena_proxy_token is not None
+            else None
+        )
+        if (
+            self.app_env in {"staging", "production"}
+            and api_serving_role
+            and self.proxy_enforcement_enabled
+            and (not proxy_token or proxy_token != proxy_token.strip())
+        ):
+            raise ValueError(
+                "APEX_ARENA_PROXY_TOKEN must be set without surrounding whitespace "
+                "when deployed API proxy enforcement is enabled"
+            )
         if self.openf1_rest_backfill_enabled and self.app_process_role == "api":
             raise ValueError("API processes cannot enable OpenF1 historical backfill")
         if self.recent_session_reconciliation_enabled and not worker_role:
@@ -314,8 +374,6 @@ class Settings(BaseSettings):
                 raise ValueError("Production REDIS_URL must use rediss://")
             if self.debug_ingestion_enabled:
                 raise ValueError("DEBUG_INGESTION_ENABLED must be false in production")
-            if self.development_fixture_enabled:
-                raise ValueError("DEVELOPMENT_FIXTURE_ENABLED must be false in production")
             if self.room_diagnostics_enabled:
                 raise ValueError("ROOM_DIAGNOSTICS_ENABLED must be false in production")
         return self
@@ -382,11 +440,18 @@ class Settings(BaseSettings):
         """Choose the DSN that preserves the process role's connection semantics."""
         needs_session_lease = self.app_process_role == "ingestor" or (
             self.app_process_role in {"combined", "all"}
-            and (self.openf1_live_auto_connect or self.recent_session_reconciliation_enabled)
+            and (self.live_worker_enabled or self.recent_session_reconciliation_enabled)
         )
         if needs_session_lease:
             return self.async_migration_database_url
         return self.async_database_url
+
+    @property
+    def live_worker_enabled(self) -> bool:
+        """REST mode owns live polling even when MQTT auto-connect is off."""
+        return self.live_mode_enabled and (
+            self.openf1_live_auto_connect or self.openf1_ingestion_mode == "rest"
+        )
 
     @property
     def normalized_base_path(self) -> str:
@@ -433,7 +498,15 @@ class Settings(BaseSettings):
             "redis_port": redis.port,
             "live_mode_enabled": self.live_mode_enabled,
             "openf1_credentials_present": self.openf1_credentials_present,
-            "ai_enabled": self.ai_enabled and not self.ai_kill_switch,
+            # Reports whether generation can actually run. ai_enabled alone
+            # predates a working generation path, so reporting it here would
+            # tell an operator the rooms are doing something they are not.
+            "ai_generation_active": (
+                self.ai_generation_opt_in
+                and self.ai_enabled
+                and not self.ai_kill_switch
+                and self.openai_api_key is not None
+            ),
             "room_topic_cooldown_seconds": self.room_topic_cooldown_seconds,
         }
 
@@ -441,3 +514,8 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()  # type: ignore[call-arg]
+
+
+def get_migration_settings() -> Settings:
+    """Load configuration for a non-HTTP migration process."""
+    return Settings(proxy_enforcement_enabled=False)  # type: ignore[call-arg]

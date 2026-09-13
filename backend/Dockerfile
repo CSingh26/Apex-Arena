@@ -10,12 +10,13 @@ WORKDIR /app
 RUN addgroup --system apex && adduser --system --ingroup apex apex
 
 COPY pyproject.toml ./
+COPY requirements.lock ./
 COPY app ./app
 COPY scripts ./scripts
 COPY migrations ./migrations
 COPY alembic.ini ./
 
-RUN pip install --upgrade pip && pip install .
+RUN pip install --require-hashes -r requirements.lock
 
 USER apex
 

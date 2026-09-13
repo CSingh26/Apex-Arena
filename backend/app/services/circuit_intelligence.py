@@ -4,9 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
+import time
 import unicodedata
+from collections import OrderedDict
 from collections.abc import Mapping
-from datetime import datetime
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any, Protocol
 
 from app.domain.circuits import CircuitIntelligence, CircuitRecord, SessionWeather
@@ -347,19 +351,105 @@ class CircuitIntelligenceService:
         return frozenset(profile.circuit_name for profile in _PROFILES)
 
 
+@dataclass
+class WeatherCacheEntry:
+    fetched_at: float
+    retry_at: float
+    weather: SessionWeather
+
+
 class CircuitWeatherService:
     def __init__(self, provider: WeatherProvider, *, timeout_seconds: float = 4.0) -> None:
         self.provider = provider
         self.timeout_seconds = timeout_seconds
+        self._lock = asyncio.Lock()
+        self._cache: OrderedDict[str, WeatherCacheEntry] = OrderedDict()
 
     async def for_session(self, session_key: str | None) -> SessionWeather:
         if not session_key:
             return SessionWeather(
                 notice="Weather will appear when OpenF1 publishes this session.",
             )
+        cached = self._cache.get(session_key)
+        now = time.monotonic()
+        if cached is not None and now < cached.retry_at and now - cached.fetched_at <= 300:
+            self._cache.move_to_end(session_key)
+            return self._projection(cached)
+        try:
+            # Includes queueing behind other sessions, not only provider I/O.
+            async with asyncio.timeout(self.timeout_seconds):
+                return await self._cached_weather(session_key)
+        except TimeoutError:
+            cached = self._cache.get(session_key)
+            now = time.monotonic()
+            usable = cached is not None and now - cached.fetched_at <= 300
+            unavailable = SessionWeather(
+                notice="OpenF1 weather is temporarily unavailable. Race-room data remains online.",
+                source_checked_at=datetime.now(UTC),
+            )
+            # A timed-out waiter must not overwrite another active fetch. Once
+            # our cancelled holder has released the lock this no-await update
+            # is atomic within the event loop and preserves the retry cooldown.
+            if not self._lock.locked():
+                if usable:
+                    cached.retry_at = max(cached.retry_at, now + 10)
+                else:
+                    self._cache[session_key] = WeatherCacheEntry(now, now + 10, unavailable)
+                    self._cache.move_to_end(session_key)
+                    while len(self._cache) > 64:
+                        self._cache.popitem(last=False)
+            return self._projection(cached) if usable else unavailable
+
+    async def _cached_weather(self, session_key: str) -> SessionWeather:
+        async with self._lock:
+            now = time.monotonic()
+            cached = self._cache.get(session_key)
+            if cached is not None and now < cached.retry_at and now - cached.fetched_at <= 300:
+                entry = cached
+            else:
+                weather = await self._fetch(session_key)
+                now = time.monotonic()
+                if (
+                    not weather.available
+                    and cached is not None
+                    and cached.weather.available
+                    and now - cached.fetched_at <= 300
+                ):
+                    entry = cached
+                    entry.retry_at = now + 10
+                else:
+                    weather.source_checked_at = datetime.now(UTC)
+                    entry = WeatherCacheEntry(now, now + (30 if weather.available else 10), weather)
+                self._cache[session_key] = entry
+            self._cache.move_to_end(session_key)
+            while len(self._cache) > 64:
+                self._cache.popitem(last=False)
+            return self._projection(entry)
+
+    @staticmethod
+    def _projection(entry: WeatherCacheEntry) -> SessionWeather:
+        age = max(0.0, time.monotonic() - entry.fetched_at)
+        return entry.weather.model_copy(
+            deep=True,
+            update={
+                "source_age_seconds": age,
+                "source_stale": entry.weather.available and age >= 30,
+                **(
+                    {
+                        "notice": "Cached OpenF1 weather; fresh measurements are temporarily unavailable."
+                    }
+                    if entry.weather.available and age >= 30
+                    else {}
+                ),
+            },
+        )
+
+    async def _fetch(self, session_key: str) -> SessionWeather:
         try:
             async with asyncio.timeout(self.timeout_seconds):
                 rows = await self.provider.weather(session_key=session_key)
+            if not isinstance(rows, list) or len(rows) > 10000:
+                raise ValueError("Weather response exceeds supported sample budget")
         except Exception as exc:
             logger.warning(
                 "OpenF1 weather lookup failed session_key=%s error=%s",
@@ -410,9 +500,9 @@ def _number(value: object) -> float | None:
         return None
     try:
         result = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
-    return result if result == result else None
+    return result if math.isfinite(result) else None
 
 
 def _rainfall(value: object) -> bool | None:

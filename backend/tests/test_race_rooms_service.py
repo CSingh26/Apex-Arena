@@ -20,6 +20,7 @@ from app.domain.rooms import (
     WeekendStatus,
 )
 from app.services.rooms import RaceRoomService
+from app.services.season import SeasonService
 
 
 def meeting(
@@ -74,6 +75,16 @@ class FakeRoomRepository:
         assert len(agents) == 5
         self.seed_calls += 1
 
+    async def confirmed_cancelled_sessions(self, keys, *, algorithm_version):
+        return set()  # This catalog-only double has no committed source projection.
+
+    async def observe_catalog_cancellation(self, room_id, session_key):
+        for room in self.rooms.values():
+            if room.id == room_id and room.session_key == session_key:
+                room.provider_cancelled = True
+                return True
+        return False
+
     async def upsert_room(self, room: RaceRoom, agent_ids: list[str]) -> RaceRoom:
         assert len(agent_ids) == 5
         self.upserts.append(room)
@@ -94,16 +105,12 @@ class FakeRoomRepository:
         self.rooms[room.slug] = room
         return room
 
-    async def delete_empty_development_room(self, slug: str) -> bool:
-        self.cleanup_calls.append(slug)
-        return True
-
     async def get_room(self, slug: str) -> RaceRoom | None:
         return self.rooms.get(slug)
 
     async def list_rooms(self, **filters: object) -> tuple[list[RaceRoom], int]:
         self.list_calls.append(filters)
-        rooms = [room for room in self.rooms.values() if not room.is_development]
+        rooms = list(self.rooms.values())
         season = filters.get("season")
         if season is not None:
             rooms = [room for room in rooms if room.season == season]
@@ -116,7 +123,7 @@ class FakeSeason:
         self.meetings = meetings
         self.calls = 0
 
-    async def calendar(self, year: int) -> list[RaceMeeting]:
+    async def calendar(self, year: int, now: datetime | None = None) -> list[RaceMeeting]:
         assert year == 2026
         self.calls += 1
         await asyncio.sleep(0)
@@ -141,13 +148,32 @@ class FakeOpenF1:
         return self.session_rows
 
 
-class FakeFixture:
-    def __init__(self) -> None:
-        self.seed_count = 0
+class FakeJolpica:
+    def __init__(self, races: list[dict[str, object]]) -> None:
+        self.races = races
 
-    async def seed(self) -> int:
-        self.seed_count += 1
-        return 14
+    async def fetch_calendar(self, year: int) -> list[dict[str, object]]:
+        assert year == 2026
+        return self.races
+
+
+def same_weekend_calendar_row() -> dict[str, object]:
+    return {
+        "season": "2026",
+        "round": "13",
+        "raceName": "Belgian Grand Prix",
+        "Circuit": {
+            "circuitId": "spa",
+            "circuitName": "Circuit de Spa-Francorchamps",
+            "Location": {"locality": "Spa", "country": "Belgium"},
+        },
+        "date": "2026-07-19",
+        "time": "13:00:00Z",
+        "FirstPractice": {"date": "2026-07-17", "time": "11:30:00Z"},
+        "SecondPractice": {"date": "2026-07-17", "time": "15:00:00Z"},
+        "ThirdPractice": {"date": "2026-07-18", "time": "10:00:00Z"},
+        "Qualifying": {"date": "2026-07-18", "time": "14:00:00Z"},
+    }
 
 
 @pytest.mark.asyncio
@@ -257,8 +283,8 @@ async def test_lifecycle_creates_live_room_but_keeps_upcoming_session_calendar_o
 
     live = repository.rooms["2026-live-grand-prix-race"]
     assert (live.status, live.mode, live.source_availability) == (
-        RoomStatus.PENDING,
-        RoomMode.REPLAY,
+        RoomStatus.LIVE,
+        RoomMode.LIVE,
         SourceAvailability.UNAVAILABLE,
     )
     assert "2026-future-grand-prix-race" not in repository.rooms
@@ -300,7 +326,7 @@ async def test_resync_preserves_dynamic_room_state_via_repository_upsert_contrac
             "message_count": 14,
             "current_lap": 8,
             "status": RoomStatus.PAUSED,
-            "mode": RoomMode.DEVELOPMENT,
+            "mode": RoomMode.ARCHIVED,
         }
     )
     await service.sync_meetings([race], [openf1_session()])
@@ -313,45 +339,45 @@ async def test_resync_preserves_dynamic_room_state_via_repository_upsert_contrac
 
 
 @pytest.mark.asyncio
-async def test_force_sync_seeds_fixture_and_reports_room_count() -> None:
+async def test_force_sync_creates_only_provider_backed_rooms() -> None:
     repository = FakeRoomRepository()
-    fixture = FakeFixture()
     service = RaceRoomService(
         repository,  # type: ignore[arg-type]
         FakeSeason([meeting()]),  # type: ignore[arg-type]
         2026,
-        fixture=fixture,  # type: ignore[arg-type]
         openf1=FakeOpenF1([openf1_session()]),  # type: ignore[arg-type]
     )
 
     count = await service.force_sync()
 
-    assert count == 2
-    assert fixture.seed_count == 1
-    assert repository.cleanup_calls == ["development-day2-validation"]
-    assert set(repository.rooms) == {
-        "day3-validation-room",
-        "2026-belgian-grand-prix-race",
-    }
+    assert count == 1
+    assert set(repository.rooms) == {"2026-belgian-grand-prix-race"}
 
 
 @pytest.mark.asyncio
-async def test_catalog_read_does_not_seed_or_publish_the_development_fixture() -> None:
+async def test_historical_force_sync_keeps_same_weekend_future_session_upcoming(settings) -> None:  # type: ignore[no-untyped-def]
     repository = FakeRoomRepository()
-    fixture = FakeFixture()
+    season = SeasonService(
+        settings,
+        FakeJolpica([same_weekend_calendar_row()]),  # type: ignore[arg-type]
+    )
     service = RaceRoomService(
         repository,  # type: ignore[arg-type]
-        FakeSeason([]),  # type: ignore[arg-type]
+        season,
         2026,
-        fixture=fixture,  # type: ignore[arg-type]
+        openf1=FakeOpenF1([openf1_session()]),  # type: ignore[arg-type]
     )
 
-    await service.ensure_catalog()
-    await service.ensure_catalog()
+    synchronized = await service.force_sync(
+        now=datetime(2026, 7, 18, 12, tzinfo=UTC),
+        live_window_only=True,
+        lookback_days=14,
+    )
 
-    assert fixture.seed_count == 0
-    assert repository.cleanup_calls == []
-    assert "day3-validation-room" not in repository.rooms
+    # The already-started qualifying session remains in its bounded capture
+    # window, but the next day's race must still be future/read-only.
+    assert synchronized == 1
+    assert "2026-belgian-grand-prix-race" not in repository.rooms
 
 
 def sprint_weekend() -> RaceMeeting:
@@ -377,9 +403,21 @@ def standard_weekend() -> RaceMeeting:
     return meeting(
         sessions=[
             RaceWeekendSession(
+                name="Practice 1",
+                starts_at=datetime(2026, 7, 17, 10, tzinfo=UTC),
+            ),
+            RaceWeekendSession(
+                name="Practice 2",
+                starts_at=datetime(2026, 7, 17, 14, tzinfo=UTC),
+            ),
+            RaceWeekendSession(
+                name="Practice 3",
+                starts_at=datetime(2026, 7, 18, 10, tzinfo=UTC),
+            ),
+            RaceWeekendSession(
                 name="Qualifying",
                 starts_at=datetime(2026, 7, 18, 15, tzinfo=UTC),
-            )
+            ),
         ]
     )
 
@@ -456,10 +494,51 @@ async def test_standard_weekend_creates_distinct_qualifying_and_race_identities(
         "2026-belgian-grand-prix-qualifying",
         "2026-belgian-grand-prix-race",
     }
-    assert [
-        item.session_type
-        for item in sorted(repository.rooms.values(), key=lambda room: room.scheduled_start)
-    ] == [SessionType.QUALIFYING, SessionType.RACE]
+    events, _ = await service.grouped_events(now=datetime(2026, 7, 20, tzinfo=UTC))
+    assert [item.session_type for item in events[0].sessions] == [
+        SessionType.PRACTICE_1,
+        SessionType.PRACTICE_2,
+        SessionType.PRACTICE_3,
+        SessionType.QUALIFYING,
+        SessionType.RACE,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_session_bootstrap_has_stable_apex_identity_and_does_not_claim_unknown_data() -> None:
+    repository = FakeRoomRepository()
+    service = RaceRoomService(
+        repository,  # type: ignore[arg-type]
+        FakeSeason([]),  # type: ignore[arg-type]
+        2026,
+    )
+    await service.sync_meetings(
+        [standard_weekend()],
+        [
+            {
+                **openf1_session(),
+                "meeting_key": 61,
+                "meeting_name": "Belgian Grand Prix",
+                "session_key": 6101,
+                "session_name": "Qualifying",
+                "date_start": "2026-07-18T15:00:00Z",
+            },
+            {**openf1_session(), "meeting_key": 61, "session_key": 6102},
+        ],
+        now=datetime(2026, 7, 20, tzinfo=UTC),
+    )
+
+    events, _ = await service.grouped_events(now=datetime(2026, 7, 20, tzinfo=UTC))
+    qualifying = next(
+        session for session in events[0].sessions if session.session_type is SessionType.QUALIFYING
+    )
+    bootstrap = await service.session_bootstrap(qualifying.session_id)
+
+    assert bootstrap is not None
+    _, resolved, room = bootstrap
+    assert resolved.session_id == qualifying.session_id
+    assert room is None
+    assert service.capabilities_for(room).weather.value == "unknown"
 
 
 @pytest.mark.asyncio
@@ -473,8 +552,8 @@ async def test_sprint_shootout_normalizes_and_repeat_sync_creates_no_duplicates(
     race = sprint_weekend()
     sessions = sprint_provider_sessions()
 
-    await service.sync_meetings([race], sessions, now=datetime(2026, 7, 20, tzinfo=UTC))
-    await service.sync_meetings([race], sessions, now=datetime(2026, 7, 20, tzinfo=UTC))
+    await service.sync_meetings([race], sessions, now=datetime(2026, 7, 20, 2, tzinfo=UTC))
+    await service.sync_meetings([race], sessions, now=datetime(2026, 7, 20, 2, tzinfo=UTC))
 
     assert len(repository.rooms) == 4
     assert {room.session_type for room in repository.rooms.values()} == {
@@ -498,14 +577,14 @@ async def test_grouped_sprint_event_preserves_official_session_order() -> None:
     await service.sync_meetings(
         [sprint_weekend()],
         sprint_provider_sessions(),
-        now=datetime(2026, 7, 20, tzinfo=UTC),
+        now=datetime(2026, 7, 20, 2, tzinfo=UTC),
     )
 
     events, total = await service.grouped_events(
         status=WeekendStatus.COMPLETED,
         session_type=SessionType.SPRINT,
         is_sprint_weekend=True,
-        now=datetime(2026, 7, 20, tzinfo=UTC),
+        now=datetime(2026, 7, 20, 2, tzinfo=UTC),
     )
 
     assert total == 1
@@ -547,7 +626,7 @@ async def test_missing_sprint_provider_data_remains_read_only_and_unavailable() 
 
 
 @pytest.mark.asyncio
-async def test_completed_and_upcoming_event_groups_are_both_oldest_first() -> None:
+async def test_completed_events_are_newest_first_and_upcoming_events_are_nearest_first() -> None:
     early = meeting(
         race_name="Australian Grand Prix",
         race_date=date(2026, 3, 8),
@@ -582,8 +661,45 @@ async def test_completed_and_upcoming_event_groups_are_both_oldest_first() -> No
     events, _ = await service.grouped_events(now=datetime(2026, 7, 18, tzinfo=UTC))
 
     assert [event.event_name for event in events] == [
-        "Australian Grand Prix",
         "British Grand Prix",
+        "Australian Grand Prix",
         "Hungarian Grand Prix",
         "Abu Dhabi Grand Prix",
     ]
+
+
+@pytest.mark.parametrize(
+    ("availability", "samples", "expected"),
+    [
+        # Location availability follows the stored sample count, never the
+        # coarse timing/telemetry grade and never the session type.
+        (SourceAvailability.TIMING_ONLY, 18_421, "available"),
+        (SourceAvailability.TELEMETRY, 0, "unavailable"),
+        (SourceAvailability.LIMITED, 12, "available"),
+        (SourceAvailability.RESULTS_ONLY, 500, "available"),
+        # Unknown is honest: the count could not be read.
+        (SourceAvailability.TELEMETRY, None, "unknown"),
+    ],
+)
+def test_location_capability_reflects_real_sample_counts(
+    availability: SourceAvailability, samples: int | None, expected: str
+) -> None:
+    room = RaceRoom(
+        slug="2026-belgian-grand-prix-qualifying",
+        event_slug="2026-belgian-grand-prix",
+        season=2026,
+        round_number=13,
+        race_name="Belgian Grand Prix",
+        official_name="Belgian Grand Prix Qualifying",
+        circuit_name="Circuit de Spa-Francorchamps",
+        country="Belgium",
+        session_type=SessionType.QUALIFYING,
+        scheduled_start=datetime(2026, 7, 18, 14, tzinfo=UTC),
+        status=RoomStatus.COMPLETED,
+        mode=RoomMode.ARCHIVED,
+        eligibility_status=RoomEligibilityStatus.ELIGIBLE_HISTORICAL,
+        ingestion_status=IngestionStatus.READY,
+        source_availability=availability,
+    )
+    capabilities = RaceRoomService.capabilities_for(room, location_samples=samples)
+    assert capabilities.location.value == expected

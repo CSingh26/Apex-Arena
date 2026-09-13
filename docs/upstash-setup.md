@@ -5,7 +5,8 @@
 This guide provisions Upstash Redis as the event transport for Apex Arena on Railway.
 It is grounded in the actual repository code:
 
-- `backend/app/storage/redis.py` — `RedisStore`, `EventBus` (the only Redis call sites)
+- `backend/app/storage/redis.py` — `RedisStore`, `EventBus`
+- `backend/app/services/rate_limits.py` — aggregate token buckets and stream leases
 - `backend/app/api/streaming.py` and `backend/app/api/room_streaming.py` — the SSE consumer loops
 - `backend/app/core/settings.py` — `redis_url`, `validate_redis_url`, `redis_dsn`, `sse_heartbeat_seconds`
 - `backend/pyproject.toml` — `redis>=6.2,<7` (redis-py asyncio client, not the Upstash REST SDK)
@@ -18,7 +19,7 @@ exception class name; preserve that.
 
 ## Command audit: exactly what this application sends
 
-Every Redis call in the codebase lives in `backend/app/storage/redis.py`. The complete set:
+The application uses stream/health operations plus Lua-based admission:
 
 | Command | Call site | Options used | Upstash support |
 | --- | --- | --- | --- |
@@ -27,17 +28,22 @@ Every Redis call in the codebase lives in `backend/app/storage/redis.py`. The co
 | `XREVRANGE` | `latest_connection_status`, `latest_room_stream_id` | `COUNT 1` | Supported |
 | `XREAD` | `read_events` | `COUNT` (non-blocking) | Supported |
 | `XREAD` | `read_room_stream`, `read_session_streams` | `COUNT` + **`BLOCK`** | Supported, with caveats — see below |
+| `EVAL` | `RedisRateLimiter.admit`, acquire/renew/release | One bounded key per script | Verify on the configured hosted instance before rollout |
+
+Lua invokes `TIME`, `HMGET`, `HSET`, `EXPIRE`, `ZREM`, `ZREMRANGEBYSCORE`,
+`ZSCORE`, `ZCARD`, `ZADD`, and `PEXPIRE`. Hosted ACLs and scripting semantics must
+permit those operations. Local Redis integration tests are not hosted-provider proof.
 
 Plus the handshake redis-py issues per connection: `HELLO`/`AUTH` on connect, and `PING` if
 `health_check_interval` is set. Those count as commands too.
 
 Notable **absences**, which is good news for Upstash: no consumer groups (`XGROUP`, `XREADGROUP`,
-`XACK`), no `SUBSCRIBE`/pub-sub, no `SCAN`, no Lua scripting, no `WAIT`, no transactions or
+`XACK`), no `SUBSCRIBE`/pub-sub, no `SCAN`, no `WAIT`, no transactions or
 pipelining. Streams are trimmed with approximate `MAXLEN` (2000 events, 500 state, 200 status,
 5000 room), so memory is bounded by design.
 
-Upstash implements Redis Streams, so **every command this application uses is supported**. The
-risk is not compatibility — it is the connection and command-count cost of blocking `XREAD`.
+Verify the complete command surface below against the selected hosted service. Both
+compatibility and the connection/command cost of blocking reads and lease renewal matter.
 
 ### The blocking XREAD problem
 
@@ -50,8 +56,7 @@ Block windows in the current code:
 
 - `app/api/streaming.py`: `block_ms = min(10_000, sse_heartbeat_seconds * 1000)` → **10 s** at
   the default `SSE_HEARTBEAT_SECONDS=15`.
-- `app/api/room_streaming.py`: `block_ms = sse_heartbeat_seconds * 1000` → **15 s** at the
-  default. (Note the room stream has no 10 s ceiling — it scales directly with the heartbeat.)
+- `app/api/room_streaming.py`: `block_ms = min(10_000, sse_heartbeat_seconds * 1000)` → **10 s** at the default.
 
 Both loops re-enter immediately after each read, so an idle client issues a steady stream of
 `XREAD` calls forever.
@@ -128,7 +133,7 @@ validator, which only checks the scheme prefix.
 
 | Parameter | Value | Reason |
 | --- | --- | --- |
-| `socket_timeout` | `20` | **Must exceed the longest `BLOCK` window.** Room streams block for `sse_heartbeat_seconds` seconds (15 s by default). A `socket_timeout` below that turns every idle heartbeat into a `TimeoutError`, which the SSE loops catch and report as `degraded` — a self-inflicted outage. If you raise `SSE_HEARTBEAT_SECONDS`, raise this in step with it (heartbeat + 5 s). |
+| `socket_timeout` | `20` | **Must exceed the longest `BLOCK` window**, currently capped at ten seconds for both SSE loops. Too short a timeout creates false degraded events. Admission Lua also has its independent bounded command deadline. |
 | `socket_connect_timeout` | `5` | Fail fast on a suspended or unreachable endpoint rather than hanging a request. |
 | `health_check_interval` | `0` (disabled) | Each health check is an extra `PING` **per connection**, billed as a command, and it interacts badly with long blocking reads. `pool_pre_ping`-style checking is unnecessary here: the SSE loops already catch connection errors, emit a `degraded` event, sleep 1 s, and retry. If you prefer a safety net for the low-traffic publisher path, `30` is the highest-frequency value worth paying for. |
 | `max_connections` | `20` | Bounds the pool so a burst of SSE clients cannot exhaust the Upstash connection limit; excess clients queue instead of erroring. Tune against your observed concurrency and your plan's connection cap. |
@@ -170,26 +175,41 @@ Exercise the actual code paths rather than raw commands, so you test what produc
 ```bash
 python -c "
 import asyncio
+from uuid import uuid4
 from app.core.settings import get_settings
+from app.services.rate_limits import RedisRateLimiter
 from app.storage.redis import EventBus, RedisStore
 
 async def main():
-    store = RedisStore(get_settings().redis_dsn)
+    settings = get_settings()
+    namespace = 'apex:limits:smoke:' + uuid4().hex
+    room_id = 'smoke-' + uuid4().hex
+    store = RedisStore(settings.redis_dsn)
     bus = EventBus(store.client)
-    await bus.publish_connection_status({'state': 'smoke-test'})   # XADD
-    print('xrevrange:', await bus.latest_connection_status())      # XREVRANGE
-    print('xread:', await bus.read_room_stream('smoke', '\$', count=1, block_ms=1000))  # XREAD BLOCK
-    await store.close()
+    limiter = RedisRateLimiter(store.client, settings.model_copy(update={'rate_limit_namespace': namespace}))
+    token = uuid4().hex
+    try:
+        assert (await store.health_check())[0]  # PING
+        await bus.publish_room_generation(room_id, 1)  # XADD
+        assert await bus.latest_room_stream_id(room_id)  # XREVRANGE
+        await bus.read_room_stream(room_id, '\$', count=1, block_ms=1000)  # XREAD BLOCK
+        assert (await limiter.admit('read')).allowed  # EVAL token bucket
+        assert await limiter.acquire_stream(token)  # EVAL lease acquire
+        assert await limiter.renew_stream(token)    # EVAL lease renewal
+        await limiter.release_stream(token)        # EVAL lease release
+        print('Stream and admission command checks passed')
+    finally:
+        await store.client.delete(bus.room_stream(room_id), namespace + ':read', namespace + ':streams')
+        await store.close()
 
 asyncio.run(main())
 "
 ```
 
-A successful run proves `PING`, `XADD` with approximate `MAXLEN`, `XREVRANGE COUNT`, and
-`XREAD BLOCK` all work on your Upstash instance. That is the complete command surface.
-
-Clean up the smoke-test stream afterwards (`apex:rooms:smoke`) — it is otherwise a permanently
-retained key counting against the 256 MB storage limit.
+A successful run verifies stream and admission operations on that specific instance at that
+time, not its capacity or failure behavior. This development sprint ran local Redis tests,
+not this hosted check. The example cleans up only its randomly named keys; never use a broad
+key deletion or flush against a shared service. Run only with an explicitly selected target.
 
 ## 7. Monitor the monthly command limit
 
@@ -202,15 +222,22 @@ that will bite first, because idle SSE clients consume commands continuously.
 The consumer loops re-block immediately after each read, so for an **idle** client:
 
 ```
-commands per client per minute = 60 / (block_ms / 1000)
+idle commands per stream per minute >= 60 / (block_ms / 1000) + 60 / (stream_ttl_seconds / 3)
 ```
 
 At the defaults:
 
 | Stream | `block_ms` | Idle commands/min | Idle commands/hour |
 | --- | --- | --- | --- |
-| Session stream (`/streaming.py`) | 10 s | **6** | 360 |
-| Room stream (`/room_streaming.py`) | 15 s | **4** | 240 |
+| Session stream (`/streaming.py`) | 10 s | **12** (6 read + 6 renew) | 720 |
+| Room stream (`/room_streaming.py`) | 10 s | **12** (6 read + 6 renew) | 720 |
+
+A normal room page opens both streams: at least 24 commands/minute while idle, including
+12 lease-renewal EVALs. Over a continuous 30-day month that is 1,036,800 commands before
+metadata requests, publication, handshakes, retries or reconnects. Each non-exempt HTTP
+request costs one admission EVAL; each SSE also acquires and releases a slot with EVAL.
+The default 200-stream cap is a safety ceiling, not a verified hosted-plan budget. Lower it
+to a measured concurrency budget before deployment; two streams typically serve one page.
 
 Add one `XREVRANGE` per room-stream connection at handshake (`latest_room_stream_id`), and one
 `HELLO`/`AUTH` per new pooled connection.
@@ -219,7 +246,7 @@ For an **active** client, each `XREAD` returns as soon as any subscribed stream 
 loop immediately re-issues, so:
 
 ```
-active commands per client per minute ≈ 60 / (block_ms/1000) + (batches delivered per minute)
+active commands per stream per minute ≈ idle reads + delivered batches + lease renewals
 ```
 
 where batches are bounded above by the event publish rate and below by `count=100` per read
@@ -233,19 +260,18 @@ independent of client count.
 
 Worked monthly budget against a 500,000 command allowance:
 
-- One idle session-stream client: 6/min × 60 × 24 × 30 ≈ **259,000 commands/month**. A *single*
-  permanently open idle tab consumes roughly half the free allowance.
-- Total idle capacity: 500,000 ÷ 6 ≈ 83,000 client-minutes ≈ **1,390 client-hours per month**.
-  Ten concurrent viewers exhaust that in under six days of continuous connection.
-- A four-hour race weekend with ten active viewers at ~126 commands/min each: 10 × 126 × 240 ≈
-  **302,000 commands** — most of a month's allowance in one weekend.
+- One idle stream: 12/min × 60 × 24 × 30 = **518,400 commands/month**.
+- A hypothetical 500,000-command allowance supports under 695 idle stream-hours, or under
+  348 two-stream page-hours, before other traffic. Verify the actual plan allowance.
+- Ten active streams at an illustrative 132 commands/min for four hours use 316,800
+  commands. Ten two-stream pages can use approximately twice that under the same assumptions.
 
 Levers, in order of effectiveness:
 
-1. **Raise `SSE_HEARTBEAT_SECONDS`.** It is validated to `1..120`. Raising it to 60 cuts the
-   room-stream idle rate from 4/min to 1/min. Note the session stream is capped at 10 s by the
-   hard-coded `min(10_000, ...)` in `streaming.py`, so raising the heartbeat alone does **not**
-   reduce session-stream cost — changing that ceiling requires a code change.
+1. **Budget admission and lease renewal explicitly.** Both read loops cap blocking at ten
+   seconds; raising `SSE_HEARTBEAT_SECONDS` above ten does not reduce their idle read rate.
+   Longer stream leases reduce renewal frequency but delay failure fencing and stale-slot
+   reclamation. Keep Redis deadlines below the configured renewal interval.
 2. **Close idle SSE connections.** Both loops run until `request.is_disconnected()`; there is no
    idle timeout. A client left open overnight bills all night.
 3. **Reduce concurrent room subscriptions per user** — each open stream is its own connection
@@ -285,20 +311,20 @@ Move off the free plan (or off Upstash) when any of these appear:
 
 Realistic alternatives at that point: Railway's own Redis add-on (fixed monthly cost, no
 per-command metering, same region as the app), or an Upstash paid fixed-price plan. Because the
-app touches only five Redis commands and reads the endpoint from `REDIS_URL`, migrating is a
-variable change plus a restart — keep it that way.
+app reads the endpoint from `REDIS_URL`, but migration requires stream/Lua compatibility,
+TLS, latency, capacity and recovery checks, not only a variable change.
 
 ---
 
 ## Quick reference
 
-**Command surface:** `PING`, `XADD` (`MAXLEN ~`), `XREVRANGE` (`COUNT`), `XREAD` (`COUNT`, `BLOCK`).
-Nothing else. All supported by Upstash.
+**Command surface:** `PING`, `XADD`, `XREVRANGE`, `XREAD`, and `EVAL` with the hash/sorted-set/
+TIME/expiry operations listed above. Validate the configured hosted service and ACLs.
 
-**Idle cost:** `60 / (block_ms / 1000)` commands per client per minute — 6/min for session
-streams, 4/min for room streams at default settings.
+**Idle cost:** at least 12 commands/minute per stream and 24 per two-stream page at defaults,
+plus ordinary request admission, stream acquire/release, handshakes and publication.
 
 **Required in production:** `rediss://` scheme (enforced by `validate_runtime_contract`).
 
-**Critical setting:** `socket_timeout` must be greater than `SSE_HEARTBEAT_SECONDS`, or every
-idle heartbeat becomes a spurious `degraded` event.
+**Critical setting:** `socket_timeout` must exceed the actual capped blocking-read window;
+admission and lease renewal use their own shorter command deadline.

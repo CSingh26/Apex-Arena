@@ -14,12 +14,13 @@ and it must be able to reject traffic that did not come through the proxy.
 
 from __future__ import annotations
 
+import base64
 import hmac
 import logging
 import uuid
 from collections.abc import Awaitable, Callable
 
-from fastapi import Request, Response
+from fastapi import HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.status import HTTP_403_FORBIDDEN
@@ -29,6 +30,7 @@ from app.core.settings import Settings
 logger = logging.getLogger(__name__)
 
 PROXY_TOKEN_HEADER = "X-Apex-Proxy-Token"
+REPLAY_OPERATOR_HEADER = "X-Apex-Replay-Password"
 PUBLIC_HOST_HEADER = "X-Apex-Public-Host"
 PUBLIC_PROTO_HEADER = "X-Apex-Public-Proto"
 ORIGINAL_PATH_HEADER = "X-Apex-Original-Path"
@@ -39,19 +41,54 @@ REQUEST_ID_HEADER = "X-Request-ID"
 UNPROTECTED_PATHS = frozenset({"/health/live"})
 
 
+def replay_operator_password(settings: Settings) -> str | None:
+    """Return the configured replay credential without normalizing its value."""
+    configured = settings.admin_dashboard_password
+    if configured is None:
+        return None
+    value = configured.get_secret_value()
+    return value if value.strip() else None
+
+
+def require_replay_operator(request: Request) -> None:
+    """Authorize a replay mutation independently from the public proxy hop."""
+    settings: Settings = request.app.state.services.settings
+    configured = replay_operator_password(settings)
+    if configured is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Replay operator access is not configured",
+        )
+
+    header_name = REPLAY_OPERATOR_HEADER.lower().encode("ascii")
+    supplied_values = [
+        value for name, value in request.scope["headers"] if name.lower() == header_name
+    ]
+    supplied = supplied_values[0] if len(supplied_values) == 1 else None
+    expected = base64.b64encode(configured.encode("utf-8"))
+    if supplied is None or not supplied.strip() or not hmac.compare_digest(supplied, expected):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid replay operator credential",
+        )
+
+
 class ProxyContextMiddleware(BaseHTTPMiddleware):
     """Validate the proxy token and derive the public origin for each request."""
 
     def __init__(self, app: object, settings: Settings) -> None:
         super().__init__(app)  # type: ignore[arg-type]
         self.settings = settings
-
-    @property
-    def _enforcing(self) -> bool:
-        return (
-            self.settings.proxy_enforcement_enabled
-            and self.settings.apex_arena_proxy_token is not None
-            and self.settings.app_env in {"staging", "production"}
+        self._enforcing = settings.proxy_enforcement_enabled and settings.app_env in {
+            "staging",
+            "production",
+        }
+        configured = settings.apex_arena_proxy_token
+        configured_value = configured.get_secret_value() if configured is not None else None
+        self._proxy_token = (
+            configured_value
+            if configured_value and configured_value == configured_value.strip()
+            else None
         )
 
     async def dispatch(
@@ -63,10 +100,15 @@ class ProxyContextMiddleware(BaseHTTPMiddleware):
         request.state.request_id = request_id
 
         if self._enforcing and request.url.path not in UNPROTECTED_PATHS:
-            configured = self.settings.apex_arena_proxy_token
-            assert configured is not None  # Narrowed by ``_enforcing``.
-            supplied = request.headers.get(PROXY_TOKEN_HEADER)
-            if supplied is None or not hmac.compare_digest(supplied, configured.get_secret_value()):
+            supplied_values = request.headers.getlist(PROXY_TOKEN_HEADER)
+            supplied = supplied_values[0] if len(supplied_values) == 1 else None
+            if (
+                self._proxy_token is None
+                or supplied is None
+                or not supplied
+                or supplied != supplied.strip()
+                or not hmac.compare_digest(supplied, self._proxy_token)
+            ):
                 # Log the correlation id only; never the supplied token value.
                 logger.warning(
                     "Rejected non-proxied request path=%s request_id=%s",

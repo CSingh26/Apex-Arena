@@ -1,14 +1,22 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 from __future__ import annotations
 
+import asyncio
+import time
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import String, case, cast, delete, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 
-from app.domain.models import NormalizedRaceEvent, RaceStateSnapshot
+from app.domain.models import (
+    EventImportance,
+    EventOrigin,
+    NormalizedRaceEvent,
+    RaceEventType,
+    RaceStateSnapshot,
+)
 from app.services.event_pipeline import NormalizedPersistResult, PipelineResult
 from app.services.historical import IngestionRunSummary
 from app.services.race_state import SnapshotPersistResult
@@ -23,6 +31,38 @@ from app.storage.models import (
     RaceStateSnapshotRecord,
     RawProviderEventRecord,
 )
+
+
+def canonical_replay_sequence_numbers(
+    source_events: list[NormalizedRaceEvent],
+    derived_events: list[NormalizedRaceEvent],
+) -> tuple[dict[UUID, int], list[NormalizedRaceEvent]]:
+    """Interleave derivations after their triggering source fact."""
+
+    ordered_sources = sorted(source_events, key=lambda event: event.sequence_number)
+    source_sequences = {event.sequence_number for event in ordered_sources}
+    if len(source_sequences) != len(ordered_sources):
+        raise ValueError("Canonical source replay sequences must be unique")
+
+    derived_by_source: dict[int, list[tuple[int, NormalizedRaceEvent]]] = {}
+    for index, event in enumerate(derived_events):
+        if event.sequence_number not in source_sequences:
+            raise ValueError("Derived event does not reference a canonical source sequence")
+        derived_by_source.setdefault(event.sequence_number, []).append((index, event))
+
+    source_result: dict[UUID, int] = {}
+    derived_result: list[NormalizedRaceEvent | None] = [None] * len(derived_events)
+    sequence = 0
+    for source in ordered_sources:
+        sequence += 1
+        source_result[source.id] = sequence
+        for index, event in derived_by_source.get(source.sequence_number, []):
+            sequence += 1
+            derived_result[index] = event.model_copy(update={"sequence_number": sequence})
+
+    if any(event is None for event in derived_result):
+        raise ValueError("Canonical replay sequence generation was incomplete")
+    return source_result, [event for event in derived_result if event is not None]
 
 
 class SqlIngestionRunRepository:
@@ -52,22 +92,76 @@ class SqlIngestionRunRepository:
         result: PipelineResult,
         last_event_at: datetime | None,
         last_error: str | None = None,
-    ) -> None:
+    ) -> bool:
         async with self.database.session_factory() as session:
-            await session.execute(
-                update(IngestionRunRecord)
-                .where(IngestionRunRecord.id == run_id)
-                .values(
-                    status=status,
-                    ended_at=datetime.now(UTC),
-                    last_event_at=last_event_at,
-                    last_error=last_error,
-                    raw_inserted=result.raw_inserted,
-                    duplicates=result.raw_duplicates + result.normalized_duplicates,
-                    normalized_inserted=result.normalized_inserted,
+            finished = (
+                await session.execute(
+                    update(IngestionRunRecord)
+                    .where(
+                        IngestionRunRecord.id == run_id,
+                        IngestionRunRecord.status == "running",
+                    )
+                    .values(
+                        status=status,
+                        ended_at=datetime.now(UTC),
+                        last_event_at=last_event_at,
+                        last_error=last_error,
+                        raw_inserted=result.raw_inserted,
+                        duplicates=result.raw_duplicates + result.normalized_duplicates,
+                        normalized_inserted=result.normalized_inserted,
+                    )
+                    .returning(IngestionRunRecord.id)
                 )
+            ).scalar_one_or_none()
+            await session.commit()
+            return finished is not None
+
+    async def heartbeat(self, run_id: UUID) -> bool:
+        async with self.database.session_factory() as session:
+            renewed = (
+                await session.execute(
+                    update(IngestionRunRecord)
+                    .where(
+                        IngestionRunRecord.id == run_id,
+                        IngestionRunRecord.status == "running",
+                    )
+                    .values(heartbeat_at=datetime.now(UTC))
+                    .returning(IngestionRunRecord.id)
+                )
+            ).scalar_one_or_none()
+            await session.commit()
+            return renewed is not None
+
+    async def fail_running_before(self, cutoff: datetime, *, reason: str) -> int:
+        freshness = func.coalesce(
+            IngestionRunRecord.heartbeat_at,
+            IngestionRunRecord.started_at,
+        )
+        async with self.database.session_factory() as session:
+            failed = (
+                (
+                    await session.execute(
+                        update(IngestionRunRecord)
+                        .where(
+                            IngestionRunRecord.status == "running",
+                            IngestionRunRecord.provider == "openf1",
+                            IngestionRunRecord.run_metadata["adapter"].as_string()
+                            == "historical_rest",
+                            freshness < cutoff,
+                        )
+                        .values(
+                            status="failed",
+                            ended_at=datetime.now(UTC),
+                            last_error=reason,
+                        )
+                        .returning(IngestionRunRecord.id)
+                    )
+                )
+                .scalars()
+                .all()
             )
             await session.commit()
+            return len(failed)
 
     async def latest(self) -> IngestionRunSummary | None:
         statement = (
@@ -110,14 +204,18 @@ class SqlRawEventRepository:
             if inserted_id is not None:
                 return RawEventRepositoryResult(record_id=inserted_id, is_new=True)
 
-            existing_id = (
+            existing_id, processing_status = (
                 await session.execute(
-                    select(RawProviderEventRecord.id).where(
-                        RawProviderEventRecord.deterministic_hash == event.deterministic_hash
-                    )
+                    select(
+                        RawProviderEventRecord.id, RawProviderEventRecord.processing_status
+                    ).where(RawProviderEventRecord.deterministic_hash == event.deterministic_hash)
                 )
-            ).scalar_one()
-            return RawEventRepositoryResult(record_id=existing_id, is_new=False)
+            ).one()
+            return RawEventRepositoryResult(
+                record_id=existing_id,
+                is_new=False,
+                needs_normalization=processing_status == "pending",
+            )
 
     async def count(self, session_key: str | None = None) -> int:
         statement = select(func.count(RawProviderEventRecord.id))
@@ -141,8 +239,7 @@ class SqlNormalizedEventRepository:
         self.database = database
 
     async def insert(self, event: NormalizedRaceEvent) -> NormalizedPersistResult:
-        values = event.model_dump()
-        values["event_type"] = event.event_type.value
+        values = self._event_values(event)
         statement = (
             insert(NormalizedRaceEventRecord)
             .values(**values)
@@ -162,6 +259,37 @@ class SqlNormalizedEventRepository:
                 )
             ).scalar_one()
             return NormalizedPersistResult(record_id=existing_id, is_new=False)
+
+    @staticmethod
+    def _event_values(event: NormalizedRaceEvent) -> dict[str, Any]:
+        values = event.model_dump(
+            exclude={
+                "event_type",
+                "event_origin",
+                "importance_level",
+                "confidence_level",
+                "derivation",
+            }
+        )
+        values["event_type"] = event.event_type.value
+        values["event_origin"] = event.event_origin.value
+        values["importance_level"] = event.importance_level.value
+        values["confidence_level"] = event.confidence_level.value
+        values["derivation"] = (
+            event.derivation.model_dump(mode="json") if event.derivation is not None else None
+        )
+        return values
+
+    async def replace_derived_for_session(
+        self,
+        session_key: str,
+        events: list[NormalizedRaceEvent],
+        *,
+        source_events: list[NormalizedRaceEvent],
+    ) -> list[NormalizedRaceEvent]:
+        raise ValueError(
+            "Stored append-order history cannot be replaced or renumbered; use a dry-run rebuild"
+        )
 
     async def max_sequence(self, session_key: str) -> int:
         statement = select(func.max(NormalizedRaceEventRecord.sequence_number)).where(
@@ -187,16 +315,71 @@ class SqlNormalizedEventRepository:
             return int((await session.execute(statement)).scalar_one())
 
     async def list_for_session(
-        self, session_key: str, after_sequence: int = 0, limit: int = 100
+        self,
+        session_key: str,
+        after_sequence: int = 0,
+        limit: int = 100,
+        *,
+        before_sequence: int | None = None,
+        event_types: list[RaceEventType] | None = None,
+        driver_number: int | None = None,
+        lap_number: int | None = None,
+        minimum_importance: EventImportance | None = None,
+        event_origin: EventOrigin | None = None,
+        before_time: datetime | None = None,
     ) -> list[NormalizedRaceEvent]:
+        predicates = [
+            NormalizedRaceEventRecord.session_key == session_key,
+            NormalizedRaceEventRecord.sequence_number > after_sequence,
+        ]
+        if before_sequence is not None:
+            predicates.append(NormalizedRaceEventRecord.sequence_number <= before_sequence)
+        if event_types:
+            predicates.append(
+                NormalizedRaceEventRecord.event_type.in_([value.value for value in event_types])
+            )
+        if driver_number is not None:
+            predicates.append(
+                or_(
+                    NormalizedRaceEventRecord.primary_driver_number == driver_number,
+                    NormalizedRaceEventRecord.secondary_driver_number == driver_number,
+                    NormalizedRaceEventRecord.driver_numbers.contains([driver_number]),
+                )
+            )
+        if lap_number is not None:
+            predicates.append(NormalizedRaceEventRecord.lap_number == lap_number)
+        if minimum_importance is not None:
+            levels = list(EventImportance)
+            predicates.append(
+                NormalizedRaceEventRecord.importance_level.in_(
+                    [level.value for level in levels[levels.index(minimum_importance) :]]
+                )
+            )
+        if event_origin is not None:
+            predicates.append(NormalizedRaceEventRecord.event_origin == event_origin.value)
+        if before_time is not None:
+            predicates.append(NormalizedRaceEventRecord.event_time < before_time)
+        statement = (
+            select(NormalizedRaceEventRecord)
+            .where(*predicates)
+            .order_by(NormalizedRaceEventRecord.sequence_number)
+            .limit(limit)
+        )
+        async with self.database.session_factory() as session:
+            records = (await session.execute(statement)).scalars().all()
+            return [
+                NormalizedRaceEvent.model_validate(record, from_attributes=True)
+                for record in records
+            ]
+
+    async def list_driver_profiles(self, session_key: str) -> list[NormalizedRaceEvent]:
         statement = (
             select(NormalizedRaceEventRecord)
             .where(
                 NormalizedRaceEventRecord.session_key == session_key,
-                NormalizedRaceEventRecord.sequence_number > after_sequence,
+                NormalizedRaceEventRecord.event_type == RaceEventType.DRIVER_UPDATE.value,
             )
             .order_by(NormalizedRaceEventRecord.sequence_number)
-            .limit(limit)
         )
         async with self.database.session_factory() as session:
             records = (await session.execute(statement)).scalars().all()
@@ -220,26 +403,81 @@ class SqlRaceStateSnapshotRepository:
         self.database = database
 
     async def insert(self, snapshot: RaceStateSnapshot) -> SnapshotPersistResult:
+        async with self.database.session_factory() as session:
+            result = await self.insert_in_transaction(session, snapshot)
+            await session.commit()
+            return result
+
+    @staticmethod
+    async def insert_in_transaction(session, snapshot: RaceStateSnapshot) -> SnapshotPersistResult:
         statement = (
             insert(RaceStateSnapshotRecord)
             .values(**snapshot.model_dump())
             .on_conflict_do_nothing(constraint="uq_snapshot_session_sequence")
             .returning(RaceStateSnapshotRecord.id)
         )
-        async with self.database.session_factory() as session:
-            inserted_id = (await session.execute(statement)).scalar_one_or_none()
-            await session.commit()
-            if inserted_id is not None:
-                return SnapshotPersistResult(record_id=inserted_id, is_new=True)
-            existing_id = (
+        inserted_id = (await session.execute(statement)).scalar_one_or_none()
+        if inserted_id is not None:
+            return SnapshotPersistResult(record_id=inserted_id, is_new=True)
+        existing = await session.scalar(
+            select(RaceStateSnapshotRecord).where(
+                RaceStateSnapshotRecord.session_key == snapshot.session_key,
+                RaceStateSnapshotRecord.sequence_number == snapshot.sequence_number,
+            )
+        )
+        candidate = snapshot.model_dump(exclude={"id", "created_at"})
+        if existing is None or any(
+            getattr(existing, key) != value for key, value in candidate.items()
+        ):
+            raise RuntimeError("Snapshot immutable content conflict")
+        return SnapshotPersistResult(record_id=existing.id, is_new=False)
+
+    async def at_or_before(
+        self,
+        session_key: str,
+        sequence: int,
+        *,
+        algorithm_identity: str,
+        snapshot_schema_version: int,
+        lower_sequence: int,
+        statement_deadline: float,
+    ) -> RaceStateSnapshot | None:
+        if lower_sequence < max(0, sequence - 2047) or lower_sequence > sequence:
+            raise ValueError("Snapshot lookup span exceeds bound")
+        remaining = statement_deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("Snapshot lookup deadline")
+        record = RaceStateSnapshotRecord
+        encoded_bytes = func.octet_length(cast(record.state, String))
+        fields = [column for column in record.__table__.c if column.name != "state"]
+        query = (
+            select(
+                *fields,
+                case((encoded_bytes <= 2 * 1024 * 1024, record.state), else_=None).label("state"),
+            )
+            .where(
+                record.session_key == session_key,
+                record.sequence_number >= lower_sequence,
+                record.sequence_number <= sequence,
+                record.state["compact_schema_version"].as_integer() == snapshot_schema_version,
+                record.state["history_reference"]["algorithm_version"].as_string()
+                == algorithm_identity,
+            )
+            .order_by(record.sequence_number.desc())
+            .limit(1)
+        )
+        async with asyncio.timeout(remaining):
+            async with self.database.session_factory() as session:
                 await session.execute(
-                    select(RaceStateSnapshotRecord.id).where(
-                        RaceStateSnapshotRecord.session_key == snapshot.session_key,
-                        RaceStateSnapshotRecord.sequence_number == snapshot.sequence_number,
-                    )
+                    text("SELECT set_config('statement_timeout', :value, true)"),
+                    {"value": str(max(1, min(500, int(remaining * 1000))))},
                 )
-            ).scalar_one()
-            return SnapshotPersistResult(record_id=existing_id, is_new=False)
+                row = (await session.execute(query)).mappings().one_or_none()
+        if row is None:
+            return None
+        if row["state"] is None:
+            raise ValueError("Snapshot byte limit exceeded")
+        return RaceStateSnapshot.model_validate(dict(row))
 
     async def latest(self, session_key: str) -> RaceStateSnapshot | None:
         statement = (

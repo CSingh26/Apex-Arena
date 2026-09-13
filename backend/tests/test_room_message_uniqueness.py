@@ -16,7 +16,7 @@ from app.domain.rooms import (
     RoomMessage,
 )
 from app.storage.models import RoomMessageRecord
-from app.storage.room_repository import SqlRaceRoomRepository
+from app.storage.room_repository import DiscussionGenerationChangedError, SqlRaceRoomRepository
 
 
 class FakeScalarResult:
@@ -28,9 +28,16 @@ class FakeScalarResult:
 
 
 class FakeSession:
-    def __init__(self, *, inserted_id: UUID | None, max_sequence: int = 0) -> None:
+    def __init__(
+        self,
+        *,
+        inserted_id: UUID | None,
+        max_sequence: int = 0,
+        discussion_generation: int = 1,
+    ) -> None:
         self.inserted_id = inserted_id
         self.max_sequence = max_sequence
+        self.discussion_generation = discussion_generation
         self.added: list[object] = []
         self.committed = False
         self.update_count = 0
@@ -52,6 +59,8 @@ class FakeSession:
         if visit_name == "update":
             self.update_count += 1
             return FakeScalarResult(None)
+        if "race_rooms.discussion_generation" in str(statement):
+            return FakeScalarResult(self.discussion_generation)
         if "max(room_messages.sequence)" in str(statement):
             return FakeScalarResult(self.max_sequence)
         return FakeScalarResult(None)
@@ -104,7 +113,9 @@ async def test_duplicate_generation_key_returns_inserted_false_without_side_effe
     repository = SqlRaceRoomRepository(FakeDatabase(session))  # type: ignore[arg-type]
     room_id = uuid4()
 
-    stored, inserted = await repository.insert_message(message(room_id), [evidence(uuid4())])
+    stored, inserted = await repository.insert_message(
+        message(room_id), [evidence(uuid4())], expected_generation=1
+    )
 
     assert inserted is False
     assert stored.sequence == 0
@@ -121,7 +132,7 @@ async def test_duplicate_trigger_agent_returns_inserted_false_without_integrity_
     repository = SqlRaceRoomRepository(FakeDatabase(session))  # type: ignore[arg-type]
     first = message(uuid4(), generation_key="same-trigger-different-generation-key")
 
-    _, inserted = await repository.insert_message(first, [evidence(uuid4())])
+    _, inserted = await repository.insert_message(first, [evidence(uuid4())], expected_generation=1)
 
     assert inserted is False
     assert session.added == []
@@ -135,7 +146,9 @@ async def test_successful_insert_increments_counters_and_preserves_sequence_orde
     session = FakeSession(inserted_id=inserted_id, max_sequence=7)
     repository = SqlRaceRoomRepository(FakeDatabase(session))  # type: ignore[arg-type]
 
-    stored, inserted = await repository.insert_message(message(uuid4()), [evidence(uuid4())])
+    stored, inserted = await repository.insert_message(
+        message(uuid4()), [evidence(uuid4())], expected_generation=1
+    )
 
     assert inserted is True
     assert stored.id == inserted_id
@@ -143,6 +156,24 @@ async def test_successful_insert_increments_counters_and_preserves_sequence_orde
     assert len(session.added) == 1
     assert session.update_count == 1
     assert session.committed is True
+
+
+@pytest.mark.asyncio
+async def test_generation_mismatch_is_not_treated_as_a_duplicate_or_written() -> None:
+    session = FakeSession(inserted_id=uuid4(), discussion_generation=2)
+    repository = SqlRaceRoomRepository(FakeDatabase(session))  # type: ignore[arg-type]
+
+    with pytest.raises(DiscussionGenerationChangedError):
+        await repository.insert_message(
+            message(uuid4()),
+            [evidence(uuid4())],
+            expected_generation=1,
+        )
+
+    assert session.insert_sql == ""
+    assert session.added == []
+    assert session.update_count == 0
+    assert session.committed is False
 
 
 def test_room_message_model_uses_active_partial_unique_indexes() -> None:

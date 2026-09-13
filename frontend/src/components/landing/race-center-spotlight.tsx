@@ -42,7 +42,7 @@ export function RaceCenterSpotlight() {
     const load = async () => {
       try {
         const [weekends, standings] = await Promise.all([getRaceRoomEvents(params, controller.signal), getDriverStandings(controller.signal)]);
-        setData({ events: weekends.events.filter((event) => !event.is_development), leader: standings.standings[0] ?? null });
+        setData({ events: weekends.events, leader: standings.standings[0] ?? null });
       } catch (reason) {
         if (!(reason instanceof Error) || reason.name !== "AbortError") setError(true);
       }

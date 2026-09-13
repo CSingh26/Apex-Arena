@@ -37,7 +37,6 @@ async def run(args: argparse.Namespace) -> int:
             season=args.season,
             limit=1,
             include_unavailable=True,
-            include_development=True,
         )
         if not args.dry_run:
             if args.force_refresh:
@@ -47,7 +46,6 @@ async def run(args: argparse.Namespace) -> int:
             season=args.season,
             limit=500,
             include_unavailable=True,
-            include_development=True,
         )
         if args.room_slug:
             rooms = [room for room in rooms if room.slug == args.room_slug]

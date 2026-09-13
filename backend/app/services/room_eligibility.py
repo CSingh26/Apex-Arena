@@ -44,7 +44,6 @@ class RoomEligibilityService:
         replay_available: bool = False,
         results_available: bool = False,
         existing_room: RaceRoom | None = None,
-        test_fixture_mode: bool = False,
         now: datetime | None = None,
     ) -> RoomEligibilityResult:
         observed_at = self._aware(now or self._clock())
@@ -54,19 +53,6 @@ class RoomEligibilityService:
             if isinstance(actual_status, RoomStatus)
             else str(actual_status or "")
         ).casefold()
-
-        if test_fixture_mode:
-            return RoomEligibilityResult(
-                status=(
-                    RoomEligibilityStatus.ALREADY_EXISTS
-                    if existing_room is not None
-                    else RoomEligibilityStatus.ELIGIBLE_HISTORICAL
-                ),
-                can_create=existing_room is None,
-                can_open=True,
-                can_replay=True,
-                reason="Internal deterministic fixture mode is enabled.",
-            )
 
         # A stale row from an older catalog must never make a future session active.
         if (
@@ -84,6 +70,21 @@ class RoomEligibilityService:
                 can_open=False,
                 can_replay=False,
                 reason="This session has not started. Room opens when session data is available.",
+            )
+
+        # A live room is a durable waiting surface even before provider publication.
+        # Availability remains separate and never claims telemetry from the calendar.
+        if status == RoomStatus.LIVE.value:
+            return RoomEligibilityResult(
+                status=(
+                    RoomEligibilityStatus.ALREADY_EXISTS
+                    if existing_room is not None
+                    else RoomEligibilityStatus.ELIGIBLE_LIVE
+                ),
+                can_create=existing_room is None,
+                can_open=True,
+                can_replay=False,
+                reason="The live room is available; provider ingestion retries independently.",
             )
 
         if existing_room is not None:
@@ -111,20 +112,6 @@ class RoomEligibilityService:
                 can_replay=replay_ready,
                 reason="A room already exists for this session.",
             )
-
-        if status in {RoomStatus.LIVE.value, "live"}:
-            if (
-                provider_session_available
-                or data_availability is not SourceAvailability.UNAVAILABLE
-            ):
-                return RoomEligibilityResult(
-                    status=RoomEligibilityStatus.ELIGIBLE_LIVE,
-                    can_create=True,
-                    can_open=True,
-                    can_replay=False,
-                    reason="The session is live and provider data is available.",
-                )
-            return self._provider_pending()
 
         if status in {RoomStatus.COMPLETED.value, RoomStatus.READY.value, "completed", "finished"}:
             if (
@@ -194,7 +181,6 @@ class RoomEligibilityService:
             replay_available=room.replay_available,
             results_available=room.results_available,
             existing_room=room,
-            test_fixture_mode=room.is_development,
             now=now,
         )
 

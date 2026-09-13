@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 from __future__ import annotations
 
+import base64
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -8,6 +9,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from fastapi import HTTPException
+from fastapi.testclient import TestClient
 
 from app.api.room_routes import (
     change_playback,
@@ -20,8 +22,10 @@ from app.api.room_routes import (
     start_replay,
 )
 from app.api.room_schemas import PlaybackRequest, ReplayRequest
+from app.core.settings import Settings
 from app.domain.circuits import SessionWeather
-from app.domain.models import NormalizedRaceEvent, RaceEventType
+from app.domain.intelligence import BattleIntensity, BattleState, BattleStatus, BattleTrend
+from app.domain.models import EventOrigin, NormalizedRaceEvent, RaceEventType
 from app.domain.rooms import (
     Confidence,
     EvidenceStatus,
@@ -37,32 +41,95 @@ from app.domain.rooms import (
     SourceAvailability,
     WeekendStatus,
 )
+from app.main import create_app
 from app.services.circuit_intelligence import CircuitIntelligenceService
 from app.services.discussion import DiscussionMetrics
 from app.services.race_state import RaceState
 from app.services.room_replay import ReplayUnavailableError
+from app.storage.room_repository import DiscussionPage
+
+pytestmark = pytest.mark.usefixtures("no_replay_startup_io")
+
+REPLAY_OPERATOR_HEADER = "X-Apex-Replay-Password"
+REPLAY_OPERATOR_PASSWORD = "operator-test-password"
+
+
+@pytest.mark.parametrize("endpoint", ["detail", "restart", "control"])
+async def test_room_responses_reject_mixed_playback_generation(endpoint):
+    room = api_room().model_copy(update={"discussion_generation": 2})
+    services = route_services(room)
+    old = RoomPlaybackState(room_id=room.id, discussion_generation=1)
+    services.room_repository.get_playback.return_value = old
+    services.room_replay.start.return_value = old
+    services.room_replay.pause.return_value = old
+    with pytest.raises(HTTPException) as error:
+        if endpoint == "detail":
+            await race_room_detail(room.slug, services)
+        elif endpoint == "restart":
+            await start_replay(room.slug, services, ReplayRequest(action="restart"))
+        else:
+            await change_playback(room.slug, PlaybackRequest(action="pause"), services)
+    assert error.value.status_code == 409
+
+
+@pytest.mark.parametrize(
+    "action,fields",
+    [
+        ("pause", {}),
+        ("resume", {}),
+        ("set_speed", {"playback_speed": 2}),
+        ("seek_to_sequence", {"sequence": 1}),
+        ("seek_to_lap", {"lap_number": 1}),
+        ("seek_to_phase", {"phase": "Q1"}),
+        ("seek_to_session_time", {"session_time": 1}),
+    ],
+)
+async def test_all_playback_controls_translate_peer_conflict_to_409(action, fields):
+    room = api_room()
+    services = route_services(room)
+    services.room_replay = SimpleNamespace(
+        **{
+            name: AsyncMock(
+                side_effect=ReplayUnavailableError(
+                    "Replay is owned by another worker; retry the control request shortly"
+                )
+            )
+            for name in (
+                "pause",
+                "resume",
+                "set_speed",
+                "seek_to_sequence",
+                "seek_to_lap",
+                "seek_to_phase",
+                "seek_to_session_time",
+            )
+        }
+    )
+    with pytest.raises(HTTPException) as error:
+        await change_playback(room.slug, PlaybackRequest(action=action, **fields), services)
+    assert error.value.status_code == 409
+    assert "retry" in error.value.detail
 
 
 def api_room(
     *,
     source_availability: SourceAvailability = SourceAvailability.TELEMETRY,
-    mode: RoomMode = RoomMode.DEVELOPMENT,
+    mode: RoomMode = RoomMode.ARCHIVED,
 ) -> RaceRoom:
     return RaceRoom(
-        slug="day3-validation-room",
-        session_key="day3-session",
+        slug="belgian-grand-prix-race",
+        session_key="belgian-race-session",
         season=2026,
-        round_number=99,
-        race_name="Day 3 Validation Race",
-        official_name="Apex Arena Day 3 Validation Race",
-        circuit_name="Apex Validation Circuit",
-        country="Development",
+        round_number=13,
+        race_name="Belgian Grand Prix",
+        official_name="Belgian Grand Prix",
+        circuit_name="Circuit de Spa-Francorchamps",
+        country="Belgium",
         scheduled_start=datetime(2026, 7, 17, 12, tzinfo=UTC),
         status=RoomStatus.READY,
         mode=mode,
         total_laps=12,
         source_availability=source_availability,
-        is_development=True,
     )
 
 
@@ -91,6 +158,13 @@ def route_services(room: RaceRoom) -> SimpleNamespace:
         get_playback=AsyncMock(return_value=playback),
         list_rooms=AsyncMock(return_value=([room], 1)),
         list_messages=AsyncMock(return_value=[]),
+        list_message_page=AsyncMock(
+            return_value=DiscussionPage(
+                discussion_generation=room.discussion_generation,
+                messages=[],
+                next_cursor=None,
+            )
+        ),
         get_message=AsyncMock(return_value=None),
         message_evidence=AsyncMock(return_value=[]),
     )
@@ -106,6 +180,11 @@ def route_services(room: RaceRoom) -> SimpleNamespace:
         ),
         room_repository=room_repository,
         room_replay=SimpleNamespace(
+            with_session_clock=AsyncMock(
+                side_effect=lambda _session_key, state: state.model_copy(
+                    update={"session_clock": datetime(2026, 7, 19, 13, 45, tzinfo=UTC)}
+                )
+            ),
             start=AsyncMock(return_value=playback),
             pause=AsyncMock(return_value=playback),
             resume=AsyncMock(return_value=playback),
@@ -122,17 +201,36 @@ def route_services(room: RaceRoom) -> SimpleNamespace:
     )
 
 
+def attach_route_services(app: object, settings: Settings, room: RaceRoom) -> SimpleNamespace:
+    services = route_services(room)
+    services.settings = settings
+    app.state.services = services
+    return services
+
+
+def replay_settings(
+    settings: Settings,
+    password: str | None = REPLAY_OPERATOR_PASSWORD,
+) -> Settings:
+    return Settings.model_validate({**settings.model_dump(), "admin_dashboard_password": password})
+
+
+def operator_headers(password: str = REPLAY_OPERATOR_PASSWORD) -> dict[str, str]:
+    wire_value = base64.b64encode(password.encode("utf-8")).decode("ascii")
+    return {REPLAY_OPERATOR_HEADER: wire_value}
+
+
 @pytest.mark.asyncio
 async def test_room_catalog_forwards_mode_search_sort_and_pagination() -> None:
-    room = api_room().model_copy(update={"is_development": False})
+    room = api_room()
     services = route_services(room)
 
     response = await list_race_rooms(
         services,
         season=2026,
         room_status=RoomStatus.READY,
-        mode=RoomMode.DEVELOPMENT,
-        search="validation",
+        mode=RoomMode.ARCHIVED,
+        search="belgian",
         sort="latest_activity",
         limit=12,
         offset=3,
@@ -143,8 +241,8 @@ async def test_room_catalog_forwards_mode_search_sort_and_pagination() -> None:
     services.room_repository.list_rooms.assert_awaited_once_with(
         season=2026,
         status=RoomStatus.READY,
-        mode=RoomMode.DEVELOPMENT,
-        search="validation",
+        mode=RoomMode.ARCHIVED,
+        search="belgian",
         sort="latest_activity",
         limit=12,
         offset=3,
@@ -152,7 +250,7 @@ async def test_room_catalog_forwards_mode_search_sort_and_pagination() -> None:
 
 
 @pytest.mark.asyncio
-async def test_public_room_catalog_defensively_excludes_validation_fixture() -> None:
+async def test_public_room_catalog_returns_real_session_rooms() -> None:
     room = api_room()
     services = route_services(room)
 
@@ -167,8 +265,8 @@ async def test_public_room_catalog_defensively_excludes_validation_fixture() -> 
         offset=0,
     )
 
-    assert response.rooms == []
-    assert response.total == 0
+    assert response.rooms == [room]
+    assert response.total == 1
 
 
 @pytest.mark.asyncio
@@ -202,16 +300,14 @@ async def test_grouped_event_catalog_forwards_authoritative_filters() -> None:
 
 
 @pytest.mark.asyncio
-async def test_public_detail_hides_development_fixture_outside_explicit_test_mode() -> None:
+async def test_public_detail_is_available_for_real_session_in_staging() -> None:
     room = api_room()
     services = route_services(room)
     services.settings.app_env = "staging"
 
-    with pytest.raises(HTTPException) as error:
-        await race_room_detail(room.slug, services)
-
-    assert error.value.status_code == 404
-    services.room_repository.get_agents.assert_not_awaited()
+    response = await race_room_detail(room.slug, services)
+    assert response.room.slug == room.slug
+    services.room_repository.get_agents.assert_awaited_once_with(room.id)
 
 
 @pytest.mark.asyncio
@@ -219,7 +315,6 @@ async def test_future_placeholder_room_is_rejected_before_replay_starts() -> Non
     room = api_room(source_availability=SourceAvailability.UNAVAILABLE).model_copy(
         update={
             "slug": "2027-future-grand-prix-race",
-            "is_development": False,
             "scheduled_start": datetime(2027, 7, 18, 12, tzinfo=UTC),
             "status": RoomStatus.PENDING,
             "mode": RoomMode.REPLAY,
@@ -247,24 +342,87 @@ async def test_room_detail_has_timing_only_notice_and_safe_diagnostics_flag() ->
     assert "Timing data" in response.data_notice
     assert "limited" in response.data_notice
     assert response.diagnostics_available is True
-    assert response.circuit.circuit_name == "Apex Validation Circuit"
+    assert response.circuit.circuit_name == "Circuit de Spa-Francorchamps"
     assert response.weather.available is False
-    services.circuit_weather.for_session.assert_awaited_once_with("day3-session")
+    services.circuit_weather.for_session.assert_awaited_once_with("belgian-race-session")
+
+
+@pytest.mark.asyncio
+async def test_room_detail_bootstraps_bounded_session_intelligence() -> None:
+    room = api_room()
+    services = route_services(room)
+    timestamp = datetime(2026, 7, 19, 13, 20, tzinfo=UTC)
+    battle = BattleState(
+        id="11334:16:4",
+        session_key=room.session_key or "",
+        lead_driver_number=16,
+        chasing_driver_number=4,
+        lead_position=4,
+        chasing_position=5,
+        interval_seconds=0.72,
+        closest_interval_seconds=0.68,
+        interval_history=[0.9, 0.8, 0.72],
+        started_at=timestamp,
+        last_updated_at=timestamp,
+        trend=BattleTrend.CLOSING,
+        intensity=BattleIntensity.INTENSE,
+        status=BattleStatus.INTENSE,
+        within_one_second=True,
+    )
+    recent = [
+        NormalizedRaceEvent(
+            session_key=room.session_key or "",
+            source="apexarena",
+            event_origin=EventOrigin.DERIVED,
+            event_time=timestamp,
+            received_at=timestamp,
+            sequence_number=index,
+            event_type=RaceEventType.BATTLE_INTENSIFIED,
+            primary_driver_number=4,
+            secondary_driver_number=16,
+            dedup_key=f"recent-{index}",
+        )
+        for index in range(1, 8)
+    ]
+    services.race_state = SimpleNamespace(
+        get_state=AsyncMock(
+            return_value=RaceState(
+                session_key=room.session_key or "",
+                sequence_number=7,
+                current_battles=[battle],
+                recent_events=recent,
+            )
+        )
+    )
+
+    response = await race_room_detail(room.slug, services)
+
+    assert response.intelligence.sequence_number == 7
+    assert response.intelligence.current_battles == [battle]
+    assert [event.sequence_number for event in response.intelligence.recent_events] == [
+        3,
+        4,
+        5,
+        6,
+        7,
+    ]
 
 
 @pytest.mark.asyncio
 async def test_messages_forward_all_filters_and_return_next_cursor_at_page_boundary() -> None:
     room = api_room()
     services = route_services(room)
-    services.room_repository.list_messages.return_value = [
-        api_message(room.id, 8),
-        api_message(room.id, 9),
-    ]
+    services.room_repository.list_message_page.return_value = DiscussionPage(
+        discussion_generation=1,
+        messages=[api_message(room.id, 8), api_message(room.id, 9)],
+        next_cursor=9,
+    )
 
     response = await room_messages(
         room.slug,
         services,
         after_sequence=7,
+        discussion_generation=1,
         agent_id="mira-vale",
         topic=MessageTopic.STRATEGY,
         message_type=MessageType.ANALYSIS,
@@ -277,8 +435,11 @@ async def test_messages_forward_all_filters_and_return_next_cursor_at_page_bound
 
     assert [message.sequence for message in response.messages] == [8, 9]
     assert response.next_cursor == 9
-    services.room_repository.list_messages.assert_awaited_once_with(
+    assert response.discussion_generation == 1
+    assert response.reset_required is False
+    services.room_repository.list_message_page.assert_awaited_once_with(
         room.id,
+        expected_generation=1,
         after_sequence=7,
         agent_id="mira-vale",
         topic=MessageTopic.STRATEGY,
@@ -288,6 +449,51 @@ async def test_messages_forward_all_filters_and_return_next_cursor_at_page_bound
         sequence_from=8,
         sequence_to=12,
         limit=2,
+    )
+
+
+@pytest.mark.asyncio
+async def test_messages_exposes_generation_reset_without_reusing_the_stale_cursor() -> None:
+    room = api_room()
+    current = api_message(room.id, 1).model_copy(update={"discussion_generation": 2})
+    services = route_services(room)
+    services.room_repository.list_message_page.return_value = DiscussionPage(
+        discussion_generation=2,
+        messages=[current],
+        next_cursor=None,
+        reset_required=True,
+    )
+
+    response = await room_messages(
+        room.slug,
+        services,
+        after_sequence=99,
+        discussion_generation=1,
+        agent_id=None,
+        topic=None,
+        message_type=None,
+        lap_from=None,
+        lap_to=None,
+        sequence_from=None,
+        sequence_to=None,
+        limit=100,
+    )
+
+    assert response.discussion_generation == 2
+    assert response.reset_required is True
+    assert [item.sequence for item in response.messages] == [1]
+    services.room_repository.list_message_page.assert_awaited_once_with(
+        room.id,
+        expected_generation=1,
+        after_sequence=99,
+        agent_id=None,
+        topic=None,
+        message_type=None,
+        lap_from=None,
+        lap_to=None,
+        sequence_from=None,
+        sequence_to=None,
+        limit=100,
     )
 
 
@@ -428,6 +634,230 @@ async def test_playback_route_maps_unavailable_seek_to_conflict() -> None:
     assert "outside" in error.value.detail
 
 
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {},
+        {REPLAY_OPERATOR_HEADER: ""},
+        operator_headers("wrong-password"),
+        {REPLAY_OPERATOR_HEADER: "%%%not-base64%%%"},
+        {"X-Apex-Proxy-Token": "proxy-token-is-not-operator-access"},
+    ],
+)
+def test_replay_operator_verification_rejects_missing_blank_wrong_and_proxy_credentials(
+    settings: Settings,
+    headers: dict[str, str],
+) -> None:
+    configured = replay_settings(settings)
+    app = create_app(configured)
+
+    with TestClient(app) as client:
+        attach_route_services(app, configured, api_room())
+        response = client.post("/api/v1/race-rooms/replay-operator/verify", headers=headers)
+
+    assert response.status_code == 401
+    assert REPLAY_OPERATOR_PASSWORD not in response.text
+
+
+def test_replay_operator_verification_rejects_duplicate_headers(settings: Settings) -> None:
+    configured = replay_settings(settings)
+    app = create_app(configured)
+
+    with TestClient(app) as client:
+        attach_route_services(app, configured, api_room())
+        response = client.post(
+            "/api/v1/race-rooms/replay-operator/verify",
+            headers=[
+                (REPLAY_OPERATOR_HEADER, operator_headers()[REPLAY_OPERATOR_HEADER]),
+                (REPLAY_OPERATOR_HEADER, operator_headers()[REPLAY_OPERATOR_HEADER]),
+            ],
+        )
+
+    assert response.status_code == 401
+
+
+def test_replay_operator_verification_fails_closed_when_unconfigured(
+    settings: Settings,
+) -> None:
+    configured = replay_settings(settings, None)
+    app = create_app(configured)
+
+    with TestClient(app) as client:
+        services = attach_route_services(app, configured, api_room())
+        response = client.post(
+            "/api/v1/race-rooms/replay-operator/verify",
+            headers=operator_headers(),
+        )
+
+    assert response.status_code == 503
+    services.rooms.ensure_catalog.assert_not_awaited()
+
+
+def test_replay_operator_verification_uses_constant_time_exact_comparison(
+    settings: Settings,
+) -> None:
+    configured = replay_settings(settings)
+    app = create_app(configured)
+
+    with (
+        TestClient(app) as client,
+        pytest.MonkeyPatch.context() as monkeypatch,
+    ):
+        attach_route_services(app, configured, api_room())
+        compared: list[tuple[bytes, bytes]] = []
+
+        def compare_digest(supplied: bytes, expected: bytes) -> bool:
+            compared.append((supplied, expected))
+            return supplied == expected
+
+        monkeypatch.setattr("app.api.proxy.hmac.compare_digest", compare_digest)
+        response = client.post(
+            "/api/v1/race-rooms/replay-operator/verify",
+            headers=operator_headers(),
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {"authorized": True}
+    encoded = base64.b64encode(REPLAY_OPERATOR_PASSWORD.encode("utf-8"))
+    assert compared == [(encoded, encoded)]
+
+
+@pytest.mark.parametrize(
+    ("configured_password", "supplied_password", "expected_status"),
+    [
+        (REPLAY_OPERATOR_PASSWORD, REPLAY_OPERATOR_PASSWORD, 200),
+        ("opérateur-🏎", "opérateur-🏎", 200),
+        ("🔒", "🔒", 200),
+        ("  padded operator password  ", "  padded operator password  ", 200),
+        ("  padded operator password  ", "padded operator password", 401),
+        (REPLAY_OPERATOR_PASSWORD, "mot-de-passe-🔒", 401),
+        ("mot-de-passe-🔒", REPLAY_OPERATOR_PASSWORD, 401),
+    ],
+)
+def test_replay_operator_verification_preserves_exact_utf8_credentials_across_headers(
+    settings: Settings,
+    configured_password: str,
+    supplied_password: str,
+    expected_status: int,
+) -> None:
+    configured = replay_settings(settings, configured_password)
+    app = create_app(configured)
+
+    with TestClient(app) as client:
+        attach_route_services(app, configured, api_room())
+        response = client.post(
+            "/api/v1/race-rooms/replay-operator/verify",
+            headers=operator_headers(supplied_password),
+        )
+
+    assert response.status_code == expected_status
+    assert configured_password not in response.text
+    assert supplied_password not in response.text
+
+
+def test_cross_origin_simple_bodyless_post_cannot_start_replay(settings: Settings) -> None:
+    configured = replay_settings(settings)
+    app = create_app(configured)
+
+    with TestClient(app) as client:
+        services = attach_route_services(app, configured, api_room())
+        response = client.post(
+            "/api/v1/race-rooms/belgian-grand-prix-race/replay",
+            headers={"Origin": "https://attacker.example"},
+        )
+
+    assert response.status_code == 401
+    assert "access-control-allow-origin" not in response.headers
+    services.rooms.ensure_catalog.assert_not_awaited()
+    services.room_replay.start.assert_not_awaited()
+
+
+def test_replay_authorization_precedes_room_lookup_and_payload_validation(
+    settings: Settings,
+) -> None:
+    configured = replay_settings(settings)
+    app = create_app(configured)
+
+    with TestClient(app) as client:
+        services = attach_route_services(app, configured, api_room())
+        missing_room = client.post("/api/v1/race-rooms/missing/replay")
+        invalid_action = client.post(
+            "/api/v1/race-rooms/belgian-grand-prix-race/playback",
+            json={"action": "not-a-real-action"},
+        )
+
+    assert missing_room.status_code == 401
+    assert invalid_action.status_code == 401
+    services.rooms.ensure_catalog.assert_not_awaited()
+    services.room_replay.start.assert_not_awaited()
+
+
+def test_valid_operator_keeps_replay_success_and_existing_error_contracts(
+    settings: Settings,
+) -> None:
+    configured = replay_settings(settings)
+    app = create_app(configured)
+
+    with TestClient(app) as client:
+        services = attach_route_services(app, configured, api_room())
+        successful = client.post(
+            "/api/v1/race-rooms/belgian-grand-prix-race/replay",
+            headers=operator_headers(),
+        )
+
+        services.room_repository.get_room.return_value = None
+        missing = client.post(
+            "/api/v1/race-rooms/missing/replay",
+            headers=operator_headers(),
+        )
+
+        services.room_repository.get_room.return_value = api_room(
+            source_availability=SourceAvailability.UNAVAILABLE,
+            mode=RoomMode.REPLAY,
+        ).model_copy(
+            update={
+                "status": RoomStatus.PENDING,
+                "session_key": None,
+                "replay_available": False,
+                "scheduled_start": datetime(2099, 7, 18, 12, tzinfo=UTC),
+            }
+        )
+        conflict = client.post(
+            "/api/v1/race-rooms/belgian-grand-prix-race/replay",
+            headers=operator_headers(),
+        )
+        invalid = client.post(
+            "/api/v1/race-rooms/belgian-grand-prix-race/playback",
+            headers=operator_headers(),
+            json={"action": "not-a-real-action"},
+        )
+
+    assert successful.status_code == 200
+    assert missing.status_code == 404
+    assert conflict.status_code == 409
+    assert invalid.status_code == 422
+
+
+def test_public_room_reads_do_not_require_operator_credentials(settings: Settings) -> None:
+    configured = replay_settings(settings)
+    app = create_app(configured)
+
+    with TestClient(app) as client:
+        services = attach_route_services(app, configured, api_room())
+        detail_response = client.get("/api/v1/race-rooms/belgian-grand-prix-race")
+        messages_response = client.get("/api/v1/race-rooms/belgian-grand-prix-race/messages")
+        evidence_response = client.get(
+            f"/api/v1/race-rooms/belgian-grand-prix-race/messages/{uuid4()}/evidence"
+        )
+        services.room_repository.get_room.return_value = None
+        stream_response = client.get("/api/v1/race-rooms/missing/stream")
+
+    assert detail_response.status_code == 200
+    assert messages_response.status_code == 200
+    assert evidence_response.status_code == 404
+    assert stream_response.status_code == 404
+
+
 @pytest.mark.asyncio
 async def test_diagnostics_are_hidden_in_production_when_debug_flag_is_off() -> None:
     services = route_services(api_room())
@@ -435,7 +865,7 @@ async def test_diagnostics_are_hidden_in_production_when_debug_flag_is_off() -> 
     services.settings.room_diagnostics_enabled = False
 
     with pytest.raises(HTTPException) as error:
-        await room_diagnostics("day3-validation-room", services)
+        await room_diagnostics("belgian-grand-prix-race", services)
 
     assert error.value.status_code == 404
     services.rooms.ensure_catalog.assert_not_awaited()
@@ -447,7 +877,7 @@ async def test_diagnostics_aggregate_counts_recent_events_state_and_metrics() ->
     services = route_services(room)
     timestamp = datetime(2026, 7, 17, 12, tzinfo=UTC)
     event = NormalizedRaceEvent(
-        session_key="day3-session",
+        session_key="belgian-race-session",
         source="fixture",
         event_time=timestamp,
         received_at=timestamp,
@@ -467,7 +897,7 @@ async def test_diagnostics_aggregate_counts_recent_events_state_and_metrics() ->
     services.race_state = SimpleNamespace(
         get_state=AsyncMock(
             return_value=RaceState(
-                session_key="day3-session",
+                session_key="belgian-race-session",
                 status="finished",
                 sequence_number=14,
                 is_replay=True,
@@ -489,5 +919,5 @@ async def test_diagnostics_aggregate_counts_recent_events_state_and_metrics() ->
     assert response.race_state["status"] == "finished"
     assert response.discussion["generated_message_count"] == 14
     services.normalized_event_repository.list_for_session.assert_awaited_once_with(
-        "day3-session", after_sequence=0, limit=20
+        "belgian-race-session", after_sequence=0, limit=20
     )

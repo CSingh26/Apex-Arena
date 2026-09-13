@@ -35,6 +35,7 @@ numReplicas = 1
 #   REDIS_URL                (secret, Upstash rediss://)
 #   APEX_ARENA_PROXY_TOKEN   (secret, must equal the Vercel frontend value)
 #   INTERNAL_API_KEY         (secret)
+#   ADMIN_DASHBOARD_PASSWORD (secret, required when ENABLE_PUBLIC_REPLAYS=true)
 #   PUBLIC_PROXY_HOST=chaitanyasingh.org
 #   TRUSTED_PROXY_HOSTS=chaitanyasingh.org
 #   CORS_ALLOWED_ORIGINS=https://chaitanyasingh.org

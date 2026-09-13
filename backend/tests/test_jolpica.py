@@ -83,6 +83,25 @@ async def test_calendar_normalization_highlights_spa(settings: Settings) -> None
 
 
 @pytest.mark.asyncio
+async def test_current_weekend_is_live_after_friday_session_not_only_on_race_day(
+    settings: Settings,
+) -> None:
+    async def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=calendar_payload())
+
+    http_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="https://api.example.test/"
+    )
+    client = JolpicaClient("https://api.example.test", http_client)
+    service = SeasonService(settings, client)
+
+    races = await service.calendar(2026, now=datetime(2026, 7, 17, 12, tzinfo=UTC))
+
+    assert races[1].status is MeetingLifecycleStatus.LIVE
+    await http_client.aclose()
+
+
+@pytest.mark.asyncio
 async def test_fetch_race_results_when_available() -> None:
     payload = calendar_payload()
     payload["MRData"]["RaceTable"]["Races"][0]["Results"] = [{"position": "1"}]  # type: ignore[index]

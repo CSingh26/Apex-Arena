@@ -7,7 +7,9 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.proxy import ProxyContextMiddleware
+from app.api.history_routes import router as history_router
+from app.api.proxy import REPLAY_OPERATOR_HEADER, ProxyContextMiddleware, replay_operator_password
+from app.api.rate_limits import RateLimitMiddleware
 from app.api.room_routes import router as room_router
 from app.api.routes import router
 from app.core.logging import configure_logging
@@ -17,6 +19,16 @@ from app.services.container import AppServices
 
 def create_app(settings_override: Settings | None = None) -> FastAPI:
     settings = settings_override or get_settings()
+    if (
+        settings.app_env == "production"
+        and settings.app_process_role in {"api", "combined", "all"}
+        and settings.enable_public_replays
+        and replay_operator_password(settings) is None
+    ):
+        raise RuntimeError(
+            "ADMIN_DASHBOARD_PASSWORD is required when production public replay controls "
+            "are enabled"
+        )
 
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
@@ -24,20 +36,21 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
         services = AppServices(settings)
         application.state.services = services
         worker_enabled = settings.app_process_role in {"combined", "all"} and (
-            settings.openf1_live_auto_connect or settings.recent_session_reconciliation_enabled
+            settings.live_worker_enabled or settings.recent_session_reconciliation_enabled
         )
-        if worker_enabled:
-            # Combined mode ingests as well as serves, so it must take the same
-            # singleton lease the dedicated ingestor uses. Without it, two
-            # overlapping deploys would both subscribe to OpenF1 MQTT and
-            # double-write the event pipeline.
-            if not await services.database.acquire_ingestor_lease():
-                raise RuntimeError("Another Apex Arena ingestor owns the singleton lease")
-        if settings.app_process_role in {"combined", "all"}:
-            if settings.openf1_live_auto_connect:
-                await services.start_live_services()
-            await services.start_recent_reconciliation()
         try:
+            if worker_enabled:
+                # Combined instances share the dedicated ingestor's singleton lease.
+                if not await services.database.acquire_ingestor_lease():
+                    raise RuntimeError("Another Apex Arena ingestor owns the singleton lease")
+                await services.start_intelligence_recovery()
+            if settings.app_process_role in {"api", "combined", "all"}:
+                await services.reconcile_interrupted_ingestion_runs()
+                await services.start_replay_recovery()
+            if settings.app_process_role in {"combined", "all"}:
+                if settings.live_worker_enabled:
+                    await services.start_live_services()
+                await services.start_recent_reconciliation()
             yield
         finally:
             await services.close()
@@ -48,18 +61,25 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
         description="Unified live and replay Formula racing intelligence for the 2026 season.",
         lifespan=lifespan,
     )
-    # Registered before CORS so the outermost layer rejects direct-origin traffic
-    # before any other handler observes the request.
+    # Execution order is CORS -> authenticated proxy hop -> Redis admission ->
+    # routes. Rejections retain CORS; invalid proxy traffic never touches Redis.
+    application.add_middleware(RateLimitMiddleware, settings=settings)
     application.add_middleware(ProxyContextMiddleware, settings=settings)
     application.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins,
         allow_credentials=False,
         allow_methods=["GET", "POST"],
-        allow_headers=["Accept", "Content-Type", "X-Internal-API-Key"],
+        allow_headers=[
+            "Accept",
+            "Content-Type",
+            "X-Internal-API-Key",
+            REPLAY_OPERATOR_HEADER,
+        ],
     )
     application.include_router(router)
     application.include_router(room_router)
+    application.include_router(history_router)
     return application
 
 

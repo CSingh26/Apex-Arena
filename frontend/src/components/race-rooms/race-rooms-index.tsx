@@ -13,7 +13,26 @@ import type { EventSessionSummary, EventWeekendStatus, RaceRoomEvent } from "@/l
 
 import styles from "./race-rooms-revamp.module.css";
 
-const SESSION_ORDER = ["SPRINT_QUALIFYING", "SPRINT", "QUALIFYING", "RACE"];
+const SESSION_ORDER = [
+  "PRACTICE_1",
+  "PRACTICE_2",
+  "PRACTICE_3",
+  "SPRINT_QUALIFYING",
+  "SPRINT",
+  "QUALIFYING",
+  "RACE",
+];
+
+const PROVIDER_STATUSES = new Set([
+  "NOT_REQUESTED",
+  "FETCHING",
+  "NOT_YET_PUBLISHED",
+  "PROVIDER_UNAVAILABLE",
+  "FETCH_FAILED",
+  "PARTIAL",
+  "AVAILABLE",
+  "ARCHIVED",
+]);
 
 function formatDate(value: string, includeTime = false): string {
   const date = new Date(value);
@@ -27,6 +46,7 @@ function friendlyStatus(status: string): string {
   const labels: Record<string, string> = {
     live: "Live now",
     completed: "Completed",
+    cancelled: "Cancelled",
     replay_ready: "Replay ready",
     ready: "Ready",
     scheduled: "Upcoming",
@@ -42,13 +62,27 @@ function friendlyStatus(status: string): string {
 }
 
 function availabilityLabel(session: EventSessionSummary): string {
+  if (session.status === "cancelled") return "Session cancelled by the provider";
+  if (session.capture_state === "expired_unconfirmed") return "Capture window ended; sporting finish unconfirmed";
   if (session.replay_available) return session.data_availability === "limited_telemetry" ? "Replay · limited telemetry" : "Telemetry replay";
   if (session.results_available) return "Results available";
   if (session.data_availability === "limited_telemetry") return "Some timing data missing";
   if (session.data_availability === "timing_only") return "Timing data only";
   if (session.data_availability === "telemetry") return "Telemetry available";
-  if (session.data_availability === "unavailable" && session.status === "scheduled") return "Live feed arms at session start";
-  if (session.data_availability === "unavailable" && session.status === "completed") return "Provider data not published yet";
+  if (session.provider_status === "PROVIDER_UNAVAILABLE") return "Live data provider unavailable";
+  if (session.provider_status === "FETCH_FAILED") return "Provider data could not be fetched";
+  if (session.provider_status === "FETCHING") return "Session data is being prepared";
+  if (session.provider_status === "NOT_YET_PUBLISHED") return "Provider data not published yet";
+  if (session.provider_status && !PROVIDER_STATUSES.has(session.provider_status)) return "Session data is unavailable";
+  if (
+    session.data_availability === "unavailable" &&
+    ["scheduled", "upcoming"].includes(session.status)
+  ) {
+    return "Race Room opens when session data becomes available";
+  }
+  if (session.data_availability === "unavailable" && session.status === "completed") {
+    return session.provider_status ? "Session data is unavailable" : "Provider data not published yet";
+  }
   if (session.data_availability === "unavailable") return "Waiting for the live provider feed";
   if (session.status === "ingesting" || session.status === "provider_pending") return "Session data is being prepared";
   return "Schedule confirmed";
@@ -79,24 +113,38 @@ function countdownParts(milliseconds: number) {
 }
 
 function isPublicEvent(event: RaceRoomEvent): boolean {
-  return !event.is_development && !event.event_slug.toLowerCase().includes("validation");
+  return Boolean(event.event_slug);
+}
+
+function weekendTime(event: RaceRoomEvent): number {
+  const time = new Date(event.weekend_start).getTime();
+  return Number.isFinite(time) ? time : Number.POSITIVE_INFINITY;
+}
+
+function orderCategoryEvents(events: RaceRoomEvent[], status: EventWeekendStatus): RaceRoomEvent[] {
+  const grouped = events.filter((event) => event.weekend_status === status);
+  if (status !== "completed") return grouped;
+  // Completed weekends read as a season timeline: first raced to most recent.
+  return [...grouped].sort((a, b) => weekendTime(a) - weekendTime(b) || a.round - b.round);
 }
 
 type OpenPreview = (event: RaceRoomEvent, session?: EventSessionSummary) => void;
 
 function SessionAction({ event, session, onPreview }: { event: RaceRoomEvent; session: EventSessionSummary; onPreview: OpenPreview }) {
-  const readOnly = event.weekend_status === "upcoming" || session.eligibility === "future_read_only" || session.status === "scheduled";
+  const readOnly = event.weekend_status === "upcoming" || session.eligibility === "future_read_only" || ["scheduled", "cancelled"].includes(session.status);
   const canOpenRoom = Boolean(session.room_slug) && !readOnly;
+  const availability = availabilityLabel(session);
+  const availabilityId = `event-${event.event_id}-${session.session_type}-availability`;
   const content = <>
     <span className="event-session__identity"><b>{session.display_name}</b><small>{formatDate(session.scheduled_start, true)}</small></span>
-    <span className="event-session__state"><span className={`session-status session-status--${session.status}`}>{friendlyStatus(session.status)}</span><small>{availabilityLabel(session)}</small></span>
+    <span className="event-session__state"><span className={`session-status session-status--${session.status}`}>{friendlyStatus(session.status)}</span><small id={availabilityId}>{availability}</small></span>
     <span className="event-session__arrow" aria-hidden>{canOpenRoom ? "→" : "⌁"}</span>
   </>;
 
   if (canOpenRoom && session.room_slug) {
-    return <Link className="event-session" href={appRoutes.room(session.room_slug)} aria-label={`Open ${event.event_name} ${session.display_name}`}>{content}</Link>;
+    return <Link className="event-session" href={appRoutes.room(session.room_slug)} aria-label={`Open ${event.event_name} ${session.display_name}`} aria-describedby={availabilityId}>{content}</Link>;
   }
-  return <button className="event-session event-session--preview" type="button" onClick={() => onPreview(event, session)} aria-label={`View schedule for ${event.event_name} ${session.display_name}`}>{content}</button>;
+  return <button className="event-session event-session--preview" type="button" onClick={() => onPreview(event, session)} aria-label={`View schedule for ${event.event_name} ${session.display_name}`} aria-describedby={availabilityId}>{content}</button>;
 }
 
 function EventCard({ event, onPreview }: { event: RaceRoomEvent; onPreview: OpenPreview }) {
@@ -236,8 +284,7 @@ export function RaceRoomsIndex() {
   }, [retryKey, search, season, sessionType, status, weekendFormat]);
 
   const sections = useMemo(() => {
-    const ordered = [...events].sort((a, b) => new Date(a.weekend_start).getTime() - new Date(b.weekend_start).getTime());
-    const group = (value: EventWeekendStatus) => ordered.filter((event) => event.weekend_status === value);
+    const group = (value: EventWeekendStatus) => orderCategoryEvents(events, value);
     return { live: group("live"), completed: group("completed"), upcoming: group("upcoming") };
   }, [events]);
   const previewEvent = events.find((event) => event.event_slug === previewSlug);
