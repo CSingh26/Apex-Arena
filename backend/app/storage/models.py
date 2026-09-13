@@ -488,6 +488,47 @@ class MessageEvidenceRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class AgentClaimRecord(Base):
+    """Bounded per-generation recall of what each agent actually asserted.
+
+    Scoped to the discussion generation so a replay reset starts a clean memory,
+    and ordered by the source sequence that produced the claim so recall can be
+    cut to the consumed cursor rather than to wall time.
+    """
+
+    __tablename__ = "agent_claims"
+    __table_args__ = (
+        Index(
+            "ix_agent_claims_recall",
+            "room_id",
+            "discussion_generation",
+            "source_sequence",
+        ),
+        Index("ix_agent_claims_room_agent", "room_id", "agent_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    room_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("race_rooms.id"), index=True)
+    discussion_generation: Mapped[int] = mapped_column(BigInteger, default=1)
+    agent_id: Mapped[str] = mapped_column(ForeignKey("agent_profiles.id"), index=True)
+    message_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("room_messages.id"), nullable=True
+    )
+    kind: Mapped[str] = mapped_column(String(40))
+    status: Mapped[str] = mapped_column(String(20), default="standing")
+    outcome: Mapped[str] = mapped_column(String(20), default="undecided")
+    source_sequence: Mapped[int] = mapped_column(BigInteger)
+    lap_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    subjects: Mapped[list[int]] = mapped_column(JSON_TYPE, default=list)
+    summary: Mapped[str] = mapped_column(String(400))
+    evidence_keys: Mapped[list[str]] = mapped_column(JSON_TYPE, default=list)
+    superseded_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("agent_claims.id"), nullable=True
+    )
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class SessionLocationSampleRecord(Base):
     """Downsampled driver track positions in raw OpenF1 circuit coordinates.
 

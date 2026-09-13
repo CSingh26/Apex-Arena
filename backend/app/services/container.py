@@ -11,6 +11,7 @@ from app.core.settings import Settings
 from app.domain.intelligence import RaceIntelligenceConfig
 from app.providers.jolpica import JolpicaClient
 from app.providers.openf1 import OpenF1AuthService, OpenF1LiveClient, OpenF1RestClient
+from app.services.agent_claims import AgentClaimMemory
 from app.services.championship import ChampionshipService
 from app.services.circuit_intelligence import (
     CircuitIntelligenceService,
@@ -24,6 +25,7 @@ from app.services.event_pipeline import (
     RaceEventProcessor,
     SequenceNumberService,
 )
+from app.services.generation_policy import GenerationPolicy, build_language_provider
 from app.services.historical import HistoricalOpenF1Adapter
 from app.services.history_details import HistoryDetailReader
 from app.services.intelligence_recovery import IntelligenceProjection
@@ -89,6 +91,10 @@ class AppServices:
             settings,
             token_provider=self.openf1_auth.get_access_token,
         )
+        # Optional and off by default: an install without an explicit generation
+        # opt-in gets the null provider and keeps deterministic room wording.
+        self.generation_policy = GenerationPolicy(settings, build_language_provider(settings))
+        self.agent_claims = AgentClaimMemory(self.database)
         self.circuit_intelligence = CircuitIntelligenceService()
         self.circuit_weather = CircuitWeatherService(self.openf1)
         self.season = SeasonService(settings, self.jolpica)
@@ -162,6 +168,7 @@ class AppServices:
             DiscussionTriggerEvaluator(settings.room_topic_cooldown_seconds),
             publisher=self.event_bus.publish_room_message,
             state_reader=self.race_state.get_state,
+            claims=self.agent_claims,
         )
         self.room_replay = RoomReplayCoordinator(
             self.room_repository,

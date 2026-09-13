@@ -196,6 +196,22 @@ async def _location_sample_count(services: AppServices, room: object) -> int | N
         return None
 
 
+def _ai_component_health(services: AppServices) -> dict[str, str]:
+    """Report whether generation is actually running, not merely configured.
+
+    A stored API key with no explicit opt-in is a disabled generator, and saying
+    "enabled" there would misreport what the rooms are really doing.
+    """
+    policy = getattr(services, "generation_policy", None)
+    if policy is None:
+        return {
+            "status": "disabled",
+            "detail": "Generation is not configured; rooms use deterministic wording",
+        }
+    status = policy.status()
+    return {"status": str(status["status"]), "detail": str(status["detail"])}
+
+
 def _utc(value: datetime | None) -> datetime | None:
     """Treat naive query timestamps as UTC; provider samples are always UTC."""
 
@@ -439,10 +455,7 @@ async def health(services: Services) -> HealthResponse:
         ),
         openf1_live=ComponentHealth(status=live_status, detail=live_detail),
         jolpica=ComponentHealth(status="configured", detail="2026 calendar provider configured"),
-        ai=ComponentHealth(
-            status="enabled" if settings.ai_enabled and not settings.ai_kill_switch else "disabled",
-            detail="AI configuration is available; automated reactions are not running",
-        ),
+        ai=ComponentHealth(**_ai_component_health(services)),
     )
 
 

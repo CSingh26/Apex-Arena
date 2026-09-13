@@ -12,6 +12,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from app.domain.claims import ClaimOutcome
 from app.domain.models import NormalizedRaceEvent, RaceEventType
 from app.domain.rooms import (
     Confidence,
@@ -19,9 +20,12 @@ from app.domain.rooms import (
     MessageEvidence,
     MessageTopic,
     MessageType,
+    RaceRoom,
     RoomMessage,
 )
+from app.services.agent_claims import AgentClaimMemory
 from app.services.agent_grounding import AgentEventEnvelope
+from app.services.claim_reasoning import claim_for_situation, closes, revision_text
 from app.services.discussion_triggers import DiscussionTrigger, DiscussionTriggerEvaluator
 from app.services.driver_identity import DriverIdentityResolver
 from app.services.race_state import RaceState
@@ -75,6 +79,8 @@ class MessageChainResult:
     attempted_count: int = 0
     inserted_count: int = 0
     skipped_count: int = 0
+    # The message a recorded claim is attributed to, when one was published.
+    primary: RoomMessage | None = None
 
     def add(self, result: MessageStoreResult) -> None:
         self.attempted_count += result.attempted_count
@@ -764,11 +770,13 @@ class RaceRoomDiscussionEngine:
         publisher: RoomPublisher | None = None,
         state_reader: StateReader | None = None,
         generation_version: str = "rooms-v4-stat-debate",
+        claims: AgentClaimMemory | None = None,
     ) -> None:
         self.repository = repository
         self.evaluator = evaluator
         self.publisher = publisher
         self.state_reader = state_reader
+        self.claims = claims
         self.generator = DeterministicRoomGenerator()
         self.validator = GroundingValidator()
         self.context_builder = GroundingContextBuilder()
@@ -790,13 +798,14 @@ class RaceRoomDiscussionEngine:
             state = await self.state_reader(event.session_key) if self.state_reader else None
             context = self.context_builder.build(event, state)
             async with self._locks[room.slug]:
-                await self._generate_chain(
+                chain = await self._generate_chain(
                     room.id,
                     event,
                     trigger,
                     context,
                     discussion_generation=room.discussion_generation,
                 )
+                await self._reconcile_claims(room, event, chain, context)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -806,6 +815,106 @@ class RaceRoomDiscussionEngine:
                 event.event_type.value,
                 type(exc).__name__,
             )
+
+    async def _reconcile_claims(
+        self,
+        room: RaceRoom,
+        event: NormalizedRaceEvent,
+        chain: MessageChainResult,
+        context: GroundingContext,
+    ) -> None:
+        """Record what an agent committed to, and let it revise itself later.
+
+        Claim bookkeeping is an enhancement to how the room reads. A failure
+        here must never suppress a factual message that was already published,
+        so every problem is logged and swallowed.
+        """
+        if self.claims is None or event.event_type != RaceEventType.STRATEGY_SITUATION:
+            return
+        try:
+            from app.services.strategy_events import validated_strategy
+
+            strategy = validated_strategy(event)
+            if strategy is None:
+                return
+            situation = strategy.situation
+            await self._close_decided_claims(room, event, situation, context)
+            if chain.primary is None:
+                return
+            claim = claim_for_situation(
+                situation,
+                room_id=room.id,
+                discussion_generation=room.discussion_generation,
+                agent_id=chain.primary.agent_id,
+                message_id=chain.primary.id,
+                lap_number=event.lap_number,
+            )
+            if claim is not None:
+                await self.claims.record(claim)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "Claim reconciliation failed session=%s error=%s",
+                event.session_key,
+                type(exc).__name__,
+            )
+
+    async def _close_decided_claims(
+        self,
+        room: RaceRoom,
+        event: NormalizedRaceEvent,
+        situation,
+        context: GroundingContext,
+    ) -> None:
+        """Publish the agent taking back a position the facts have moved past."""
+        open_claims = await self.claims.recall(
+            room.id,
+            discussion_generation=room.discussion_generation,
+            cursor=event.sequence_number,
+            subjects=situation.participants or None,
+        )
+        for claim in open_claims:
+            if not closes(claim, situation):
+                continue
+            await self.claims.revise(
+                claim.claim_id,
+                outcome=(
+                    ClaimOutcome.UNDECIDED
+                    if situation.status == "withdrawn"
+                    else ClaimOutcome.CONTRADICTED
+                ),
+            )
+            revision = RoomMessage(
+                room_id=room.id,
+                agent_id=claim.agent_id,
+                sequence=0,
+                discussion_generation=room.discussion_generation,
+                lap_number=event.lap_number,
+                wall_time=event.event_time,
+                topic=MessageTopic.STRATEGY,
+                message_type=MessageType.CORRECTION,
+                content=f"{revision_text(claim, situation)} {claim.summary}",
+                confidence=Confidence.LOW,
+                evidence_status=EvidenceStatus.GROUNDED,
+                reply_to_message_id=claim.message_id,
+                trigger_event_id=event.id,
+                generated_by="deterministic",
+                prompt_version=self.generation_version,
+                generation_key=self._generation_key(
+                    room_id=room.id,
+                    event=event,
+                    agent_id=claim.agent_id,
+                    message_type=MessageType.CORRECTION.value,
+                    role=f"revision:{claim.claim_id}",
+                    generation_version=self.generation_version,
+                ),
+                generation_version=self.generation_version,
+                source_provider=event.source,
+                source_reference=str(event.id),
+                generation_metadata={"revised_claim_id": str(claim.claim_id)},
+            )
+            await self._store(revision, event, context)
 
     def reset_session(self, session_key: str, room_id: str) -> None:
         self.evaluator.reset_session(session_key)
@@ -836,6 +945,7 @@ class RaceRoomDiscussionEngine:
         primary = primary_result.message
         if primary is None:
             return result
+        result.primary = primary
         if trigger.needs_reply and len(trigger.agent_candidates) > 1:
             reply = await self._build_message(
                 room_id,

@@ -106,6 +106,10 @@ class Settings(BaseSettings):
     ai_request_timeout_ms: int = 20000
     ai_daily_token_budget: int = 1000000
     ai_kill_switch: bool = False
+    # Separate from ai_enabled on purpose. ai_enabled and openai_api_key both
+    # predate a working generation path, so an upgrade must not turn an existing
+    # configuration into live paid traffic. Generation requires this explicitly.
+    ai_generation_opt_in: bool = False
 
     live_mode_enabled: bool = True
     live_stale_after_seconds: int = 15

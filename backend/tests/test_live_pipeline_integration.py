@@ -200,9 +200,7 @@ async def test_real_storage_live_fanout_restart_and_completion():
         # insert it superseded.
         projection_repository = services.processor.critical_projection.repository
         original_append = projection_repository.append_source
-        projection_repository.append_source = AsyncMock(
-            side_effect=RuntimeError("storage failure")
-        )
+        projection_repository.append_source = AsyncMock(side_effect=RuntimeError("storage failure"))
         with pytest.raises(RuntimeError):
             await services.processor.ingest_batch([raw])
         projection_repository.append_source = original_append
