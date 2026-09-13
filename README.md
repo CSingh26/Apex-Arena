@@ -33,6 +33,13 @@ dashboard.
   inference and uncertainty.
 - **Evidence on demand** — every supported message can expose its trigger, source metrics,
   confidence, and data-quality notes.
+- **Agents with memory** — a read offered at lap 15 is recalled and revised out loud when the
+  evidence behind it moves, rather than quietly disappearing.
+- **Deterministic race intelligence** — battles, tyre and stint context, pit windows, undercut and
+  overcut conditions and weather changes are derived from source facts before anything is written
+  about them.
+- **Fan and Analyst modes** — one room, two depths: a plain-language read of what is happening and
+  why it matters, or the full evidence, units, assumptions and limitations behind it.
 - **Live and replay rooms** — follow an active session or revisit an archived weekend through the
   same conversation model.
 - **Session-aware 2026 calendar** — qualifying, sprint qualifying, sprint, and race rooms are
@@ -159,10 +166,19 @@ flowchart LR
     D --> F[(Redis event bus)]
     E --> G[Race state + replay engine]
     F --> G
-    G --> H[Discussion engine]
-    H --> I[Evidence-linked Race Room API]
-    I --> J[Next.js fan experience]
+    G --> K[Battle + strategy intelligence]
+    K --> L[Event importance]
+    L --> H[Discussion engine]
+    H --> M[Agent claim memory]
+    H --> N{Generation opted in?}
+    N -- no --> I[Evidence-linked Race Room API]
+    N -- yes --> O[Language provider] --> I
+    I --> J[Next.js Fan and Analyst experience]
 ```
+
+Facts flow left to right and never depend on anything to their right. Language generation sits at
+the far end on purpose: it can only rephrase a conclusion the deterministic layer already reached,
+and when it is off, failing or over budget the room publishes that conclusion verbatim.
 
 ### Backend
 
@@ -173,7 +189,12 @@ flowchart LR
 - Jolpica season-calendar synchronization
 - deterministic normalization, ordering, and deduplication
 - race-state snapshots and replay coordination
+- guarded critical projection committing derived rows, snapshot and progress as one unit
+- bounded evidence-addressable lap, stint, pit, weather and control history
+- deterministic battle, tyre and strategy intelligence with explicit uncertainty
+- bounded agent claim memory with cursor-bounded recall
 - evidence-linked multi-agent discussion engine
+- optional language generation behind budgets, a kill switch and deterministic fallback
 
 ### Frontend
 
@@ -183,7 +204,128 @@ flowchart LR
 - live Server-Sent Events room updates
 - grouped session catalog and countdown experience
 - replay controls, message filters, evidence drawer, and conversation map
+- Fan and Analyst modes over one shared evidence model
+- driver telemetry comparison drawn as inline SVG, with no charting dependency
 - official 2026 circuit artwork with responsive rendering
+
+## Race intelligence engines
+
+Every conclusion the product presents is derived deterministically from stored source facts
+first. Language is applied afterwards, or not at all.
+
+### Battle engine
+
+Battles are detected from observed proximity, position and interval facts, then enriched with the
+context that makes them worth watching: tyre compounds and ages, relative pace over comparable
+clean laps, how long the fight has run, whether the gap is closing, whether the drivers are
+team-mates, and multi-car trains.
+
+Two distinctions are deliberate and load-bearing:
+
+- **Proximity is not DRS usage.** Being within a second is a position, and DRS permission is a
+  track state. Only an observed open rear wing is evidence that DRS was used.
+- **Attempt and championship context are reported as undetermined**, not as "no attempts" or "not
+  championship relevant". The system cannot currently establish either, and saying so is different
+  from asserting the negative.
+
+### Strategy engine
+
+Eight situation families are derived where, and only where, evidence supports them: stint
+divergence, relative pace, pit window, undercut condition, overcut condition, neutralized pit
+context, extra-stop consequence and weather change.
+
+Each carries the evidence behind it, its assumptions, its limitations and an availability of
+available, partial or unavailable. Capabilities the session cannot support are published with the
+reason, so the interface can show what the system *cannot* determine rather than an empty panel.
+
+Pace uses comparable green-flag samples with pit, neutralized, deleted and outlier laps excluded.
+Pit loss is an observed same-driver baseline, not a circuit constant. Tyre degradation is treated
+as uncertain rather than linear, and no situation claims a predicted outcome.
+
+### Agent architecture
+
+Five specialists react to events that clear an importance threshold; routine timing samples never
+reach the discussion engine at all.
+
+Messages are generated deterministically and validated for grounding before publication. An agent
+records the position a strategy observation commits it to, and when that observation is later
+revised or withdrawn it says so — replying to its own earlier message. Recall is cut to the
+consumed source cursor, so a replay seek backwards cannot surface a position the viewer has not
+reached, and memory is scoped to the discussion generation so a reset starts clean.
+
+Language generation is optional, off by default, and requires `AI_GENERATION_OPT_IN` explicitly.
+`AI_ENABLED` and a stored API key are deliberately not sufficient, because both predate any
+working generation path and an upgrade must not start billable traffic. Generation runs after
+grounding validation, so it can only change how a supported claim reads, never what it asserts.
+
+## Testing
+
+```bash
+# Backend, from backend/
+python -m pytest -q
+python -m ruff check .
+python -m ruff format --check .
+
+# Frontend, from frontend/
+npm run lint
+npm run typecheck
+npm test
+npm run build
+```
+
+Most of the suite is hermetic. Integration coverage that needs real infrastructure is opt-in and
+gated behind environment variables, so it skips rather than failing on a machine without it:
+
+| Variable | Enables |
+| --- | --- |
+| `TEST_INGESTION_POSTGRES_URL` | Guarded projection, history checkpoint and lifecycle SQL coverage |
+| `TEST_REPLAY_POSTGRES_URL` | Replay ownership, lease fencing and claim-memory coverage |
+| `LIVE_REPAIR_INTEGRATION=1` | Live pipeline and Redis rate-limit coverage |
+| `TEST_E2E_DATABASE_URL` | E2E room seeding against an isolated `apex_e2e*` database |
+
+Each of these must point at a disposable local database. The tests validate the target and refuse
+to run against anything else.
+
+The browser suite runs against freshly built production images in a self-contained stack with a
+synthetic provider, so it does not depend on a real Grand Prix taking place:
+
+```bash
+cp scripts/e2e.env.example .env.e2e.local   # then set a unique COMPOSE_PROJECT_NAME
+docker compose --env-file .env.e2e.local -f docker-compose.e2e.yml up -d --build --wait
+docker compose --env-file .env.e2e.local -f docker-compose.e2e.yml exec -T backend \
+  python -m app.cli.seed_e2e_room --scenario normal-race --slug e2e-normal-race
+docker compose --env-file .env.e2e.local -f docker-compose.e2e.yml run --build --rm browser-tests
+docker compose --env-file .env.e2e.local -f docker-compose.e2e.yml down --volumes
+```
+
+## Mobile and native clients
+
+The race domain is server-side, and the API is designed so a native client renders state rather
+than re-deriving race meaning. [docs/native-client-contracts.md](docs/native-client-contracts.md)
+documents the versioning rules, authentication boundaries, endpoints, SSE event names and
+resumption semantics, the error contract, and the data honesty rules a client must preserve.
+
+No native application exists in this repository, and none is required — the contract is the
+deliverable.
+
+## Known limitations
+
+Stated plainly, because the product's core claim is that it does not sound more certain than its
+data:
+
+- **Overtake attempts and championship relevance are not established.** Battle context reports
+  both as undetermined.
+- **Provider lap-start timing is approximate.** Lap intervals derived from it are labelled as such.
+- **Tyre degradation is not predicted.** Stint context describes what was observed; it does not
+  forecast a crossover.
+- **Only one browser scenario is seeded.** The `normal-race` fixture drives the E2E suite;
+  sprint, red-flag and wet-weather paths are covered by backend tests rather than browser runs.
+- **Historical projections written before the current semantic identity are readable but
+  explicitly unverified.** They are never silently adopted or rewritten.
+- **Language generation has not been exercised against a real provider.** All generation coverage
+  uses fake providers, by design — the suite cannot make a paid call.
+- **A session with no retained car data has no telemetry trace.** The endpoint reports this
+  rather than interpolating one.
 
 ## Data integrity principles
 
@@ -213,6 +355,8 @@ The V1 API is organized around stable public resources:
 | Streaming | live room messages and session events over SSE |
 | Replay | start, pause, resume, speed, lap, phase, and sequence control |
 | Championship | normalized 2026 driver, constructor, and title-battle standings |
+| Factual history | cursor-bounded lap, stint, pit, weather and control detail |
+| Telemetry history | bounded car-data series for up to two drivers, with per-channel coverage |
 
 Interactive API documentation is exposed by the running backend through FastAPI's OpenAPI surface.
 
@@ -309,6 +453,8 @@ base path: it defaults to `<base path>/api`, and can be overridden with
 - [Live race operations and failure states](docs/live-race-operations.md)
 - [Agent conversation experience](docs/arena-chat-experience.md)
 - [Driver track positions: root cause and pipeline](docs/driver-location-pipeline.md)
+- [Cursor-bound factual history API](docs/factual-history-api.md)
+- [Native client contracts (iOS, Android, web)](docs/native-client-contracts.md)
 
 ## Attribution
 

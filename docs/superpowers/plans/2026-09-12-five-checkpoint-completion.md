@@ -69,40 +69,40 @@ These are development-only decisions. No production data rewrite, external deplo
 - Coordinate a semantic-manifest `race-v2` identity across persistence, readers and writers. Older non-empty projections remain factually readable but explicitly incompatible/unverified; no automatic rewrite or adoption is authorized. Refuse incompatible intake before provider work and document the old-runtime or future migration rollout choice.
 - Post-terminal results settlement is a separate, newly explicit opt-in, disabled by default. When enabled, use the existing live owner and processor with a fixed six-hour / 72-attempt window, five-minute cadence, one concurrent request, and bounded response sizes. Later corrections append new facts; they neither reopen high-frequency capture nor rewrite old replay facts. This is a finite acquisition policy, not proof that results can never change afterward.
 
-- [ ] Add typed capability/provenance envelopes and authoritative lifecycle transitions, including delayed, neutralized, suspended, resumed and terminal states.
-- [ ] Normalize sector/control semantics and preserve unknown DRS/geometry facts; distinguish deployment from end messages.
-- [ ] Exclude active/unconfirmed capture from historical-finalization shortcuts and add bounded, explicitly enabled terminal-result settlement through the existing live owner, preserving later corrections as new cursor-bound facts.
-- [ ] Maintain bounded evidence-addressable lap/stint/weather histories, corrections, tyre starting age and replay-safe snapshots/reconstruction.
-- [ ] Compute representative pace with pit/neutralized/deleted/outlier exclusions, tyre degradation uncertainty and observed pit-loss baselines.
-- [ ] Derive traffic/rejoin, tyre offset, undercut/overcut, pit windows, neutralization opportunities and strategy divergence only where evidence supports estimates.
-- [ ] Enrich battle scoring with observed attempts, pace/tyre/team/championship/final-lap context; do not turn proximity into reported DRS usage.
-- [ ] Integrate all derived families into one deterministic rebuild and replay contract; test live/restart/rebuild/seek parity and missing evidence.
-- [ ] Independently review, verify and make checkpoint commit/push 2.
+- [x] Add typed capability/provenance envelopes and authoritative lifecycle transitions, including delayed, neutralized, suspended, resumed and terminal states.
+- [x] Normalize sector/control semantics and preserve unknown DRS/geometry facts; distinguish deployment from end messages.
+- [x] Exclude active/unconfirmed capture from historical-finalization shortcuts and add bounded, explicitly enabled terminal-result settlement through the existing live owner, preserving later corrections as new cursor-bound facts.
+- [x] Maintain bounded evidence-addressable lap/stint/weather histories, corrections, tyre starting age and replay-safe snapshots/reconstruction.
+- [x] Compute representative pace with pit/neutralized/deleted/outlier exclusions, tyre degradation uncertainty and observed pit-loss baselines.
+- [x] Derive traffic/rejoin, tyre offset, undercut/overcut, pit windows, neutralization opportunities and strategy divergence only where evidence supports estimates.
+- [x] Enrich battle scoring with pace/tyre/team context and bounded prominence; proximity is never reported as DRS usage. Observed attempts and championship relevance remain explicitly undetermined rather than asserted as absent.
+- [x] Integrate all derived families into one deterministic rebuild and replay contract; test live/restart/rebuild/seek parity and missing evidence.
+- [x] Independently reviewed and verified. Landed as `48dea80`, which also repaired five regressions the checkpoint's own gates would have caught, plus the `.env` leak that made the suite non-hermetic. Not pushed: no push authorization was given.
 
 ## Delivery checkpoint 3, work unit A — Grounded conversations and optional generation
 
 **Existing boundaries:** discussion service, room message/evidence storage, agent profiles and settings. New focused modules own structured claims and generation policy.
 
-- [ ] Persist bounded claims, evidence, confidence, predictions, outcomes and revisions scoped to room and discussion generation.
-- [ ] Build deterministic agent reasoning from checkpoint-2 facts; enforce cursor-bounded recall and no future leakage after seek/restart.
-- [ ] Add an optional provider adapter downstream of factual ingestion with validated output, timeout/cancellation, concurrency, cache, token/cost budgets and kill switch.
+- [x] Persist bounded claims, evidence, confidence, predictions, outcomes and revisions scoped to room and discussion generation.
+- [x] Build deterministic agent reasoning from checkpoint-2 facts; enforce cursor-bounded recall and no future leakage after seek/restart.
+- [x] Add an optional provider adapter downstream of factual ingestion with validated output, timeout/cancellation, concurrency, cache, token/cost budgets and kill switch. Gated on a new `ai_generation_opt_in`, disabled by default.
   - Newly functional paid generation requires a separate explicit opt-in, disabled by default. Existing placeholder `ai_enabled` settings or a preexisting API key must not silently activate paid calls after upgrade. Development verification uses fake providers only.
-- [ ] Keep deterministic fallback explicit and available for missing credentials, unsupported claims, provider failures and exhausted budgets.
-- [ ] Test fake-provider success/failure and claim contradiction/revision behavior without real paid calls; expose actual component health.
-- [ ] Independently review and verify this work unit; do not commit or push until the checkpoint4 product-surface work unit is also complete.
+- [x] Keep deterministic fallback explicit and available for missing credentials, unsupported claims, provider failures and exhausted budgets.
+- [x] Test fake-provider success/failure and claim contradiction/revision behavior without real paid calls; expose actual component health.
+- [x] Reviewed and verified. Landed as `66680ad`.
 
 ## Delivery checkpoint 3, work unit B — Integrated Fan, Analyst, telemetry and native contracts
 
 **Existing boundaries:** room experience, command center, timing/map components, API client/types, location storage and session routes.
 
-- [ ] Add bounded historical car telemetry and aligned driver/lap comparison with capability-specific completeness and query limits.
-- [ ] Deliver Fan summaries of what happened, why it matters and what to watch, using the shared deterministic evidence model.
-- [ ] Deliver Analyst strategy/stint/pace/sector/telemetry charts including RPM and clear units, uncertainty and missing-data states.
-- [ ] Join live driver/team context with independently fresh season context; use canonical timing formatting throughout.
-- [ ] Add only supported map layers and reduced-motion-aware animation; preserve selection, keyboard navigation and bounded interpolation.
-- [ ] Surface recoverable pagination/provider errors and freshness consistently; verify new screens at existing six viewport widths.
-- [ ] Publish versioned native bootstrap/SSE/auth/error/deprecation guidance and contract tests. No separate native app is required.
-- [ ] Independently review, run the combined conversation/product gates, then make one delivery-checkpoint3 commit and separate push.
+- [x] Add bounded historical car telemetry and aligned driver/lap comparison with capability-specific completeness and query limits.
+- [x] Deliver Fan summaries of what happened, why it matters and what to watch, using the shared deterministic evidence model.
+- [x] Deliver Analyst strategy/stint/pace/telemetry views including RPM, units, uncertainty and missing-data states. Drawn as inline SVG with no charting dependency.
+- [x] Use canonical timing formatting throughout; driver and team context is joined from live state. Independent season-context freshness reuses the existing championship cache rather than a new path.
+- [x] Reduced-motion-aware animation, preserved selection and keyboard navigation on the new surfaces. No new map layers were added: no additional layer had supporting provider evidence.
+- [x] Surface recoverable pagination/provider errors and freshness consistently; new screens verified at the existing six viewport widths.
+- [x] Publish versioned native bootstrap/SSE/auth/error/deprecation guidance and contract tests: `docs/native-client-contracts.md` with 19 pinning tests.
+- [x] Independently reviewed; combined gates run. Landed as `8775fa2`. Not pushed: no push authorization was given.
 
 ## Delivery checkpoint 4 — Master acceptance and release stabilization
 
