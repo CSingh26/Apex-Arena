@@ -23,6 +23,7 @@ from app.domain.models import (
 )
 from app.domain.strategy import FactReference, LapObservation
 from app.domain.strategy_situations import StrategyFrame
+from app.domain.telemetry import CHANNEL_BOUNDS
 from app.services.control_normalization import decode_openf1_drs
 from app.services.history_checkpointing import HistoryCheckpointTracker
 from app.services.intelligence_context import SessionFactualContext
@@ -796,16 +797,12 @@ class RaceStateEngine:
 
     @classmethod
     def _telemetry(cls, payload: dict[str, Any]) -> dict[str, float | int | bool]:
-        fields: dict[str, tuple[str, float, float]] = {
-            "speed": ("speed", 0, 450),
-            "throttle": ("throttle", 0, 100),
-            "brake": ("brake", 0, 100),
-            "rpm": ("rpm", 0, 20_000),
-            "gear": ("n_gear", -1, 8),
-        }
+        # Provider field names differ from published channel names; the ranges
+        # themselves are shared with the history reader.
+        sources = {"gear": "n_gear"}
         normalized: dict[str, float | int | bool] = {}
-        for target, (source, minimum, maximum) in fields.items():
-            value = cls._optional_float(payload.get(source))
+        for target, (minimum, maximum) in CHANNEL_BOUNDS.items():
+            value = cls._optional_float(payload.get(sources.get(target, target)))
             if value is not None and math.isfinite(value) and minimum <= value <= maximum:
                 normalized[target] = int(value) if target in {"gear", "rpm"} else value
         drs = payload.get("drs")

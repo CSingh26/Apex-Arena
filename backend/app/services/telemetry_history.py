@@ -10,9 +10,11 @@ has no telemetry rather than implying an empty chart means a quiet car.
 from __future__ import annotations
 
 import logging
+import math
 
 from app.domain.models import EventOrigin, NormalizedRaceEvent, RaceEventType
 from app.domain.telemetry import (
+    CHANNEL_BOUNDS,
     CHANNEL_UNITS,
     MAX_COMPARISON_DRIVERS,
     MAX_SAMPLES_PER_DRIVER,
@@ -47,17 +49,21 @@ class TelemetryHistoryService:
         # A sample with no usable channel is noise, not a data point.
         if all(value is None for value in values.values()):
             return None
+        readings = {name: _reading(name, values[name]) for name in CHANNEL_BOUNDS}
+        drs = values["drs"] if isinstance(values["drs"], bool) else None
+        if drs is None and all(value is None for value in readings.values()):
+            return None
         try:
             return TelemetrySample(
                 sequence=event.sequence_number,
                 observed_at=event.event_time,
                 lap_number=event.lap_number,
-                speed=_number(values["speed"]),
-                throttle=_number(values["throttle"]),
-                brake=_number(values["brake"]),
-                rpm=_integer(values["rpm"]),
-                gear=_integer(values["gear"]),
-                drs=values["drs"] if isinstance(values["drs"], bool) else None,
+                speed=readings["speed"],
+                throttle=readings["throttle"],
+                brake=readings["brake"],
+                rpm=None if readings["rpm"] is None else int(readings["rpm"]),
+                gear=None if readings["gear"] is None else int(readings["gear"]),
+                drs=drs,
             )
         except ValueError:
             return None
@@ -81,15 +87,13 @@ class TelemetryHistoryService:
         if lap_number is not None and lap_number < 0:
             raise TelemetrySelectionError("Lap number must not be negative")
 
-        view_sequence = await self._view_sequence(session_key, cursor)
+        view_sequence, bound = await self._view_sequence(session_key, cursor)
         window = TelemetryWindow(
             session_key=session_key, lap_number=lap_number, view_sequence=view_sequence
         )
         populated = 0
         for number in selected:
-            driver, scan_limited = await self._driver_window(
-                session_key, number, lap_number, view_sequence
-            )
+            driver, scan_limited = await self._driver_window(session_key, number, lap_number, bound)
             window.drivers.append(driver)
             window.scan_limited = window.scan_limited or scan_limited
             populated += bool(driver.samples)
@@ -111,9 +115,14 @@ class TelemetryHistoryService:
                 window.reason = "scan_limit_reached"
         return window
 
-    async def _view_sequence(self, session_key: str, cursor: int | None) -> int:
-        """Never read past the consumed cursor a caller is rendering against."""
-        acknowledged = 0
+    async def _view_sequence(self, session_key: str, cursor: int | None) -> tuple[int, int | None]:
+        """Resolve the view cursor and the bound reads must not pass.
+
+        The bound is ``None`` only when no cursor is known at all. A cursor of
+        zero is a real bound meaning nothing has been consumed yet, and must not
+        be confused with "read everything".
+        """
+        acknowledged: int | None = None
         if self.states is not None:
             try:
                 state = await self.states.get_state(session_key)
@@ -125,20 +134,21 @@ class TelemetryHistoryService:
                     type(exc).__name__,
                 )
         if cursor is None:
-            return acknowledged
-        return min(cursor, acknowledged) if acknowledged else cursor
+            return (acknowledged or 0), acknowledged
+        bound = min(cursor, acknowledged) if acknowledged is not None else cursor
+        return bound, bound
 
     async def _driver_window(
         self,
         session_key: str,
         driver_number: int,
         lap_number: int | None,
-        view_sequence: int,
+        bound: int | None,
     ) -> tuple[DriverTelemetry, bool]:
         events = await self.events.list_for_session(
             session_key,
             limit=MAX_SCANNED_EVENTS,
-            before_sequence=view_sequence or None,
+            before_sequence=bound,
             event_types=[RaceEventType.CAR_DATA_SAMPLE],
             driver_number=driver_number,
             lap_number=lap_number,
@@ -173,13 +183,16 @@ class TelemetryHistoryService:
         )
 
 
-def _number(value: object) -> float | None:
+def _reading(channel: str, value: object) -> float | None:
+    """Accept a finite, in-range numeric reading; drop provider corruption.
+
+    NaN and infinity are not merely unusable in a chart, they are not valid
+    JSON, so they must never reach a response.
+    """
     if isinstance(value, bool) or not isinstance(value, int | float):
         return None
-    return float(value)
-
-
-def _integer(value: object) -> int | None:
-    if isinstance(value, bool) or not isinstance(value, int | float):
+    number = float(value)
+    if not math.isfinite(number):
         return None
-    return int(value)
+    minimum, maximum = CHANNEL_BOUNDS[channel]
+    return number if minimum <= number <= maximum else None

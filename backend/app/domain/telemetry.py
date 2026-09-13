@@ -31,6 +31,18 @@ CHANNEL_UNITS: dict[str, str] = {
     "drs": "",
 }
 
+# Plausible ranges for each numeric channel, shared by the live reduction and
+# the history reader so a value one path rejects cannot survive in the other.
+# A reading outside these, or a non-finite one, is provider corruption: it is
+# dropped rather than charted.
+CHANNEL_BOUNDS: dict[str, tuple[float, float]] = {
+    "speed": (0, 450),
+    "throttle": (0, 100),
+    "brake": (0, 100),
+    "rpm": (0, 20_000),
+    "gear": (-1, 8),
+}
+
 
 class TelemetrySample(BaseModel):
     """One car-data observation. Absent channels stay absent, never zero."""
