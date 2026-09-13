@@ -19,9 +19,11 @@ from typing import Any, Protocol
 from pydantic import BaseModel, Field
 
 from app.domain.locations import (
+    CENTERLINE_MAX_POINTS,
     DriverLocationSample,
     SessionTrackGeometry,
     TrackBounds,
+    aggregate_centerline,
     bounds_from_points,
     is_transmitting,
     is_valid_coordinate,
@@ -36,6 +38,9 @@ logger = logging.getLogger(__name__)
 LAP_MIN_DEPARTURE = 3_000.0
 LAP_CLOSE_RADIUS = 800.0
 GEOMETRY_SIMPLIFY_TOLERANCE = 25.0
+# The aggregate is already close to the measured line, so this only removes
+# collinear redundancy on straights if the trace exceeds the published cap.
+CENTERLINE_SIMPLIFY_TOLERANCE = 5.0
 # Below this a "trace" is a parked car or a pit box, not a circuit.
 MIN_TRACK_TRACE_POINTS = 20
 
@@ -218,11 +223,20 @@ def build_track_geometry(
     scale. Raw driver samples are never modified to suit the viewport.
     """
 
-    path = simplify_path(lap_points, GEOMETRY_SIMPLIFY_TOLERANCE) if lap_points else []
-    if len(path) > 2 and 0 < math.dist(path[0], path[-1]) <= LAP_CLOSE_RADIUS:
-        # A circuit is a closed loop; the trace ends a sample short of its own
-        # start, so joining the ends removes a break the track does not have.
-        path.append(path[0])
+    # Prefer the aggregate: one retained lap is roughly 1 Hz, so its corners are
+    # described by a handful of fixes, while every sample in the session
+    # describes the same circuit far more densely. The single-lap trace remains
+    # the fallback for sessions whose samples do not cover a whole lap.
+    path = aggregate_centerline(lap_points, session_points) or []
+    if not path:
+        path = simplify_path(lap_points, GEOMETRY_SIMPLIFY_TOLERANCE) if lap_points else []
+        if len(path) > 2 and 0 < math.dist(path[0], path[-1]) <= LAP_CLOSE_RADIUS:
+            # A circuit is a closed loop; the trace ends a sample short of its
+            # own start, so joining the ends removes a break the track does not
+            # have.
+            path.append(path[0])
+    elif len(path) > CENTERLINE_MAX_POINTS:
+        path = simplify_path(path, CENTERLINE_SIMPLIFY_TOLERANCE, CENTERLINE_MAX_POINTS)
     bounds = bounds_from_points(path) or percentile_bounds(session_points)
     if bounds is None:
         return None

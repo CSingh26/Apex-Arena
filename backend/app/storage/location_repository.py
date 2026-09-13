@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 from __future__ import annotations
 
+import math
 from datetime import datetime
 from uuid import uuid4
 
@@ -179,10 +180,32 @@ class SqlSessionLocationRepository:
         session_key: str,
         limit: int = 40_000,
     ) -> list[tuple[float, float]]:
-        statement = (
-            select(SessionLocationSampleRecord.x, SessionLocationSampleRecord.y)
+        """Read a sample spread evenly across the session, not its opening rows.
+
+        Taking the first ``limit`` rows in time order reads only the start of a
+        session, which biases the outline towards out-laps and whatever running
+        happened early. Striding over the ordered series covers the whole
+        session for the same query cost, and measurably fits the circuit better.
+        """
+        total = await self.count(session_key)
+        if total <= 0:
+            return []
+        stride = max(1, math.ceil(total / max(1, limit)))
+        ordered = (
+            select(
+                SessionLocationSampleRecord.x,
+                SessionLocationSampleRecord.y,
+                func.row_number()
+                .over(order_by=SessionLocationSampleRecord.sample_time)
+                .label("position"),
+            )
             .where(SessionLocationSampleRecord.session_key == session_key)
-            .order_by(SessionLocationSampleRecord.sample_time)
+            .subquery()
+        )
+        statement = (
+            select(ordered.c.x, ordered.c.y)
+            .where((ordered.c.position - 1) % stride == 0)
+            .order_by(ordered.c.position)
             .limit(limit)
         )
         async with self.database.session_factory() as session:

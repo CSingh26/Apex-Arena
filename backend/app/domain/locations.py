@@ -11,6 +11,7 @@ the shared projection in the frontend.
 from __future__ import annotations
 
 import math
+import statistics
 from datetime import datetime
 
 from pydantic import BaseModel, Field
@@ -129,6 +130,128 @@ def percentile_bounds(
         min_y=pick(ys, lower),
         max_y=pick(ys, upper),
     )
+
+
+# A single lap of the retained series is thinned to roughly 1 Hz for replay,
+# which is about 60 m between fixes at racing speed: far too coarse to describe
+# a corner. Every retained sample from every driver lands at a different point
+# on each lap, so their union describes the same circuit far more densely than
+# any one trace. Aggregating them recovers detail that is genuinely observed
+# rather than interpolated.
+CENTERLINE_CORRIDOR = 300.0
+"""Half-width, in provider units, of the band kept around the reference lap.
+
+30 m covers the track plus a margin while leaving the pit lane outside it.
+"""
+
+CENTERLINE_BIN_LENGTH = 60.0
+"""Lap distance, in provider units, represented by one aggregated point."""
+
+CENTERLINE_MIN_BIN_SAMPLES = 3
+"""Below this a bin is one car's excursion, not evidence of where the track is."""
+
+CENTERLINE_MIN_COVERAGE = 0.9
+"""Reject a partial aggregate outright; a gap would cut a corner silently."""
+
+CENTERLINE_MAX_POINTS = 2_000
+
+
+def _loop_segments(
+    skeleton: list[tuple[float, float]],
+) -> tuple[list[tuple[tuple[float, float], tuple[float, float], float, float]], float]:
+    """Measure arc length along the reference lap, dropping repeated fixes."""
+    segments: list[tuple[tuple[float, float], tuple[float, float], float, float]] = []
+    travelled = 0.0
+    for start, end in zip(skeleton, skeleton[1:], strict=False):
+        length = math.dist(start, end)
+        if length <= 0:
+            continue
+        segments.append((start, end, travelled, length))
+        travelled += length
+    return segments, travelled
+
+
+def _project_onto_loop(
+    point: tuple[float, float],
+    segments: list[tuple[tuple[float, float], tuple[float, float], float, float]],
+    grid: dict[tuple[int, int], set[int]],
+    cell: float,
+) -> tuple[float, float] | None:
+    """Return (distance from the lap, distance along it) for one sample."""
+    cx, cy = int(point[0] // cell), int(point[1] // cell)
+    best: tuple[float, float] | None = None
+    for dx in (-1, 0, 1):
+        for dy in (-1, 0, 1):
+            for index in grid.get((cx + dx, cy + dy), ()):
+                start, end, offset, length = segments[index]
+                vx, vy = end[0] - start[0], end[1] - start[1]
+                along = ((point[0] - start[0]) * vx + (point[1] - start[1]) * vy) / (
+                    length * length
+                )
+                along = min(1.0, max(0.0, along))
+                nearest = (start[0] + vx * along, start[1] + vy * along)
+                distance = math.dist(point, nearest)
+                if best is None or distance < best[0]:
+                    best = (distance, offset + length * along)
+    return best
+
+
+def aggregate_centerline(
+    skeleton: list[tuple[float, float]],
+    cloud: list[tuple[float, float]],
+    *,
+    corridor: float = CENTERLINE_CORRIDOR,
+    bin_length: float = CENTERLINE_BIN_LENGTH,
+    min_bin_samples: int = CENTERLINE_MIN_BIN_SAMPLES,
+    min_coverage: float = CENTERLINE_MIN_COVERAGE,
+) -> list[tuple[float, float]] | None:
+    """Trace the circuit from every retained sample, ordered by the reference lap.
+
+    The reference lap supplies only the running order; each published point is
+    the median observed position within one short slice of lap distance, so the
+    outline is measured rather than smoothed into shape. Returns None when the
+    samples do not cover the whole lap, because a partial aggregate would cut a
+    corner without saying so.
+    """
+    if len(skeleton) < 3 or not cloud:
+        return None
+    segments, total = _loop_segments(skeleton)
+    if not segments or total <= 0:
+        return None
+
+    cell = max(corridor, 1.0)
+    grid: dict[tuple[int, int], set[int]] = {}
+    for index, (start, end, _offset, length) in enumerate(segments):
+        steps = max(1, int(length // cell) + 1)
+        for step in range(steps + 1):
+            along = step / steps
+            px = start[0] + (end[0] - start[0]) * along
+            py = start[1] + (end[1] - start[1]) * along
+            grid.setdefault((int(px // cell), int(py // cell)), set()).add(index)
+
+    bins: dict[int, list[tuple[float, float]]] = {}
+    for point in cloud:
+        located = _project_onto_loop(point, segments, grid, cell)
+        if located is None or located[0] > corridor:
+            continue
+        bins.setdefault(int(located[1] // bin_length), []).append(point)
+
+    expected = int(total // bin_length) + 1
+    usable = {key: values for key, values in bins.items() if len(values) >= min_bin_samples}
+    if expected <= 0 or len(usable) < expected * min_coverage:
+        return None
+
+    centerline = [
+        (
+            statistics.median(point[0] for point in usable[key]),
+            statistics.median(point[1] for point in usable[key]),
+        )
+        for key in sorted(usable)
+    ]
+    if len(centerline) < 3:
+        return None
+    centerline.append(centerline[0])
+    return centerline
 
 
 def simplify_path(

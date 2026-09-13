@@ -233,6 +233,67 @@ provider positions says so plainly instead of rendering an empty grid.
 
 ---
 
+## 6. The outline was traced from one 1 Hz lap
+
+The geometry was correct in construction but starved of resolution. The retained
+series is thinned to roughly 1 Hz for replay, and `build_track_geometry` traced
+the outline from a single lap of it. At racing speed that is about **60 m
+between fixes**, so a whole lap of Monza carried 139 points and simplification
+reduced it to 59. Corners were two or three straight segments.
+
+Measured on session 11361 (Monza), against the retained samples:
+
+| Outline | Points | Mean distance from the samples |
+|---------|-------:|-------------------------------:|
+| One 1 Hz lap (before) | 59 | 5.44 m |
+| Aggregated (after) | 948 | 0.53 m |
+
+Lowering the simplification tolerance does not help: at zero tolerance the same
+lap yields 139 points with 60 m gaps. **The corners were never sampled.**
+
+### What actually fixes it
+
+Every retained sample from every driver lands at a different point on each lap,
+so their union describes the same circuit far more densely than any one trace.
+`aggregate_centerline` uses the reference lap only for running order, then
+publishes the **median observed position** within each 6 m slice of lap
+distance.
+
+Each published point is therefore measured, not interpolated. The guards are:
+
+- a **30 m corridor** around the reference lap, which keeps the track and its
+  margin while leaving the pit lane outside it;
+- a **minimum of 3 samples per slice**, below which one car's excursion is not
+  evidence of where the track is;
+- **90 % coverage required**, or the aggregate is refused entirely and the
+  single-lap trace is used instead — a partial aggregate would cut a corner
+  without saying so. Sessions 11364 (6 samples) and 11365 (221) correctly stay
+  unavailable rather than producing a shape.
+
+Taking the median per slice, rather than the mean, is what stops a pair of
+off-line fixes from dragging the published outline towards them.
+
+### The sampling bias that cost most of the gain
+
+`sample_points` ordered by `sample_time` and took the first 40,000 rows, which
+reads only the opening of a session. Striding evenly over the ordered series
+costs the same query and fits substantially better:
+
+| Cloud passed to the aggregate | Mean distance from the samples |
+|-------------------------------|-------------------------------:|
+| First 40,000 (before) | 2.82 m |
+| Even stride, 40,000 (after) | 0.71 m |
+| Every sample (155,323) | 0.53 m |
+
+**Why not import a circuit layout from elsewhere.** An external outline is
+expressed in its own coordinate space. Driver markers come from OpenF1 `x`/`y`
+in the session's own frame, so a borrowed shape would have to be fitted to them,
+and every fitting error would show up as cars driving beside the track. Tracing
+the outline from the same samples the cars report is what makes the two agree by
+construction — which is why `SessionTrackGeometry` is documented that way.
+
+---
+
 ## Verification
 
 Against the real 2026 Belgian Grand Prix race (`session_key=11334`), no
