@@ -60,6 +60,16 @@ const upcomingSprint = weekend({ event_id: "belgium-2026", event_slug: "belgian-
   session({ scheduled_start: "2099-07-26T13:00:00Z", actual_start: null, status: "scheduled", room_slug: null, room_eligible: false, eligibility: "future_read_only", replay_available: false, results_available: false }),
 ] });
 describe("RaceRoomsIndex", () => {
+  it("keeps cancelled sessions read-only and identifies unconfirmed schedule expiry", async () => {
+    getRaceRoomEvents.mockResolvedValue({ events: [weekend({ sessions: [
+      session({ status: "cancelled", room_slug: "stale-room" }),
+      session({ session_type: "QUALIFYING", display_name: "Qualifying", capture_state: "expired_unconfirmed", status_basis: "calendar_category" }),
+    ] })], total: 1, limit: 100, offset: 0 });
+    render(<RaceRoomsIndex />);
+    expect(await screen.findByText("Cancelled")).toBeVisible();
+    expect(screen.queryByRole("link", { name: "Open Australian Grand Prix Race" })).not.toBeInTheDocument();
+    expect(screen.getByText("Capture window ended; sporting finish unconfirmed")).toBeVisible();
+  });
   beforeEach(() => {
     getRaceRoomEvents.mockClear();
     window.history.replaceState(null, "", "/rooms");

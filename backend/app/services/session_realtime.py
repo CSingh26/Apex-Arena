@@ -8,7 +8,9 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from app.domain.control import CurrentControlProjection
 from app.domain.locations import DriverLocationSample, TrackBounds, is_transmitting
+from app.services.control_state import racing_inference_blocked
 from app.services.race_state import DriverRaceState, RaceState
 from app.services.session_semantics import is_qualifying_session
 
@@ -51,6 +53,7 @@ class DriverTimingState(BaseModel):
 class SessionTimingState(BaseModel):
     session_key: str
     sequence_number: int
+    control: CurrentControlProjection | None = None
     updated_at: datetime | None = None
     mode: TimingMode
     session_phase: str | None = None
@@ -144,6 +147,7 @@ def timing_state(state: RaceState) -> SessionTimingState:
     return SessionTimingState(
         session_key=state.session_key,
         sequence_number=state.sequence_number,
+        control=state.control,
         updated_at=state.last_updated_at,
         mode=mode,
         session_phase=state.current_phase,
@@ -248,14 +252,6 @@ def _driver_for(state: RaceState, driver_number: int) -> DriverRaceState:
 def _timing_row(number: str, driver: DriverRaceState, state: RaceState) -> DriverTimingState:
     driver_number = _integer(number) or driver.driver_number or 0
     compound = _compound(driver.stint.get("compound") or driver.stint.get("tyre_compound"))
-    stint_start = _integer(driver.stint.get("lap_start") or driver.stint.get("start_lap"))
-    tyre_age = (
-        state.current_lap - stint_start + 1
-        if stint_start is not None
-        and state.current_lap is not None
-        and state.current_lap >= stint_start
-        else None
-    )
     return DriverTimingState(
         driver_number=driver_number,
         name=driver.full_name or driver.broadcast_name or f"Driver {driver_number}",
@@ -268,7 +264,7 @@ def _timing_row(number: str, driver: DriverRaceState, state: RaceState) -> Drive
         latest_lap=driver.latest_lap_duration,
         best_lap=driver.best_lap_duration,
         tyre_compound=compound,
-        tyre_age_laps=tyre_age,
+        tyre_age_laps=driver.tyre_age_laps,
         pit_stop_count=len(driver.pit_stops),
         status="FINISHED" if state.status == "finished" else "RUNNING",
         battle_context=DriverBattleContext(driver_number=driver_number),
@@ -286,8 +282,12 @@ def _apply_battle_context(rows: list[DriverTimingState], state: RaceState) -> No
             ahead_interval_seconds=_float(row.interval),
             behind_driver_number=behind.driver_number if behind else None,
             behind_interval_seconds=_float(behind.interval) if behind else None,
-            status="CLEAR_AIR" if row.position is not None else "UNAVAILABLE",
+            status="CLEAR_AIR"
+            if row.position is not None and not racing_inference_blocked(state.control)
+            else "UNAVAILABLE",
         )
+    if racing_inference_blocked(state.control):
+        return
     for battle in state.current_battles:
         leader = by_number.get(battle.lead_driver_number)
         chaser = by_number.get(battle.chasing_driver_number)
@@ -332,13 +332,12 @@ def _compound(value: object) -> TyreCompound:
 
 
 def _track_status(state: RaceState) -> str:
-    event_type = str(state.race_control_state.get("event_type") or "")
-    return {
-        "RED_FLAG": "RED FLAG",
-        "SAFETY_CAR": "SAFETY CAR",
-        "VIRTUAL_SAFETY_CAR": "VIRTUAL SAFETY CAR",
-        "YELLOW_FLAG": "YELLOW",
-    }.get(event_type, "GREEN" if state.status in {"started", "running"} else state.status.upper())
+    control = state.control
+    if control.neutralization.value not in {"unknown", "green"}:
+        return control.neutralization.value.replace("_", " ").upper()
+    if control.track_flag.value != "unknown":
+        return control.track_flag.value.replace("_", " ").upper()
+    return "GREEN" if control.neutralization.value == "green" else "UNKNOWN"
 
 
 def _integer(value: object) -> int | None:

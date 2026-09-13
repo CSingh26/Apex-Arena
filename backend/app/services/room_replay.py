@@ -11,9 +11,10 @@ from datetime import UTC, datetime
 from typing import Protocol
 from uuid import UUID, uuid4
 
-from app.domain.models import NormalizedRaceEvent
+from app.domain.models import EventOrigin, NormalizedRaceEvent
 from app.domain.rooms import RaceRoom, RoomPlaybackState, RoomStatus
 from app.services.discussion import RaceRoomDiscussionEngine
+from app.services.history_ownership import ContextPin, HistoryContextBusyError, HistoryContextPool
 from app.services.race_state import RaceStateEngine
 from app.services.session_semantics import normalize_qualifying_phase
 from app.storage.redis import EventBus
@@ -46,6 +47,7 @@ class ReplayLease:
     heartbeat: asyncio.Task | None = None
     lost: bool = False
     retiring: bool = False
+    history_pin: ContextPin | None = None
 
 
 class RoomReplayCoordinator:
@@ -60,6 +62,7 @@ class RoomReplayCoordinator:
         event_bus: EventBus,
         base_interval_seconds: float = 0.6,
         session_times: SessionTimeSpanReader | None = None,
+        reasoning_allowed=None,
     ) -> None:
         self.rooms = rooms
         self.events = events
@@ -68,6 +71,10 @@ class RoomReplayCoordinator:
         self.event_bus = event_bus
         self.base_interval_seconds = base_interval_seconds
         self.session_times = session_times
+        from app.services.race_intelligence import RaceIntelligenceCoordinator
+
+        self.intelligence = RaceIntelligenceCoordinator(race_state)
+        self.reasoning_allowed = reasoning_allowed
         self._tasks: dict[UUID, asyncio.Task[None]] = {}
         self._locks: dict[UUID, asyncio.Lock] = {}
         self._spans: dict[str, tuple[datetime, datetime, int]] = {}
@@ -77,6 +84,28 @@ class RoomReplayCoordinator:
         self._operations: set[asyncio.Task] = set()
         self._owner: ContextVar[UUID] = ContextVar("replay_owner")
         self._closed = False
+        self.context_pool = HistoryContextPool(2, self._evict_private_history)
+
+    async def _evict_private_history(self, session_key: str) -> None:
+        self.intelligence.reset_session(session_key)
+        await self.race_state.discard_factual_context(session_key)
+
+    async def _apply_recorded(self, event):
+        state = await self.race_state.apply(event, persist_snapshot=False)
+        if event.event_origin is EventOrigin.SOURCE_FACT:
+            allowed = self.reasoning_allowed is None or await self.reasoning_allowed(
+                event.session_key
+            )
+            if allowed:
+                try:
+                    await self.intelligence.advance_applied_source(
+                        event, state, factual_owner=self.race_state, emit_effects=False
+                    )
+                except BaseException:
+                    self.intelligence.reset_session(event.session_key)
+                    raise
+            else:
+                self.intelligence.reset_session(event.session_key)
 
     async def reconcile_interrupted_replays(self) -> int:
         return await self.rooms.pause_orphaned_running_rows()
@@ -109,6 +138,9 @@ class RoomReplayCoordinator:
         finally:
             if self._leases.get(room_id) is lease:
                 self._leases.pop(room_id)
+            if lease.history_pin is not None:
+                lease.history_pin.release()
+                lease.history_pin = None
 
     @asynccontextmanager
     async def _operation(
@@ -142,13 +174,25 @@ class RoomReplayCoordinator:
                 lease = self._leases.get(room.id)
             if lease is None:
                 lease = ReplayLease()
-                if not await self.rooms.claim_replay(
-                    room.id, lease.token, lease_seconds=self.lease_seconds
-                ):
-                    raise ReplayUnavailableError(
-                        "Replay is busy or owned by another worker; "
-                        "retry the control request shortly"
+                try:
+                    lease.history_pin = await self.context_pool.acquire(
+                        room.session_key or str(room.id)
                     )
+                except HistoryContextBusyError as exc:
+                    raise ReplayUnavailableError(
+                        "Replay history is busy; retry the control shortly"
+                    ) from exc
+                try:
+                    if not await self.rooms.claim_replay(
+                        room.id, lease.token, lease_seconds=self.lease_seconds
+                    ):
+                        raise ReplayUnavailableError(
+                            "Replay is busy or owned by another worker; "
+                            "retry the control request shortly"
+                        )
+                except BaseException:
+                    lease.history_pin.release()
+                    raise
                 self._leases[room.id] = lease
                 lease.heartbeat = asyncio.create_task(
                     self._renew_lease(room.id, lease), name=f"replay-renew:{room.slug}"
@@ -284,7 +328,10 @@ class RoomReplayCoordinator:
                 )
                 await self._publish_generation(room.id, playback.discussion_generation)
                 self.discussion.reset_session(room.session_key, str(room.id))
-                await self.race_state.reset_session(room.session_key, is_replay=True)
+                self.intelligence.reset_session(room.session_key)
+                await self.race_state.reset_session(
+                    room.session_key, is_replay=True, preserve_snapshots=True
+                )
                 await self._prime_driver_profiles(room.session_key)
                 playback = await self._update_playback(
                     room.id,
@@ -309,7 +356,24 @@ class RoomReplayCoordinator:
             playback = await self._update_playback(
                 room.id, is_paused=True, room_status=RoomStatus.PAUSED
             )
-            return await self._publish(room, playback, RoomStatus.PAUSED)
+            published = await self._publish(room, playback, RoomStatus.PAUSED)
+            worker = self._tasks.get(room.id)
+            lease = self._leases.get(room.id)
+        if worker is not None:
+            async with self._locks[room.id]:
+                if self._tasks.get(room.id) is worker and self._leases.get(room.id) is lease:
+                    current = await self.rooms.get_playback(room.id)
+                    if (
+                        current.is_paused
+                        and lease is not None
+                        and await self.rooms.renew_replay(
+                            room.id, lease.token, lease_seconds=self.lease_seconds
+                        )
+                    ):
+                        # Worker cleanup does not acquire this mutex. Keep the
+                        # context pin until cancellation/join actually completes.
+                        await self._cancel(room.id)
+        return published
 
     async def resume(self, room: RaceRoom) -> RoomPlaybackState:
         if room.session_key is None:
@@ -445,7 +509,7 @@ class RoomReplayCoordinator:
                             await self._publish_status(str(room.id), {"status": "replay_complete"})
                             return
                         event = events[0].model_copy(update={"is_replay": True})
-                        await self.race_state.consume(event)
+                        await self._apply_recorded(event)
                         await self.discussion.consume(event)
                         message_sequence = await self.rooms.max_message_sequence(room.id)
                         advanced = await self._update_playback(
@@ -496,7 +560,10 @@ class RoomReplayCoordinator:
         displayed_lap: int | None = None,
     ) -> RoomPlaybackState:
         assert room.session_key is not None
-        await self.race_state.reset_session(room.session_key, is_replay=True)
+        self.intelligence.reset_session(room.session_key)
+        await self.race_state.reset_session(
+            room.session_key, is_replay=True, preserve_snapshots=True
+        )
         await self._prime_driver_profiles(room.session_key)
         self.discussion.reset_session(room.session_key, str(room.id))
         cursor = 0
@@ -512,7 +579,7 @@ class RoomReplayCoordinator:
                 break
             for recorded in eligible:
                 event = recorded.model_copy(update={"is_replay": True})
-                await self.race_state.consume(event)
+                await self._apply_recorded(event)
                 await self.discussion.consume(event)
                 cursor = event.sequence_number
                 if event.lap_number is not None:

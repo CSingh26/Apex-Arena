@@ -39,7 +39,7 @@ class Finalizer:
     def __init__(self):
         self.completed = []
 
-    async def finalize(self, key, *, live=False, live_capture=False):
+    async def finalize(self, key, *, live=False, live_capture=False, terminal_confirmed=False):
         if not live:
             self.completed.append(key)
 
@@ -54,14 +54,21 @@ class Bus:
     async def publish_room_status(self, room_id, status):
         pass
 
+    async def publish_state(self, state):
+        pass
+
 
 async def runtime(settings):
     from app.services.live_ingestion import LiveSessionIngestionService
+    from app.services.race_state import RaceStateEngine
+    from tests.test_race_state import SnapshotRepository
 
     repo = FakeRoomRepository()
     client = LiveProvider()
     rooms = RaceRoomService(repo, FakeSeason([monza()]), 2026, openf1=client)
     pipeline, normalized, consumer = processor()
+    state = RaceStateEngine(SnapshotRepository())
+    pipeline.consumers.insert(0, state)
     finalizer = Finalizer()
     bus = Bus()
     service = LiveSessionIngestionService(
@@ -72,6 +79,7 @@ async def runtime(settings):
         repository=repo,
         finalizer=finalizer,
         event_bus=bus,
+        race_state=state,
     )
     return SimpleNamespace(
         service=service,
@@ -234,7 +242,7 @@ async def test_successful_poll_clears_stale_provider_error(settings):
 
 
 @pytest.mark.asyncio
-async def test_provider_session_end_finalizes_without_deleting_events(settings):
+async def test_provider_nominal_end_keeps_capturing_without_deleting_events(settings):
     r = await runtime(settings)
     await r.service.run_once(now=START)
     count = len(r.normalized.events)
@@ -242,9 +250,9 @@ async def test_provider_session_end_finalizes_without_deleting_events(settings):
         {**provider(), "date_end": (START + timedelta(seconds=30)).isoformat()}
     ]
     await r.service.run_once(now=START + timedelta(seconds=61))
-    assert r.finalizer.completed == ["901"]
+    assert r.finalizer.completed == []
     assert len(r.normalized.events) >= count
-    assert r.service.status["connection_state"] == "SESSION_COMPLETE"
+    assert not r.service.sessions["901"].complete
 
 
 @pytest.mark.asyncio

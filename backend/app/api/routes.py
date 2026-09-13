@@ -29,6 +29,7 @@ from app.api.schemas import (
     HealthResponse,
     HistoricalIngestionRequest,
     HistoricalIngestionResponse,
+    IntelligenceProjectionStatus,
     LiveStatusResponse,
     OpenF1StatusResponse,
     RaceEventCategory,
@@ -63,6 +64,7 @@ from app.services.session_realtime import (
     telemetry_state,
     timing_state,
 )
+from app.storage.intelligence_progress import IntelligenceWriterConflictError
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -209,7 +211,59 @@ async def _session_intelligence(
     race_state = getattr(services, "race_state", None)
     if not session_key or race_state is None:
         return SessionIntelligenceResponse(session_key=session_key or "")
-    return SessionIntelligenceResponse.from_state(await race_state.get_state(session_key))
+    state = await race_state.get_state(session_key)
+    response = SessionIntelligenceResponse.from_state(state)
+    response.projection = await intelligence_projection_status(
+        services,
+        session_key,
+        view_sequence=state.sequence_number,
+        is_replay=state.is_replay,
+    )
+    from app.services.strategy_public import sanitize_strategy_frame
+
+    response.strategy_frame = sanitize_strategy_frame(response.strategy_frame, response.projection)
+    if (
+        response.strategy_frame is not None
+        and response.strategy_frame.projection_status == "unavailable"
+    ):
+        for battle in response.current_battles:
+            battle.strategy_context = None
+    return response
+
+
+async def intelligence_projection_status(
+    services: AppServices,
+    session_key: str | None,
+    *,
+    view_sequence: int | None = None,
+    is_replay: bool = False,
+) -> IntelligenceProjectionStatus:
+    repository = getattr(services, "intelligence_progress", None)
+    if repository is None or not session_key:
+        return IntelligenceProjectionStatus()
+    try:
+        async with asyncio.timeout(2):
+            progress = await repository.load(session_key)
+        if progress is None:
+            return IntelligenceProjectionStatus()
+        projection_status = progress.status
+        if view_sequence is not None:
+            if is_replay and view_sequence <= progress.completed_through_sequence:
+                projection_status = "replay"
+            elif view_sequence != progress.completed_through_sequence:
+                projection_status = "stale"
+        return IntelligenceProjectionStatus(
+            **progress.model_dump(
+                exclude={
+                    "session_key",
+                    "completed_source_id",
+                    "pending_source_id",
+                }
+            ),
+            status=projection_status,
+        )
+    except Exception:
+        return IntelligenceProjectionStatus(status="unavailable")
 
 
 @router.get("/api/v1/season/{season}/weekends", response_model=EventWeekendListResponse)
@@ -579,7 +633,13 @@ async def session_events(
     response_model=SessionStateResponse,
 )
 async def session_state(session_key: str, services: Services) -> SessionStateResponse:
-    return SessionStateResponse(state=await services.race_state.get_state(session_key))
+    from app.services.strategy_public import sanitize_strategy_state
+
+    state = await services.race_state.get_state(session_key)
+    projection = await intelligence_projection_status(
+        services, session_key, view_sequence=state.sequence_number, is_replay=state.is_replay
+    )
+    return SessionStateResponse(state=sanitize_strategy_state(state, projection))
 
 
 @router.get(
@@ -762,6 +822,11 @@ async def ingest_historical_session(
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid internal key")
     try:
         result = await services.historical.ingest_session(payload.session_key, payload.endpoints)
+    except IntelligenceWriterConflictError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Another ingestion writer owns this work; retry after it finishes",
+        ) from exc
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,

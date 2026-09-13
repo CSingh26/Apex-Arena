@@ -195,13 +195,17 @@ async def test_real_storage_live_fanout_restart_and_completion():
             raw_payload={"driver_number": 16, "position": 1},
             event_time=START,
         )
-        original_insert = services.normalized_event_repository.insert
-        services.normalized_event_repository.insert = AsyncMock(
+        # The guarded critical projection owns the durable normalized write, so
+        # fault injection has to target that seam rather than the bare repository
+        # insert it superseded.
+        projection_repository = services.processor.critical_projection.repository
+        original_append = projection_repository.append_source
+        projection_repository.append_source = AsyncMock(
             side_effect=RuntimeError("storage failure")
         )
         with pytest.raises(RuntimeError):
             await services.processor.ingest_batch([raw])
-        services.normalized_event_repository.insert = original_insert
+        projection_repository.append_source = original_append
         await services.processor.ingest_batch([raw])
         assert await services.raw_event_repository.count("retry-test") == 1
         assert await services.normalized_event_repository.count("retry-test") == 1

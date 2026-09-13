@@ -9,6 +9,7 @@ from typing import Any
 from uuid import UUID
 
 from app.domain.models import NormalizedRaceEvent, RaceEventType
+from app.services.control_normalization import normalize_control_payload
 from app.services.event_importance import EventImportancePolicy
 from app.services.raw_events import RawEventInput
 from app.services.session_semantics import (
@@ -44,6 +45,19 @@ class OpenF1EventNormalizer:
         payload = self._enrich_payload(endpoint, raw.raw_payload)
         event_type = self._event_type(endpoint, payload)
         event_time = raw.event_time or self._payload_time(payload) or raw.received_at
+        identity_time = event_time
+        if endpoint == "sessions":
+            observed = self._payload_time({key: payload.get(key) for key in ("date", "event_time")})
+            if payload.get("status"):
+                event_time = observed or raw.received_at
+                payload["timestamp_authority"] = (
+                    "provider_observation" if observed else "received_observation"
+                )
+            else:
+                payload["timestamp_authority"] = "scheduled_metadata"
+            # A status without a provider timestamp is an observation, not a new
+            # fact on every poll. Its raw content supplies stable source identity.
+            identity_time = observed
         if event_time.tzinfo is None:
             event_time = event_time.replace(tzinfo=UTC)
         session_key = str(raw.session_key or payload.get("session_key") or "unknown")
@@ -53,7 +67,7 @@ class OpenF1EventNormalizer:
         dedup_key = self._dedup_key(
             session_key=session_key,
             event_type=event_type,
-            event_time=event_time,
+            event_time=identity_time,
             driver_numbers=driver_numbers,
             lap_number=lap_number,
             payload=payload,
@@ -95,22 +109,23 @@ class OpenF1EventNormalizer:
         category = str(payload.get("category") or "").upper()
         if "LAP TIME" in message and ("DELETED" in message or "INVALIDATED" in message):
             return RaceEventType.LAP_DELETED
-        if "VIRTUAL SAFETY CAR" in message or "VSC" in message:
-            return RaceEventType.VIRTUAL_SAFETY_CAR
-        if "SAFETY CAR" in message:
-            return RaceEventType.SAFETY_CAR
-        if flag == "RED" or "RED FLAG" in message:
-            return RaceEventType.RED_FLAG
-        if "YELLOW" in flag or "YELLOW FLAG" in message:
-            return RaceEventType.YELLOW_FLAG
         if "PENALTY" in message:
             return RaceEventType.PENALTY
         if "INVESTIGATION" in message:
             return RaceEventType.INVESTIGATION
-        if category == "SESSIONSTATUS" and any(
-            marker in message for marker in ("FINISH", "CHEQUERED", "ENDED")
-        ):
+        if re.search(r"\b(?:SQ|Q)[123]\b", message) and category == "SESSIONSTATUS":
+            return RaceEventType.QUALIFYING_PHASE
+        control = payload.get("control") or {}
+        if control.get("lifecycle") == "finished":
             return RaceEventType.SESSION_FINISH
+        if control.get("neutralization") == "virtual_safety_car":
+            return RaceEventType.VIRTUAL_SAFETY_CAR
+        if control.get("neutralization") == "safety_car":
+            return RaceEventType.SAFETY_CAR
+        if control.get("neutralization") == "red":
+            return RaceEventType.RED_FLAG
+        if "YELLOW" in flag or "YELLOW FLAG" in message:
+            return RaceEventType.YELLOW_FLAG
         if payload.get("qualifying_phase") is not None and (
             category == "SESSIONSTATUS" or re.search(r"\b(?:SQ|Q)[123]\b.*\b(?:START|END)", message)
         ):
@@ -120,6 +135,25 @@ class OpenF1EventNormalizer:
     @staticmethod
     def _enrich_payload(endpoint: str, payload: dict[str, Any]) -> dict[str, Any]:
         enriched = dict(payload)
+        if endpoint == "race_control":
+            enriched["control"] = normalize_control_payload(payload)
+            phase_match = re.search(r"\b(?:SQ|Q)[123]\b", str(payload.get("message") or "").upper())
+            if phase_match and str(payload.get("category") or "").upper() == "SESSIONSTATUS":
+                enriched["session_phase"] = phase_match.group()
+                # A phase chequered flag cannot certify whole-session completion.
+                if enriched["control"].get("lifecycle") == "finished":
+                    enriched["control"].pop("lifecycle")
+            enriched["control_schema"] = "observed-v1"
+            enriched["timestamp_authority"] = (
+                "provider_observation"
+                if OpenF1EventNormalizer._payload_time(payload)
+                else "received_observation"
+            )
+        elif endpoint == "sessions":
+            enriched["control_schema"] = "observed-v1"
+            enriched["control"] = normalize_control_payload(
+                {"category": "SessionStatus", "message": str(payload.get("status") or "")}
+            )
         session_type = normalize_session_type(
             enriched.get("normalized_session_type")
             or enriched.get("session_name")
@@ -131,6 +165,15 @@ class OpenF1EventNormalizer:
             enriched.get("session_phase") or enriched.get("qualifying_phase"),
             session_type,
         )
+        if endpoint == "laps" and phase is not None:
+            supplied = (
+                str(enriched.get("session_phase") or enriched.get("qualifying_phase") or "")
+                .strip()
+                .upper()
+            )
+            explicit_family = re.fullmatch(r"(SQ|Q)\s*[123]", supplied)
+            if explicit_family and explicit_family.group(1) != phase[:-1]:
+                phase = None
         if phase is not None:
             enriched["session_phase"] = phase
         if endpoint == "session_result" and session_type is not None:
@@ -176,7 +219,7 @@ class OpenF1EventNormalizer:
         *,
         session_key: str,
         event_type: RaceEventType,
-        event_time: datetime,
+        event_time: datetime | None,
         driver_numbers: list[int],
         lap_number: int | None,
         payload: dict[str, Any],
@@ -184,7 +227,7 @@ class OpenF1EventNormalizer:
         identity = {
             "session_key": session_key,
             "event_type": event_type.value,
-            "event_time": event_time.isoformat(),
+            "event_time": event_time.isoformat() if event_time else None,
             "driver_numbers": driver_numbers,
             "lap_number": lap_number,
             "payload": payload,

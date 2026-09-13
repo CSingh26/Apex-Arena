@@ -247,6 +247,9 @@ class HistoricalOpenF1Adapter:
         session_type_hint: str | None = None,
     ) -> HistoricalIngestionResult:
         selected = self._validate_endpoints(endpoints)
+        projection = getattr(self.processor, "critical_projection", None)
+        if projection is not None:
+            await projection.repository.check_writer_access(session_key)
         selected_stages = self._selected_stages(selected)
         run_id = await self.runs.start(
             provider="openf1",

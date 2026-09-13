@@ -172,6 +172,7 @@ async def test_high_frequency_samples_keep_only_valid_latest_values() -> None:
         "gear": 7,
         "rpm": 11_420,
         "drs": True,
+        "drs_code": 12,
     }
     assert driver.location == {"x": 134.2, "y": -22.7, "z": 1.8}
     assert state.has_telemetry is True

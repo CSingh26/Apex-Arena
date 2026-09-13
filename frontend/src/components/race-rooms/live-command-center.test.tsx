@@ -157,12 +157,97 @@ describe("LiveCommandCenter", () => {
 
   afterEach(() => vi.unstubAllGlobals());
 
+  it("uses the driver's authoritative used-tyre age, with unknown fallback", async () => {
+    const snapshot = state(12, 1, 0);
+    Object.assign(snapshot.drivers["63"], { completed_lap: 7, tyre_age_laps: 6 });
+    snapshot.drivers["63"].stint = { compound: "HARD", lap_start: 5, tyre_age_at_start: 3 };
+    api.getSessionState.mockResolvedValue({ state: snapshot });
+    render(<LiveCommandCenter sessionKey="race-1" circuitName="Circuit" eventName="Grand Prix" playbackSequence={12} sessionClock={null} selectedDriver={null} onSelectDriver={vi.fn()} />);
+    const row = await screen.findByRole("button", { name: /George Russell, position 1/i });
+    expect(row.querySelector("i")?.textContent).toBe("6");
+    act(() => FakeEventSource.instances.at(-1)?.emit("state", JSON.stringify({ ...snapshot, sequence_number: 13,
+      drivers: { "63": { ...snapshot.drivers["63"], tyre_age_laps: null } } })));
+    expect(row.querySelector("i")?.textContent).toBe("");
+  });
+
+  it.each([
+    ["unknown", "unknown", "unknown", "UNKNOWN"],
+    ["running", "safety_car", "unknown", "SAFETY CAR"],
+    ["running", "virtual_safety_car", "unknown", "VIRTUAL SAFETY CAR"],
+    ["running", "unknown", "unknown", "UNKNOWN"],
+    ["finished", "safety_car", "yellow", "COMPLETED"],
+    ["running", "green", "green", "GREEN"],
+  ])("uses typed track authority %s/%s/%s", async (lifecycle, neutralization, flag, expected) => {
+    const snapshot = state(1, 1, 0);
+    snapshot.control = {
+      session_key: "race-1", sequence: 1,
+      lifecycle: { value: lifecycle, evidence: null },
+      neutralization: { value: neutralization, evidence: null },
+      track_flag: { value: flag, evidence: null },
+      drs_permission: { value: "unknown", evidence: null },
+      sector_flags: {}, history: [], history_truncated: false,
+    };
+    snapshot.race_control_state = { event_type: "RACE_CONTROL" };
+    api.getSessionState.mockResolvedValue({ state: snapshot });
+    render(<LiveCommandCenter sessionKey="race-1" circuitName="Circuit" eventName="Grand Prix" playbackSequence={1} sessionClock={null} selectedDriver={null} onSelectDriver={vi.fn()} />);
+    await screen.findByRole("button", { name: /George Russell, position 1/i });
+    expect(screen.getByText(expected)).toBeVisible();
+    expect(screen.queryByText("RACE CONTROL")).not.toBeInTheDocument();
+  });
+
+  it("does not promote an old snapshot without control to green", async () => {
+    api.getSessionState.mockResolvedValue({ state: state(1, 1, 0) });
+    render(<LiveCommandCenter sessionKey="race-1" circuitName="Circuit" eventName="Grand Prix" playbackSequence={1} sessionClock={null} selectedDriver={null} onSelectDriver={vi.fn()} />);
+    await screen.findByRole("button", { name: /George Russell, position 1/i });
+    expect(screen.getByText("UNKNOWN")).toBeVisible();
+    expect(screen.queryByText("GREEN")).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ["safety_car", "safety_car", "SAFETY CAR"],
+    ["red", "unknown", "UNKNOWN"],
+  ])("keeps resumed %s authority as %s", async (before, after, expected) => {
+    const snapshot = state(1, 1, 0);
+    snapshot.control = {
+      session_key: "race-1", sequence: 1,
+      lifecycle: { value: "suspended", evidence: null },
+      neutralization: { value: before, evidence: null },
+      track_flag: { value: "unknown", evidence: null },
+      drs_permission: { value: "unknown", evidence: null },
+      sector_flags: {}, history: [], history_truncated: false,
+    };
+    api.getSessionState.mockResolvedValue({ state: snapshot });
+    render(<LiveCommandCenter sessionKey="race-1" circuitName="Circuit" eventName="Grand Prix" playbackSequence={1} sessionClock={null} selectedDriver={null} onSelectDriver={vi.fn()} />);
+    await screen.findByRole("button", { name: /George Russell, position 1/i });
+    const resumed = {
+      ...snapshot, sequence_number: 2,
+      race_control_state: { event_type: "RACE_CONTROL", message: "SESSION RESUMED" },
+      control: { ...snapshot.control, sequence: 2,
+        lifecycle: { value: "running", evidence: null },
+        neutralization: { value: after, evidence: null },
+      },
+    };
+    act(() => FakeEventSource.instances[0].emit("state", JSON.stringify(resumed)));
+    expect(screen.getByText(expected)).toBeVisible();
+    expect(screen.queryByText("GREEN")).not.toBeInTheDocument();
+    expect(screen.queryByText("RACE CONTROL")).not.toBeInTheDocument();
+  });
+
   it("updates the tower, selected-driver gap, and race-control status from replay state events", async () => {
     api.getSessionState.mockResolvedValue({ state: state(1, 1, 0) });
     render(<LiveCommandCenter sessionKey="race-1" circuitName="Circuit" eventName="Grand Prix" playbackSequence={1} sessionClock={null} selectedDriver={null} onSelectDriver={vi.fn()} />);
 
     await screen.findByRole("button", { name: /George Russell, position 1/i });
-    act(() => FakeEventSource.instances[0].emit("state", JSON.stringify(state(2, 2, 1.221, 1))));
+    const neutralized = state(2, 2, 1.221, 1);
+    neutralized.control = {
+      session_key: "race-1", sequence: 2,
+      lifecycle: { value: "running", evidence: null },
+      neutralization: { value: "safety_car", evidence: null },
+      track_flag: { value: "unknown", evidence: null },
+      drs_permission: { value: "unknown", evidence: null },
+      sector_flags: {}, history: [], history_truncated: false,
+    };
+    act(() => FakeEventSource.instances[0].emit("state", JSON.stringify(neutralized)));
 
     await screen.findByRole("button", { name: /George Russell, position 2/i });
     expect(screen.getByText("SAFETY CAR")).toBeVisible();

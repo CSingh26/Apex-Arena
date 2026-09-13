@@ -217,6 +217,64 @@ class DeterministicRoomGenerator:
         )
         phase = evidence.get("session_phase")
         base_keys = ["event_type", "event_sequence"]
+        if event.event_type == RaceEventType.STRATEGY_SITUATION:
+            from app.services.strategy_events import validated_strategy
+
+            strategy = validated_strategy(event)
+            if strategy is not None:
+                item = strategy.situation
+                p = item.payload
+                descriptions = {
+                    "stint_divergence": (
+                        "The recorded compound or stint observations differ. The drivers'"
+                        " future stop plans remain unknown."
+                    ),
+                    "relative_pace": (
+                        "The drivers' recent clean lap samples show a pace difference."
+                        " Fuel, traffic and weather have not been isolated."
+                    ),
+                    "pit_window": (
+                        "Repeating the measured same-driver pit loss gives a conditional"
+                        " rejoin range. Rival gaps are held constant and absolute rank is"
+                        " unavailable with partial coverage."
+                    ),
+                    "undercut_condition": (
+                        "Under equal stop losses, cumulative relative gain must exceed the"
+                        f" observed {p.required_gain_seconds or 0:g}s gap. New-tyre pace,"
+                        " warmup and the rival's stop timing are unknown."
+                    ),
+                    "overcut_condition": (
+                        "An actual rival stop anchors this stay-out comparison against their"
+                        " pre-stop pace. This does not establish a successful overcut."
+                    ),
+                    "neutralized_pit_context": (
+                        "Observed reduced-speed running changes the pit context. Any saving"
+                        " remains unquantified; an ending signal is still neutralized running."
+                    ),
+                    "extra_stop_consequence": (
+                        "The supplied remaining distance gives a conditional average gain"
+                        " needed to break even. Expected tyre performance is unknown."
+                    ),
+                    "weather_change": (
+                        "The consumed weather observations changed. Compound choice may need"
+                        " reassessment, but these readings do not establish track wetness or"
+                        " the best tyre."
+                    ),
+                }
+                text = (
+                    "The earlier strategy observation has been withdrawn because its"
+                    " factual premise changed."
+                    if item.status == "withdrawn"
+                    else descriptions[item.kind.value]
+                )
+                return self._message(
+                    MessageType.ANALYSIS,
+                    text,
+                    Confidence.LOW,
+                    EvidenceStatus.GROUNDED,
+                    "A bounded source-supported strategy observation.",
+                    ["strategy"],
+                )
         if host_summary:
             return self._message(
                 MessageType.SUMMARY,

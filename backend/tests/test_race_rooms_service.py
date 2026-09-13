@@ -75,6 +75,16 @@ class FakeRoomRepository:
         assert len(agents) == 5
         self.seed_calls += 1
 
+    async def confirmed_cancelled_sessions(self, keys, *, algorithm_version):
+        return set()  # This catalog-only double has no committed source projection.
+
+    async def observe_catalog_cancellation(self, room_id, session_key):
+        for room in self.rooms.values():
+            if room.id == room_id and room.session_key == session_key:
+                room.provider_cancelled = True
+                return True
+        return False
+
     async def upsert_room(self, room: RaceRoom, agent_ids: list[str]) -> RaceRoom:
         assert len(agent_ids) == 5
         self.upserts.append(room)
@@ -364,7 +374,9 @@ async def test_historical_force_sync_keeps_same_weekend_future_session_upcoming(
         lookback_days=14,
     )
 
-    assert synchronized == 0
+    # The already-started qualifying session remains in its bounded capture
+    # window, but the next day's race must still be future/read-only.
+    assert synchronized == 1
     assert "2026-belgian-grand-prix-race" not in repository.rooms
 
 
@@ -540,8 +552,8 @@ async def test_sprint_shootout_normalizes_and_repeat_sync_creates_no_duplicates(
     race = sprint_weekend()
     sessions = sprint_provider_sessions()
 
-    await service.sync_meetings([race], sessions, now=datetime(2026, 7, 20, tzinfo=UTC))
-    await service.sync_meetings([race], sessions, now=datetime(2026, 7, 20, tzinfo=UTC))
+    await service.sync_meetings([race], sessions, now=datetime(2026, 7, 20, 2, tzinfo=UTC))
+    await service.sync_meetings([race], sessions, now=datetime(2026, 7, 20, 2, tzinfo=UTC))
 
     assert len(repository.rooms) == 4
     assert {room.session_type for room in repository.rooms.values()} == {
@@ -565,14 +577,14 @@ async def test_grouped_sprint_event_preserves_official_session_order() -> None:
     await service.sync_meetings(
         [sprint_weekend()],
         sprint_provider_sessions(),
-        now=datetime(2026, 7, 20, tzinfo=UTC),
+        now=datetime(2026, 7, 20, 2, tzinfo=UTC),
     )
 
     events, total = await service.grouped_events(
         status=WeekendStatus.COMPLETED,
         session_type=SessionType.SPRINT,
         is_sprint_weekend=True,
-        now=datetime(2026, 7, 20, tzinfo=UTC),
+        now=datetime(2026, 7, 20, 2, tzinfo=UTC),
     )
 
     assert total == 1

@@ -3,6 +3,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   getRoomMessages,
+  getRoomHistoryDetail,
+  getSessionHistoryDetail,
   roomStreamUrl,
   startRoomReplay,
   updateRoomPlayback,
@@ -12,6 +14,19 @@ import {
 describe("replay operator client", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
+  });
+
+  it("requests selected cursor-bound history with cancellation and preserves retry guidance", async () => {
+    const signal = new AbortController().signal;
+    const fetchMock = vi.fn().mockImplementation(async () => new Response(JSON.stringify({availability:"unavailable",reason:"legacy_history_unverified"}),{status:200}));
+    vi.stubGlobal("fetch",fetchMock);
+    await getRoomHistoryDetail("race room",[4,16],["laps","control"],signal);
+    expect(fetchMock.mock.calls[0][0]).toContain("/rooms/race%20room/intelligence-detail?driver=4&driver=16&family=laps&family=control");
+    expect(fetchMock.mock.calls[0][1].signal).toBe(signal);
+    await getSessionHistoryDetail("race/key",[4],["pits"],17,signal);
+    expect(fetchMock.mock.calls[1][0]).toContain("/sessions/race%2Fkey/intelligence-detail?driver=4&family=pits&cursor=17");
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({detail:"History detail is temporarily unavailable; retry shortly"}),{status:503,headers:{"Retry-After":"1"}}));
+    await expect(getRoomHistoryDetail("race",[4],["laps"])).rejects.toMatchObject({status:503,retryAfterSeconds:1});
   });
 
   it("sends the operator credential only as a custom header on replay mutations", async () => {

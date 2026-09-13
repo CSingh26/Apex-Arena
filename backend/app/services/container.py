@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
@@ -24,6 +25,8 @@ from app.services.event_pipeline import (
     SequenceNumberService,
 )
 from app.services.historical import HistoricalOpenF1Adapter
+from app.services.history_details import HistoryDetailReader
+from app.services.intelligence_recovery import IntelligenceProjection
 from app.services.live_ingestion import LiveSessionIngestionService
 from app.services.locations import (
     LiveLocationRecorder,
@@ -43,6 +46,7 @@ from app.services.rooms import RaceRoomService
 from app.services.season import SeasonService
 from app.storage.backfill_repository import SqlOpenF1BackfillJobRepository
 from app.storage.database import Database
+from app.storage.intelligence_progress import SqlIntelligenceProgressRepository
 from app.storage.intelligence_repository import SqlBattleSummaryRepository
 from app.storage.location_repository import SqlSessionLocationRepository
 from app.storage.redis import EventBus, RaceEventRedisPublisher, RedisStore
@@ -133,8 +137,13 @@ class AppServices:
             proximity_exit_seconds=settings.proximity_exit_seconds,
             event_cooldown_seconds=settings.intelligence_event_cooldown_seconds,
         )
+        # Critical projection never derives against Redis/shared replay state.
+        self.projection_state = RaceStateEngine(
+            self.snapshot_repository,
+            retain_applied_dedup_keys=False,
+        )
         self.race_intelligence = RaceIntelligenceCoordinator(
-            self.race_state,
+            self.projection_state,
             config=intelligence_config,
             battle_summaries=self.battle_summary_repository,
         )
@@ -146,6 +155,7 @@ class AppServices:
             settings.season_year,
             openf1=self.openf1,
             eligibility=self.room_eligibility,
+            capture_window_seconds=settings.live_session_capture_window_seconds,
         )
         self.room_discussion = RaceRoomDiscussionEngine(
             self.room_repository,
@@ -170,14 +180,29 @@ class AppServices:
             ordering_buffer=self.ordering_buffer,
             sequence_numbers=SequenceNumberService(self.normalized_event_repository),
             consumers=[
-                self.race_state,
-                self.race_intelligence,
                 self.redis_publisher,
                 self.room_discussion,
                 self.championship,
                 LiveLocationRecorder(self.session_locations),
             ],
+            critical_projection=IntelligenceProjection(
+                SqlIntelligenceProgressRepository(
+                    self.database,
+                    algorithm_version="race-v1:"
+                    + hashlib.sha256(intelligence_config.model_dump_json().encode()).hexdigest(),
+                ),
+                self.normalized_event_repository,
+                self.race_intelligence,
+                self.race_state,
+                state_publisher=self.event_bus.publish_state,
+            ),
         )
+        self.intelligence_progress = self.processor.critical_projection.repository
+        self.history_details = HistoryDetailReader(
+            self.database, algorithm_version=self.intelligence_progress.algorithm_version
+        )
+        self.race_state.algorithm_version = self.intelligence_progress.algorithm_version
+        self.rooms.intelligence_algorithm_version = self.intelligence_progress.algorithm_version
         self.openf1_live = OpenF1LiveClient(
             settings,
             self.openf1_auth,
@@ -206,6 +231,11 @@ class AppServices:
             mqtt_client=self.openf1_live,
             race_state=self.race_state,
         )
+        self.openf1_live.admit_message = self.live_ingestion.admit_mqtt
+        self.processor.consumers.append(self.live_ingestion)
+        self.processor.critical_projection.state_publisher = (
+            self.live_ingestion.publish_recovered_state
+        )
         self.backfill = OpenF1HistoricalBackfillService(
             settings=settings,
             client=self.openf1,
@@ -226,6 +256,48 @@ class AppServices:
         )
         self._recent_reconciliation_task: asyncio.Task[None] | None = None
         self._replay_reconciliation_task: asyncio.Task[None] | None = None
+        self._intelligence_recovery_task: asyncio.Task[None] | None = None
+        self._intelligence_recovery_cursor = ""
+
+    async def start_intelligence_recovery(self) -> None:
+        """Only the existing singleton worker may sweep pending critical work."""
+        if not self.database.ingestor_lease_owned:
+            return
+        if self._intelligence_recovery_task is None:
+            await self.database.require_ingestion_schema()
+            self._intelligence_recovery_task = asyncio.create_task(
+                self._maintain_intelligence_recovery(),
+                name="intelligence-pending-recovery",
+            )
+
+    async def recover_pending_intelligence(self) -> dict[str, int]:
+        keys = await self.intelligence_progress.pending_sessions(
+            after_session=self._intelligence_recovery_cursor,
+            limit=50,
+        )
+        self._intelligence_recovery_cursor = keys[-1] if keys else ""
+        result = {"attempted": len(keys), "recovered": 0, "failed": 0}
+        for key in keys:
+            try:
+                async with asyncio.timeout(self.settings.intelligence_recovery_timeout_seconds):
+                    await self.processor.recover_session(key)
+                result["recovered"] += 1
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                result["failed"] += 1
+                logger.warning("Intelligence recovery failed error=%s", type(exc).__name__)
+        return result
+
+    async def _maintain_intelligence_recovery(self) -> None:
+        while True:
+            try:
+                await self.recover_pending_intelligence()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning("Intelligence recovery sweep failed error=%s", type(exc).__name__)
+            await asyncio.sleep(self.settings.intelligence_recovery_interval_seconds)
 
     async def start_replay_recovery(self) -> None:
         await self.room_replay.reconcile_interrupted_replays()
@@ -326,6 +398,12 @@ class AppServices:
             await asyncio.sleep(self.settings.openf1_live_poll_seconds)
 
     async def close(self) -> None:
+        await self.history_details.close()
+        if self._intelligence_recovery_task is not None:
+            self._intelligence_recovery_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._intelligence_recovery_task
+            self._intelligence_recovery_task = None
         if self._replay_reconciliation_task is not None:
             self._replay_reconciliation_task.cancel()
             with suppress(asyncio.CancelledError):

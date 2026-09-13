@@ -103,9 +103,18 @@ class IntelligenceRebuildService:
     ) -> IntelligenceRebuildSummary:
         if not dry_run and not replace_derived:
             raise ValueError("Writing a rebuild requires --replace-derived")
+        if not dry_run:
+            raise ValueError(
+                "Stored append-order history cannot be safely replaced; use --dry-run. "
+                "A separately reviewed append-only repair is required."
+            )
 
         source_events = await self._source_events(session_key)
-        race_state = RaceStateEngine(_MemorySnapshots(), snapshot_every_n_events=1_000_000)
+        race_state = RaceStateEngine(
+            _MemorySnapshots(),
+            snapshot_every_n_events=1_000_000,
+            retain_applied_dedup_keys=False,
+        )
         collector = _BattleCollector()
         coordinator = RaceIntelligenceCoordinator(
             race_state,
@@ -147,18 +156,6 @@ class IntelligenceRebuildService:
         rejections = diagnostics.overtake_rejections_by_reason
 
         persisted = derived
-        if not dry_run:
-            persisted = await self.events.replace_derived_for_session(
-                session_key,
-                derived,
-                source_events=source_events,
-            )
-            await self.battles.replace_for_session(
-                session_key,
-                list(collector.resolved.values()),
-            )
-            if self.snapshots is not None:
-                await self.snapshots.delete_for_session(session_key)
 
         by_type = Counter(event.event_type.value for event in persisted)
         return IntelligenceRebuildSummary(
@@ -201,11 +198,6 @@ class IntelligenceRebuildService:
             after_sequence = max(event.sequence_number for event in page)
             if len(page) < 1000:
                 break
-        ordered = sorted(
-            source,
-            key=lambda event: (event.event_time, event.sequence_number, str(event.id)),
-        )
-        return [
-            event.model_copy(update={"sequence_number": replay_sequence})
-            for replay_sequence, event in enumerate(ordered, start=1)
-        ]
+        # Durable append order is authoritative, including late event-time facts.
+        # Rebuild is diagnostic only and never assigns new source identities/cursors.
+        return source

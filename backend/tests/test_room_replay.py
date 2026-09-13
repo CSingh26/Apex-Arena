@@ -15,7 +15,7 @@ from app.domain.rooms import (
     RoomStatus,
     SourceAvailability,
 )
-from app.services.race_state import RaceState
+from app.services.race_state import RaceState, RaceStateEngine
 from app.services.room_replay import ReplayUnavailableError, RoomReplayCoordinator
 from app.storage.room_repository import ReplayOwnershipLostError
 
@@ -302,21 +302,38 @@ class FakeDiscussion:
         self.resets.append((session_key, room_id))
 
 
-class FakeRaceState:
+class FakeRaceState(RaceStateEngine):
     def __init__(self) -> None:
+        from tests.test_race_state import SnapshotRepository
+
+        super().__init__(SnapshotRepository())
         self.consumed: list[int] = []
         self.consumed_replay_modes: list[bool] = []
         self.resets: list[str] = []
         self.reset_modes: list[bool] = []
         self.primed_profiles: list[list[int]] = []
 
-    async def consume(self, event: NormalizedRaceEvent) -> None:
+    async def consume(self, event: NormalizedRaceEvent, *, persist_snapshot: bool = True) -> None:
+        assert persist_snapshot is False
         self.consumed.append(event.sequence_number)
         self.consumed_replay_modes.append(event.is_replay)
 
-    async def reset_session(self, session_key: str, *, is_replay: bool = False) -> None:
+    async def apply(self, event, *, persist_snapshot=True):
+        await self.consume(event, persist_snapshot=persist_snapshot)
+        return await super().apply(event, persist_snapshot=persist_snapshot)
+
+    async def reset_session(
+        self, session_key: str, *, is_replay: bool = False, preserve_snapshots: bool = False
+    ) -> None:
+        assert preserve_snapshots is True
         self.resets.append(session_key)
         self.reset_modes.append(is_replay)
+        await super().reset_session(
+            session_key, is_replay=is_replay, preserve_snapshots=preserve_snapshots
+        )
+
+    async def discard_factual_context(self, session_key: str) -> None:
+        pass  # This test double owns no private factual context.
 
     async def prime_driver_profiles(
         self,

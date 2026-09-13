@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections import Counter, defaultdict
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Protocol
 from uuid import NAMESPACE_URL, uuid5
@@ -24,12 +26,18 @@ from app.domain.models import (
     RaceEventType,
 )
 from app.services.battle_intelligence import BattleEngine
+from app.services.control_state import racing_inference_blocked
 from app.services.event_importance import EventImportancePolicy
 from app.services.event_pipeline import NormalizedEventRepository
 from app.services.overtake_intelligence import OvertakeDetector
 from app.services.position_intelligence import PositionTracker
 from app.services.qualifying_intelligence import QualifyingEngine
 from app.services.race_state import RaceState, RaceStateEngine
+from app.services.strategy_events import strategy_event
+from app.services.strategy_intelligence import (
+    DEFAULT_SEMANTIC_IDENTITY,
+    StrategyIntelligence,
+)
 
 logger = logging.getLogger(__name__)
 DEFAULT_PIT_TRANSITION_SECONDS = 45.0
@@ -39,6 +47,12 @@ SESSION_END_TYPES = {RaceEventType.SESSION_END, RaceEventType.SESSION_FINISH}
 
 class BattleSummaryRepository(Protocol):
     async def upsert_resolved(self, battle: BattleState) -> None: ...
+
+
+@dataclass
+class IntelligenceEffects:
+    derived: list[NormalizedRaceEvent]
+    resolved_battles: list[BattleState]
 
 
 class RaceIntelligenceCoordinator:
@@ -63,20 +77,76 @@ class RaceIntelligenceCoordinator:
         self._derived: dict[str, list[NormalizedRaceEvent]] = defaultdict(list)
         self._last_source_sequence: dict[str, int] = {}
         self._position_change_causes: dict[str, Counter[str]] = defaultdict(Counter)
+        # Collaborators are supplied lazily in several call sites, so resolve the
+        # semantic identity defensively rather than requiring a live engine here.
+        self.strategy = StrategyIntelligence(
+            semantic_identity=getattr(race_state, "algorithm_version", None)
+            or DEFAULT_SEMANTIC_IDENTITY,
+        )
 
     async def consume(self, event: NormalizedRaceEvent) -> None:
         if event.event_origin is EventOrigin.DERIVED:
             return
         state = await self.race_state.get_state(event.session_key)
-        await self._advance(event, state, emit_effects=True)
-        await self.race_state.set_intelligence(
-            event.session_key,
-            current_battles=self.battles.current_for_session(event.session_key),
-            qualifying=self.qualifying.state_for(event.session_key),
+        effects = await self.advance_applied_source(event, state, factual_owner=self.race_state)
+        self._derived[event.session_key].extend(effects.derived)
+        if self.battle_summaries is not None:
+            for battle in effects.resolved_battles:
+                await self.battle_summaries.upsert_resolved(battle)
+
+    async def advance_source(
+        self, event: NormalizedRaceEvent, state: RaceState
+    ) -> IntelligenceEffects:
+        """Produce a critical transaction's effects without external writes."""
+        return await self.advance_applied_source(event, state, factual_owner=self.race_state)
+
+    async def advance_applied_source(
+        self, event, state, *, factual_owner: RaceStateEngine, emit_effects=True
+    ):
+        summaries = await self._advance(
+            event,
+            state,
+            emit_effects=emit_effects,
+            persist_summaries=False,
+            factual_state=factual_owner,
         )
+        delta = await factual_owner.evaluate_owned_facts(
+            event, state, lambda context: self.strategy.advance(event, state, context)
+        )
+        current = self.battles.current_for_session(event.session_key)
+        for battle in [*current, *summaries]:
+            battle.strategy_context = delta.battle_contexts.get(
+                f"{battle.lead_driver_number}:{battle.chasing_driver_number}"
+            )
+        derived = self.drain_derived(event.session_key)
+        # Enrich serialized battle rows and resolved summaries before transaction assembly.
+        for row in derived:
+            if "battle" in row.payload:
+                battle = row.payload["battle"]
+                context = delta.battle_contexts.get(
+                    f"{battle['lead_driver_number']}:{battle['chasing_driver_number']}"
+                )
+                battle["strategy_context"] = context.model_dump(mode="json") if context else None
+        if emit_effects:
+            for transition in delta.transitions:
+                row = strategy_event(event, transition)
+                if row is not None:
+                    derived.append(self._score(row))
+        await factual_owner.set_intelligence(
+            event.session_key,
+            current_battles=current,
+            qualifying=self.qualifying.state_for(event.session_key),
+            strategy_frame=delta.frame,
+            return_state=False,
+        )
+        return IntelligenceEffects(derived, summaries)
 
     async def restore_session(
-        self, session_key: str, repository: NormalizedEventRepository
+        self,
+        session_key: str,
+        repository: NormalizedEventRepository,
+        *,
+        through_sequence: int | None = None,
     ) -> None:
         """Reconstruct internal source history; never regenerate durable effects.
 
@@ -85,9 +155,17 @@ class RaceIntelligenceCoordinator:
         Snapshots/shared Redis cannot reconstruct pending detector/cooldown state.
         """
         self.reset_session(session_key)
-        scratch = RaceStateEngine(self.race_state.snapshots)
+        scratch = RaceStateEngine(
+            self.race_state.snapshots,
+            retain_applied_dedup_keys=False,
+            algorithm_version=self.race_state.algorithm_version,
+        )
         await scratch.install_state(RaceState(session_key=session_key))
-        prefix_end = await repository.max_sequence(session_key)
+        prefix_end = (
+            await repository.max_sequence(session_key)
+            if through_sequence is None
+            else through_sequence
+        )
         cursor = 0
         try:
             while cursor < prefix_end:
@@ -100,31 +178,51 @@ class RaceIntelligenceCoordinator:
                 for event in page:
                     if event.sequence_number > prefix_end:
                         break
+                    if event.sequence_number <= cursor:
+                        raise RuntimeError("Intelligence source prefix is not strictly ordered")
                     state = await scratch.apply(event, persist_snapshot=False)
                     if event.event_origin is not EventOrigin.DERIVED:
-                        await self._advance(event, state, emit_effects=False)
-                        await scratch.set_intelligence(
-                            session_key,
-                            current_battles=self.battles.current_for_session(session_key),
-                            qualifying=self.qualifying.state_for(session_key),
+                        await self.advance_applied_source(
+                            event, state, emit_effects=False, factual_owner=scratch
                         )
                     cursor = event.sequence_number
+                    # Async locks on private in-memory engines do not suspend.
+                    # Yield within a buffered page so cold replay cannot starve
+                    # lease renewal, cancellation or unrelated sessions.
+                    await asyncio.sleep(0)
                 if cursor == page_start:
                     raise RuntimeError("Intelligence source prefix is incomplete")
-            await self.race_state.install_state(await scratch.get_state(session_key))
+            await self.race_state._install_reconstruction(
+                await scratch._take_reconstruction(session_key)
+            )
         except BaseException:
             self.reset_session(session_key)
             raise
 
     async def _advance(
-        self, event: NormalizedRaceEvent, state: RaceState, *, emit_effects: bool
-    ) -> None:
+        self,
+        event: NormalizedRaceEvent,
+        state: RaceState,
+        *,
+        emit_effects: bool,
+        persist_summaries: bool = True,
+        factual_state: RaceStateEngine | None = None,
+    ) -> list[BattleState]:
         if event.event_origin is EventOrigin.DERIVED:
-            return
+            return []
         if event.sequence_number <= self._last_source_sequence.get(event.session_key, 0):
-            return
+            return []
         self._last_source_sequence[event.session_key] = event.sequence_number
-        candidates = self._advance_overtakes(event, state)
+        blocked = racing_inference_blocked(state.control)
+        if blocked:
+            self.overtakes.reject_pending_for_session(
+                event.session_key,
+                "SESSION_ENDED"
+                if state.control.lifecycle.value == "finished"
+                else "RACING_NEUTRALIZED",
+            )
+            self._pending_overtakes.pop(event.session_key, None)
+        candidates = [] if blocked else self._advance_overtakes(event, state)
         if event.event_type in SESSION_END_TYPES:
             self.overtakes.reject_pending_for_session(event.session_key, "SESSION_ENDED")
             self._pending_overtakes.pop(event.session_key, None)
@@ -134,7 +232,7 @@ class RaceIntelligenceCoordinator:
             self._position_change_causes[event.session_key][change.cause.value] += 1
         candidates.extend(self.positions.events_for(changes, source_event=event))
         for change in changes:
-            if change.position_delta <= 0:
+            if blocked or change.position_delta <= 0:
                 continue
             confirmed = self.overtakes.apply(change, self._overtake_context(change, event, state))
             if confirmed is not None:
@@ -148,7 +246,12 @@ class RaceIntelligenceCoordinator:
         for candidate in candidates:
             if candidate.event_type is RaceEventType.OVERTAKE:
                 battle_updates.extend(self.battles.apply(candidate, state))
-        if emit_effects and self.battle_summaries is not None:
+        resolved = [
+            update.battle.model_copy(deep=True)
+            for update in battle_updates
+            if update.event_type is RaceEventType.BATTLE_ENDED
+        ]
+        if emit_effects and persist_summaries and self.battle_summaries is not None:
             for update in battle_updates:
                 if update.event_type is RaceEventType.BATTLE_ENDED:
                     await self.battle_summaries.upsert_resolved(update.battle)
@@ -157,12 +260,19 @@ class RaceIntelligenceCoordinator:
             for update in battle_updates
             if update.event_type is not None
         )
-        candidates.extend(self.qualifying.apply(event, state))
+        lap_witness = None
+        if event.event_type is RaceEventType.LAP_COMPLETED and state.session_type in {
+            "QUALIFYING",
+            "SPRINT_QUALIFYING",
+        }:
+            lap_witness = await (factual_state or self.race_state).source_lap_witness(event)
+        candidates.extend(self.qualifying.apply(event, state, lap_witness=lap_witness))
         scored = [self._score(candidate) for candidate in candidates]
         # Evaluate cooldown transitions even during warm-up, but discard effects.
         eligible = [candidate for candidate in scored if self.importance.should_emit(candidate)]
         if emit_effects:
             self._derived[event.session_key].extend(eligible)
+        return resolved
 
     def drain_derived(self, session_key: str) -> list[NormalizedRaceEvent]:
         events = self._derived.pop(session_key, [])
@@ -364,6 +474,7 @@ class RaceIntelligenceCoordinator:
         )
 
     def reset_session(self, session_key: str) -> None:
+        self.strategy.reset_session(session_key)
         self.positions.reset_session(session_key)
         self.overtakes.reset_session(session_key)
         self.battles.reset_session(session_key)

@@ -25,6 +25,7 @@ from app.api.room_schemas import (
     RoomMessagesResponse,
 )
 from app.api.room_streaming import parse_discussion_event_id, race_room_stream
+from app.api.routes import intelligence_projection_status
 from app.api.schemas import SessionIntelligenceResponse
 from app.domain.rooms import (
     MAX_DISCUSSION_GENERATION,
@@ -45,6 +46,7 @@ from app.services.room_eligibility import (
     RoomEligibilityService,
 )
 from app.services.room_replay import ReplayUnavailableError
+from app.services.strategy_public import sanitize_strategy_state
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/race-rooms", tags=["Race Rooms"])
@@ -196,6 +198,13 @@ async def race_room_detail(room_slug: str, services: Services) -> RaceRoomDetail
         else asyncio.sleep(0, result=RaceState(session_key=room.session_key or "")),
     )
     _require_matching_generation(room, playback)
+    projection = await intelligence_projection_status(
+        services,
+        room.session_key,
+        view_sequence=state.sequence_number,
+        is_replay=state.is_replay,
+    )
+    state = sanitize_strategy_state(state, projection)
     notices = {
         SourceAvailability.TELEMETRY: "Detailed normalized telemetry is available.",
         SourceAvailability.LIMITED: "Some telemetry is incomplete; conclusions are qualified.",
@@ -215,7 +224,9 @@ async def race_room_detail(room_slug: str, services: Services) -> RaceRoomDetail
         playback=await services.room_replay.with_session_clock(room.session_key, playback),
         circuit=circuit,
         weather=weather,
-        intelligence=SessionIntelligenceResponse.from_state(state),
+        intelligence=SessionIntelligenceResponse.from_state(state).model_copy(
+            update={"projection": projection},
+        ),
         data_notice=notices[room.source_availability],
         diagnostics_available=(
             services.settings.app_env != "production" or services.settings.room_diagnostics_enabled

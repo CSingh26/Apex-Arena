@@ -141,7 +141,7 @@ async def test_live_catalog_does_not_resynchronize_old_weekends():
     assert meetings[0].race_date == START.date()
 
 
-def test_provider_completion_overrides_planned_end_on_public_card():
+def test_unconsumed_provider_completion_does_not_certify_sporting_finish():
     service = RaceRoomService(FakeRoomRepository(), FakeSeason([]), 2026)
     status = service._session_status(
         monza(),
@@ -150,4 +150,4 @@ def test_provider_completion_overrides_planned_end_on_public_card():
         {**provider(), "status": "Finished"},
         START + timedelta(minutes=90),
     )
-    assert status.value == "completed"
+    assert status.value == "live"

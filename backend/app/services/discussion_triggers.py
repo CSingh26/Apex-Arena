@@ -34,6 +34,11 @@ class DiscussionTrigger(BaseModel):
 
 
 TRIGGER_RULES: dict[RaceEventType, tuple[MessageTopic, TriggerPriority, list[str]]] = {
+    RaceEventType.STRATEGY_SITUATION: (
+        MessageTopic.TYRES,
+        TriggerPriority.HIGH,
+        ["mira-vale", "theo-voss"],
+    ),
     RaceEventType.SESSION_START: (
         MessageTopic.SESSION,
         TriggerPriority.HIGH,

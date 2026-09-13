@@ -13,6 +13,7 @@ from app.domain.intelligence import (
     RaceIntelligenceConfig,
 )
 from app.domain.models import NormalizedRaceEvent, RaceEventType
+from app.services.control_state import racing_inference_blocked
 from app.services.race_state import RaceState
 
 RACE_LIKE_SESSIONS = {"RACE", "SPRINT"}
@@ -75,6 +76,17 @@ class BattleEngine:
     ) -> list[BattleUpdate]:
         if str(race_state.session_type or "").upper() not in RACE_LIKE_SESSIONS:
             return []
+        if racing_inference_blocked(race_state.control):
+            session = self._battles[event.session_key]
+            updates = []
+            for battle_id, battle in list(session.items()):
+                if battle.status is BattleStatus.POTENTIAL:
+                    session.pop(battle_id)
+                else:
+                    updates.append(
+                        self._resolve(event.session_key, battle_id, "racing_neutralized")
+                    )
+            return updates
         if event.event_type in RESOLVING_TYPES:
             return self._resolve_for_event(event)
         if event.event_type is not RaceEventType.INTERVAL_SAMPLE or not event.driver_numbers:

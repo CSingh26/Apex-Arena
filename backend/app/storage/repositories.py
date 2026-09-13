@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 from __future__ import annotations
 
+import asyncio
+import time
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import delete, func, or_, select, update
+from sqlalchemy import String, case, cast, delete, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 
 from app.domain.models import (
@@ -285,45 +287,9 @@ class SqlNormalizedEventRepository:
         *,
         source_events: list[NormalizedRaceEvent],
     ) -> list[NormalizedRaceEvent]:
-        """Atomically replace derivations and canonicalize the historical timeline."""
-
-        source_sequences, persisted = canonical_replay_sequence_numbers(
-            source_events,
-            events,
+        raise ValueError(
+            "Stored append-order history cannot be replaced or renumbered; use a dry-run rebuild"
         )
-        async with self.database.session_factory() as session:
-            source_records = (
-                (
-                    await session.execute(
-                        select(NormalizedRaceEventRecord)
-                        .where(
-                            NormalizedRaceEventRecord.session_key == session_key,
-                            NormalizedRaceEventRecord.event_origin == EventOrigin.SOURCE_FACT.value,
-                        )
-                        .with_for_update()
-                    )
-                )
-                .scalars()
-                .all()
-            )
-            if {record.id for record in source_records} != set(source_sequences):
-                raise ValueError("Stored source facts changed during intelligence rebuild")
-            await session.execute(
-                delete(NormalizedRaceEventRecord).where(
-                    NormalizedRaceEventRecord.session_key == session_key,
-                    NormalizedRaceEventRecord.event_origin == EventOrigin.DERIVED.value,
-                )
-            )
-            for record in source_records:
-                record.sequence_number = -record.sequence_number
-            await session.flush()
-            for record in source_records:
-                record.sequence_number = source_sequences[record.id]
-            session.add_all(
-                [NormalizedRaceEventRecord(**self._event_values(event)) for event in persisted]
-            )
-            await session.commit()
-            return persisted
 
     async def max_sequence(self, session_key: str) -> int:
         statement = select(func.max(NormalizedRaceEventRecord.sequence_number)).where(
@@ -437,26 +403,81 @@ class SqlRaceStateSnapshotRepository:
         self.database = database
 
     async def insert(self, snapshot: RaceStateSnapshot) -> SnapshotPersistResult:
+        async with self.database.session_factory() as session:
+            result = await self.insert_in_transaction(session, snapshot)
+            await session.commit()
+            return result
+
+    @staticmethod
+    async def insert_in_transaction(session, snapshot: RaceStateSnapshot) -> SnapshotPersistResult:
         statement = (
             insert(RaceStateSnapshotRecord)
             .values(**snapshot.model_dump())
             .on_conflict_do_nothing(constraint="uq_snapshot_session_sequence")
             .returning(RaceStateSnapshotRecord.id)
         )
-        async with self.database.session_factory() as session:
-            inserted_id = (await session.execute(statement)).scalar_one_or_none()
-            await session.commit()
-            if inserted_id is not None:
-                return SnapshotPersistResult(record_id=inserted_id, is_new=True)
-            existing_id = (
+        inserted_id = (await session.execute(statement)).scalar_one_or_none()
+        if inserted_id is not None:
+            return SnapshotPersistResult(record_id=inserted_id, is_new=True)
+        existing = await session.scalar(
+            select(RaceStateSnapshotRecord).where(
+                RaceStateSnapshotRecord.session_key == snapshot.session_key,
+                RaceStateSnapshotRecord.sequence_number == snapshot.sequence_number,
+            )
+        )
+        candidate = snapshot.model_dump(exclude={"id", "created_at"})
+        if existing is None or any(
+            getattr(existing, key) != value for key, value in candidate.items()
+        ):
+            raise RuntimeError("Snapshot immutable content conflict")
+        return SnapshotPersistResult(record_id=existing.id, is_new=False)
+
+    async def at_or_before(
+        self,
+        session_key: str,
+        sequence: int,
+        *,
+        algorithm_identity: str,
+        snapshot_schema_version: int,
+        lower_sequence: int,
+        statement_deadline: float,
+    ) -> RaceStateSnapshot | None:
+        if lower_sequence < max(0, sequence - 2047) or lower_sequence > sequence:
+            raise ValueError("Snapshot lookup span exceeds bound")
+        remaining = statement_deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("Snapshot lookup deadline")
+        record = RaceStateSnapshotRecord
+        encoded_bytes = func.octet_length(cast(record.state, String))
+        fields = [column for column in record.__table__.c if column.name != "state"]
+        query = (
+            select(
+                *fields,
+                case((encoded_bytes <= 2 * 1024 * 1024, record.state), else_=None).label("state"),
+            )
+            .where(
+                record.session_key == session_key,
+                record.sequence_number >= lower_sequence,
+                record.sequence_number <= sequence,
+                record.state["compact_schema_version"].as_integer() == snapshot_schema_version,
+                record.state["history_reference"]["algorithm_version"].as_string()
+                == algorithm_identity,
+            )
+            .order_by(record.sequence_number.desc())
+            .limit(1)
+        )
+        async with asyncio.timeout(remaining):
+            async with self.database.session_factory() as session:
                 await session.execute(
-                    select(RaceStateSnapshotRecord.id).where(
-                        RaceStateSnapshotRecord.session_key == snapshot.session_key,
-                        RaceStateSnapshotRecord.sequence_number == snapshot.sequence_number,
-                    )
+                    text("SELECT set_config('statement_timeout', :value, true)"),
+                    {"value": str(max(1, min(500, int(remaining * 1000))))},
                 )
-            ).scalar_one()
-            return SnapshotPersistResult(record_id=existing_id, is_new=False)
+                row = (await session.execute(query)).mappings().one_or_none()
+        if row is None:
+            return None
+        if row["state"] is None:
+            raise ValueError("Snapshot byte limit exceeded")
+        return RaceStateSnapshot.model_validate(dict(row))
 
     async def latest(self, session_key: str) -> RaceStateSnapshot | None:
         statement = (

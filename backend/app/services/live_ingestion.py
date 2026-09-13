@@ -12,9 +12,11 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from app.core.settings import Settings
-from app.domain.rooms import RaceRoom, RoomStatus
+from app.domain.models import EventOrigin, NormalizedRaceEvent
+from app.domain.rooms import RaceRoom
 from app.providers.openf1 import LiveConnectionState, OpenF1LiveClient, OpenF1RestClient
 from app.services.event_pipeline import RaceEventProcessor
+from app.services.history_ownership import HistoryContextBusyError
 from app.services.locations import (
     LocationIngestionService,
     SessionLocationService,
@@ -24,9 +26,10 @@ from app.services.locations import (
 )
 from app.services.normalization import OpenF1EventNormalizer
 from app.services.openf1_backfill import OpenF1RoomFinalizer
-from app.services.race_state import RaceStateEngine
+from app.services.race_state import RaceState, RaceStateEngine
 from app.services.raw_events import RawEventInput
-from app.services.rooms import SESSION_DURATION, RaceRoomService
+from app.services.rooms import RaceRoomService
+from app.services.session_capture import capture_policy
 from app.storage.redis import EventBus
 from app.storage.room_repository import SqlRaceRoomRepository
 
@@ -79,6 +82,10 @@ class LiveSessionProgress:
     geometry_next_at: datetime | None = None
     finalize_next_at: datetime | None = None
     complete: bool = False
+    stop_reason: str | None = None
+    terminal_confirmed: bool = False
+    cancelled: bool = False
+    admission_ready: bool = False
     seen: set[str] = field(default_factory=set)
 
 
@@ -125,6 +132,54 @@ class LiveSessionIngestionService:
     def status(self) -> dict[str, Any]:
         return dict(self._status)
 
+    async def admit_mqtt(self, topic: str, payload: dict[str, Any], now: datetime) -> str:
+        """No SQL/provider work on high-frequency admission; pre-boundary work may drain."""
+        key = str(payload.get("session_key") or "")
+        progress = self.sessions.get(key)
+        if progress is None:
+            return "unenrolled"
+        if not progress.admission_ready:
+            return "authority_unavailable"
+        decision = capture_policy(
+            progress.room.capture_anchor_start or progress.room.scheduled_start,
+            now,
+            confirmed_terminal=progress.terminal_confirmed,
+            cancelled=progress.cancelled,
+            window_seconds=self.settings.live_session_capture_window_seconds,
+        )
+        return (
+            "accepted"
+            if decision.eligible and not progress.complete
+            else progress.stop_reason or decision.reason
+        )
+
+    async def consume(self, event: NormalizedRaceEvent) -> None:
+        """Post-commit notification only: staged/private terminal state is not authority."""
+        progress = self.sessions.get(event.session_key)
+        if progress is None or event.event_origin is not EventOrigin.SOURCE_FACT:
+            return
+        if event.payload.get("is_cancelled") is True:
+            progress.cancelled = True
+        if (event.payload.get("control") or {}).get("lifecycle") == "finished":
+            progress.admission_ready = False
+            progress.terminal_confirmed = await self._terminal(event.session_key)
+            progress.admission_ready = True
+
+    async def publish_recovered_state(self, state: RaceState) -> None:
+        """Acknowledge recovery for capture without replaying historical events."""
+        progress = self.sessions.get(state.session_key)
+        try:
+            if progress is not None:
+                progress.admission_ready = False
+                progress.cancelled |= await self._cancelled(state.session_key)
+                progress.admission_ready = True
+            if progress is not None and state.control.lifecycle.value == "finished":
+                progress.admission_ready = False
+                progress.terminal_confirmed = await self._terminal(state.session_key)
+                progress.admission_ready = True
+        finally:
+            await self.event_bus.publish_state(state)
+
     async def run_once(self, *, now: datetime | None = None) -> None:
         async with self._lock:
             await self._run_once(utc(now or datetime.now(UTC)))
@@ -149,10 +204,23 @@ class LiveSessionIngestionService:
             limit=500,
             include_unavailable=True,
         )
+        by_key = {str(row.get("session_key")): row for row in self.rooms._provider_sessions}
+        cancellations = {room.session_key for room in rooms if room.provider_cancelled}
+        if self.processor.critical_projection is not None:
+            cancellations |= await self.repository.confirmed_cancelled_sessions(
+                [room.session_key for room in rooms if room.session_key],
+                algorithm_version=self.processor.critical_projection.repository.algorithm_version,
+            )
         active = [
             room
             for room in rooms
-            if room.status is RoomStatus.LIVE and utc(room.scheduled_start) <= now
+            if capture_policy(
+                room.capture_anchor_start or room.scheduled_start,
+                now,
+                cancelled=room.session_key in cancellations
+                or by_key.get(room.session_key, {}).get("is_cancelled") is True,
+                window_seconds=self.settings.live_session_capture_window_seconds,
+            ).eligible
         ]
         pending = next((room for room in active if not room.session_key), None)
         if pending is not None:
@@ -173,11 +241,19 @@ class LiveSessionIngestionService:
         elif not self.rooms.provider_error:
             self._resolution_failures = 0
 
-        by_key = {str(row.get("session_key")): row for row in self.rooms._provider_sessions}
         for room in active:
             if room.session_key is not None and room.session_key not in self.sessions:
                 await self.processor.initialize_session(room.session_key)
                 self.sessions[room.session_key] = LiveSessionProgress(room=room)
+                self.sessions[room.session_key].cancelled = await self._cancelled(room.session_key)
+                if await self._terminal(room.session_key):
+                    progress = self.sessions[room.session_key]
+                    progress.terminal_confirmed = True
+                    await self.finalizer.finalize(
+                        room.session_key, live=False, live_capture=True, terminal_confirmed=True
+                    )
+                    progress.complete = True
+                    progress.stop_reason = "terminal"
         # Keep recently finished diagnostics, but bound in-memory weekend history.
         self.sessions = {
             key: value
@@ -187,9 +263,43 @@ class LiveSessionIngestionService:
         for key, progress in self.sessions.items():
             if progress.complete:
                 continue
+            decision = capture_policy(
+                progress.room.capture_anchor_start or progress.room.scheduled_start,
+                now,
+                cancelled=progress.cancelled
+                or key in cancellations
+                or by_key.get(key, {}).get("is_cancelled") is True,
+                window_seconds=self.settings.live_session_capture_window_seconds,
+            )
+            if not decision.eligible:
+                progress.complete = True
+                progress.stop_reason = decision.reason
+                progress.cancelled |= decision.reason == "cancelled"
+                progress.admission_ready = True
+                self._status.update(
+                    connection_state="CANCELLED"
+                    if decision.reason == "cancelled"
+                    else "EXPIRED_UNCONFIRMED",
+                    capture_state=decision.reason,
+                    capture_deadline=decision.deadline.isoformat(),
+                    current_session_key=key,
+                    sporting_status="unknown",
+                )
+                continue
             metadata = by_key.get(key)
             if metadata is None:
+                progress.admission_ready = False
+                self._status.update(
+                    connection_state="PROVIDER_UNAVAILABLE",
+                    capture_state="watching",
+                    current_session_key=key,
+                    capture_deadline=decision.deadline.isoformat(),
+                )
                 continue
+            progress.cancelled |= metadata.get("is_cancelled") is True
+            if not progress.admission_ready:
+                progress.terminal_confirmed = await self._terminal(key)
+                progress.admission_ready = True
             await self._poll(progress, metadata, now)
         self._status["next_catalog_retry_at"] = self._catalog_next_at.isoformat()
         self._status["checked_at"] = now.isoformat()
@@ -209,6 +319,30 @@ class LiveSessionIngestionService:
         self._resolution_failures += 1
         return delay
 
+    async def _terminal(self, key: str) -> bool:
+        if self.processor.critical_projection is not None:
+            return key in await self.repository.confirmed_terminal_sessions(
+                [key],
+                algorithm_version=self.processor.critical_projection.repository.algorithm_version,
+            )
+        authority = (
+            self.processor.critical_projection.working_state
+            if self.processor.critical_projection is not None
+            else self.race_state
+        )
+        if authority is None:
+            return False
+        state = await authority.get_state(key)
+        return state.control.lifecycle.value == "finished" and not state.is_replay
+
+    async def _cancelled(self, key: str) -> bool:
+        if self.processor.critical_projection is None:
+            return False  # Noncritical consumers use acknowledged source notifications.
+        return key in await self.repository.confirmed_cancelled_sessions(
+            [key],
+            algorithm_version=self.processor.critical_projection.repository.algorithm_version,
+        )
+
     async def _poll(
         self,
         progress: LiveSessionProgress,
@@ -218,19 +352,15 @@ class LiveSessionIngestionService:
         room = progress.room
         key = room.session_key
         assert key is not None
-        end = self.rooms._session_end(metadata)
         start = self.rooms._session_start(metadata) or utc(room.scheduled_start)
-        finished = (
-            str(metadata.get("status") or "").casefold() in {"finished", "completed", "ended"}
-            or (end is not None and utc(end) <= now)
-            or now >= start + SESSION_DURATION[room.session_type]
-        )
+        finished = False
         rows_to_ingest = [
             RawEventInput(
                 provider_endpoint="sessions",
                 session_key=key,
                 raw_payload=metadata,
                 event_time=start,
+                received_at=now,
             )
         ]
         completed_polls: list[tuple[EndpointProgress, datetime, int, int]] = []
@@ -252,11 +382,7 @@ class LiveSessionIngestionService:
             if state.next_at is not None and now < state.next_at and not finished:
                 continue
             filters: dict[str, Any] = {"session_key": key}
-            window_end = (
-                min(now + timedelta(seconds=1), utc(end) + timedelta(seconds=1))
-                if end
-                else now + timedelta(seconds=1)
-            )
+            window_end = now + timedelta(seconds=1)
             initial_positions = endpoint == "position" and state.cursor is None
             if endpoint in DATED_ENDPOINTS and not initial_positions:
                 # Bounded initial warmup and overlap recover late rows without refetching
@@ -287,6 +413,7 @@ class LiveSessionIngestionService:
                             session_key=key,
                             raw_payload=row,
                             event_time=utc(timestamp),
+                            received_at=now,
                         )
                     )
                     if endpoint not in {"drivers", "stints"} and timestamp <= now:
@@ -322,7 +449,23 @@ class LiveSessionIngestionService:
                 fresh.append(row)
                 fingerprints.append(fingerprint)
         if fresh:
-            await self.processor.ingest_batch(fresh)
+            # Local admission pressure is not a provider failure. Keep this exact
+            # bounded fetched batch; do not advance endpoint cursors or seen keys
+            # unless every row and final flush succeeded (durable dedup handles
+            # a partly admitted prior attempt).
+            for attempt, delay in enumerate((0.1, 0.25, 0.5, None)):
+                try:
+                    await self.processor.ingest_batch(fresh)
+                    break
+                except HistoryContextBusyError:
+                    self._status.update(
+                        connection_state="PROCESSOR_BUSY",
+                        error="context_capacity",
+                        pressure_attempts=attempt + 1,
+                    )
+                    if delay is None:
+                        return
+                    await asyncio.sleep(delay)
             # This is only a bounded poll cache. Durable processor deduplication is
             # still authoritative on restart and when older cache entries are evicted.
             if len(progress.seen) > 50_000:
@@ -335,9 +478,7 @@ class LiveSessionIngestionService:
             state.state = "LIVE" if row_count else "WAITING_FOR_PROVIDER"
             state.rows = row_count
             state.error = None
-        if self.race_state is not None:
-            state = await self.race_state.get_state(key)
-            finished = finished or state.status.casefold() == "finished"
+        finished = await self._terminal(key)
         progress.last_event_at = last_event
         if (
             fresh
@@ -345,7 +486,9 @@ class LiveSessionIngestionService:
             or progress.finalize_next_at is None
             or now >= progress.finalize_next_at
         ):
-            await self.finalizer.finalize(key, live=not finished, live_capture=True)
+            await self.finalizer.finalize(
+                key, live=not finished, live_capture=True, terminal_confirmed=finished
+            )
             progress.finalize_next_at = now + timedelta(seconds=30)
         if self.race_state is not None:
             # Refresh shared state even when the last event's Redis publication
@@ -388,6 +531,8 @@ class LiveSessionIngestionService:
             session=room.session_type.value,
             internal_session_id=str(self.rooms._session_id_from_room(room)),
             calendar_state="COMPLETED" if finished else "LIVE",
+            capture_state="terminal" if finished else "watching",
+            status_basis="consumed_terminal_control" if finished else "bounded_capture_window",
             provider_session_resolved=True,
             provider_connected=provider_connected,
             error=None if provider_connected else self.rooms.provider_error,
@@ -408,6 +553,7 @@ class LiveSessionIngestionService:
                 str(room.id), {"status": "completed", "mode": "archived"}
             )
             progress.complete = True
+            progress.stop_reason = "terminal"
             self.rooms.invalidate_catalog()
         logger.info(
             "Live session room=%s session_key=%s state=%s last_event_age=%s",

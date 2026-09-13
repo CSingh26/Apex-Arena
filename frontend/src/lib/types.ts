@@ -166,6 +166,10 @@ export type RoomEligibility =
 
 /** A public, session-level summary returned as part of a grouped event weekend. */
 export type EventSessionSummary = {
+  status_basis?: string;
+  capture_state?: string;
+  capture_deadline?: string | null;
+  sporting_status?: string;
   session_id?: string;
   session_type: SessionRoomType;
   display_name: string;
@@ -372,13 +376,31 @@ export type QualifyingIntelligence = {
   cutoff_position: number | null;
   positions: Record<string, number>;
   best_laps: Record<string, number>;
+  best_laps_by_phase?: Record<string, Record<string, number>>;
+  best_lap_availability?: "unknown" | "available" | "partial";
   session_best: number | null;
   provisional_pole_driver: number | null;
   eliminated_drivers: number[];
   risk_cooldowns: Record<string, string>;
 };
 
+export type ControlEvidence = { event_id: string; sequence: number; observed_at: string; source: string };
+export type ControlObservation = { value: string; evidence: ControlEvidence | null };
+export type ControlProjection = {
+  session_key: string;
+  sequence: number;
+  lifecycle: ControlObservation;
+  neutralization: ControlObservation;
+  track_flag: ControlObservation;
+  drs_permission: ControlObservation;
+  sector_flags: Record<string, ControlObservation>;
+  /** Full transitions belong to the explicit detail response, not compact state. */
+  history?: Array<ControlEvidence & { semantics: Record<string, unknown> }>;
+  history_truncated?: boolean;
+};
+
 export type SessionIntelligenceState = {
+  control?: ControlProjection | null;
   session_key: string;
   sequence_number: number;
   current_battles: BattleState[];
@@ -387,6 +409,11 @@ export type SessionIntelligenceState = {
 };
 
 export type DriverRaceState = {
+  completed_lap?: number | null;
+  tyre_age_laps?: number | null;
+  tyre_age_basis?: string;
+  tyre_age_evidence?: ControlEvidence[];
+  best_lap_availability?: "available" | "partial" | "unknown";
   driver_number: number | null;
   full_name: string | null;
   broadcast_name: string | null;
@@ -407,6 +434,12 @@ export type DriverRaceState = {
 };
 
 export type RaceState = {
+  analysis_time?: string | null;
+  history_sequence?: number;
+  history_reference?: HistoryReference | null;
+  history_detail_status?: "available" | "checkpoint_bytes" | "legacy_history_unverified";
+  compact_schema_version?: number;
+  control?: ControlProjection;
   session_key: string;
   session_type: string | null;
   current_phase: string | null;
@@ -421,6 +454,16 @@ export type RaceState = {
   last_updated_at: string | null;
   sequence_number: number;
   is_replay: boolean;
+};
+
+export type HistoryReference = {
+  schema_version: number;
+  algorithm_version: string;
+  base_event_id: string;
+  base_sequence: number;
+  relevant_event_id: string;
+  relevant_sequence: number;
+  checksum: string;
 };
 
 export type TimingMode = "race" | "qualifying" | "practice";
@@ -455,6 +498,7 @@ export type DriverTimingState = {
   battle_context: DriverBattleContext;
 };
 export type SessionTimingState = {
+  control?: ControlProjection | null;
   session_key: string;
   sequence_number: number;
   updated_at: string | null;
@@ -667,4 +711,57 @@ export type RoomDiagnostics = {
   race_state: Record<string, unknown>;
   playback: RoomPlayback;
   discussion: Record<string, number>;
+};
+
+export type HistoryFamily = "laps" | "stints" | "pits" | "weather" | "control";
+export type FactualLap = {
+  lap_number: number;
+  duration_seconds: number | null;
+  sectors_seconds: Array<number | null>;
+  evidence: ControlEvidence;
+  deleted: boolean;
+  deletion_evidence: ControlEvidence | null;
+  exclusions: string[];
+  phase: string | null;
+  interval_start: string | null;
+  interval_end: string | null;
+  interval_authority: "unknown" | "approximate_provider_interval" | "approximate_start_plus_complete_duration";
+  interval_evidence: ControlEvidence[];
+  interval_limitations: string[];
+  control_evidence: ControlEvidence[];
+};
+export type FactualStint = {
+  stint_number: number; compound: string | null; lap_start: number; lap_end: number | null;
+  tyre_age_at_start: number | null; evidence: ControlEvidence;
+};
+export type FactualPit = {
+  lap_number: number; lane_seconds: number | null; stationary_seconds: number | null; evidence: ControlEvidence;
+};
+export type FactualWeather = {
+  air_temperature: number | null; track_temperature: number | null; humidity: number | null;
+  rainfall: boolean | null; wind_speed: number | null; wind_direction: number | null; evidence: ControlEvidence;
+};
+export type HistoryDetailResponse = {
+  availability: "available" | "partial";
+  projection_status: string;
+  session_key: string;
+  view_sequence: number;
+  history_sequence: number;
+  analysis_time: string;
+  history_reference: HistoryReference;
+  room_id?: string; room_mode?: string; discussion_generation?: number;
+  data: {
+    drivers: Record<string, { laps?: FactualLap[]; stints?: FactualStint[]; pits?: FactualPit[] }>;
+    truncation: Record<string, boolean>;
+    unresolved_deletions: number;
+    weather?: FactualWeather[];
+    control?: ControlProjection;
+  };
+} | {
+  availability: "unavailable";
+  reason: string;
+  history_sequence?: number | null;
+  history_detail_status?: string;
+  session_key?: string; view_sequence?: number | null; projection_status?: string;
+  room_id?: string; room_mode?: string; discussion_generation?: number;
 };

@@ -114,8 +114,11 @@ class OpenF1RoomFinalizer:
         *,
         live: bool = False,
         live_capture: bool = False,
+        terminal_confirmed: bool = False,
         partial: bool = False,
     ) -> RoomFinalizationResult:
+        if live_capture and not live and not terminal_confirmed:
+            raise ValueError("Live completion requires consumed terminal control")
         async with self.database.session_factory() as session:
             room = (
                 await session.execute(

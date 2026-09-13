@@ -291,6 +291,12 @@ class RaceEventRedisPublisher:
         self.state_engine = state_engine
 
     async def consume(self, event: NormalizedRaceEvent) -> None:
+        await self.consume_committed_event(event)
+        await self.finish_committed_bundle(event.session_key)
+
+    async def consume_committed_event(self, event: NormalizedRaceEvent) -> None:
         await self.event_bus.publish_event(event)
-        state = await self.state_engine.get_state(event.session_key)
+
+    async def finish_committed_bundle(self, session_key: str) -> None:
+        state = await self.state_engine.get_state(session_key)
         await self.event_bus.publish_state(state)

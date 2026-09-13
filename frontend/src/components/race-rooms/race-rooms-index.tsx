@@ -46,6 +46,7 @@ function friendlyStatus(status: string): string {
   const labels: Record<string, string> = {
     live: "Live now",
     completed: "Completed",
+    cancelled: "Cancelled",
     replay_ready: "Replay ready",
     ready: "Ready",
     scheduled: "Upcoming",
@@ -61,6 +62,8 @@ function friendlyStatus(status: string): string {
 }
 
 function availabilityLabel(session: EventSessionSummary): string {
+  if (session.status === "cancelled") return "Session cancelled by the provider";
+  if (session.capture_state === "expired_unconfirmed") return "Capture window ended; sporting finish unconfirmed";
   if (session.replay_available) return session.data_availability === "limited_telemetry" ? "Replay · limited telemetry" : "Telemetry replay";
   if (session.results_available) return "Results available";
   if (session.data_availability === "limited_telemetry") return "Some timing data missing";
@@ -128,7 +131,7 @@ function orderCategoryEvents(events: RaceRoomEvent[], status: EventWeekendStatus
 type OpenPreview = (event: RaceRoomEvent, session?: EventSessionSummary) => void;
 
 function SessionAction({ event, session, onPreview }: { event: RaceRoomEvent; session: EventSessionSummary; onPreview: OpenPreview }) {
-  const readOnly = event.weekend_status === "upcoming" || session.eligibility === "future_read_only" || session.status === "scheduled";
+  const readOnly = event.weekend_status === "upcoming" || session.eligibility === "future_read_only" || ["scheduled", "cancelled"].includes(session.status);
   const canOpenRoom = Boolean(session.room_slug) && !readOnly;
   const availability = availabilityLabel(session);
   const availabilityId = `event-${event.event_id}-${session.session_type}-availability`;

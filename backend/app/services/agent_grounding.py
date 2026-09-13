@@ -25,6 +25,7 @@ RAW_SAMPLE_TYPES = {
     RaceEventType.WEATHER_UPDATE,
 }
 DERIVED_AGENT_TYPES = {
+    RaceEventType.STRATEGY_SITUATION,
     RaceEventType.OVERTAKE,
     RaceEventType.BATTLE_INTENSIFIED,
     RaceEventType.DRS_RANGE_ENTERED,
@@ -93,6 +94,14 @@ class AgentEligibility:
     """Admit race meaning, never raw timing/location/telemetry samples."""
 
     def evaluate(self, event: NormalizedRaceEvent) -> bool:
+        if event.event_type is RaceEventType.STRATEGY_SITUATION:
+            from app.services.strategy_events import validated_strategy
+
+            return validated_strategy(event) is not None and event.importance_level in {
+                EventImportance.IMPORTANT,
+                EventImportance.MAJOR,
+                EventImportance.CRITICAL,
+            }
         if event.event_type in RAW_SAMPLE_TYPES:
             return False
         if event.payload.get("stale") or event.payload.get("data_quality") == "stale":
@@ -194,6 +203,12 @@ class AgentEventEnvelope(BaseModel):
         payload_facts = {
             key: value for key, value in event.payload.items() if key in CURATED_PAYLOAD_KEYS
         }
+        if event.event_type is RaceEventType.STRATEGY_SITUATION:
+            from app.services.strategy_events import validated_strategy
+
+            strategy = validated_strategy(event)
+            if strategy is not None:
+                payload_facts["strategy"] = strategy.model_dump(mode="json")
         drivers = {
             str(number): cls._driver_fact(number, state)
             for number in numbers
@@ -212,7 +227,9 @@ class AgentEventEnvelope(BaseModel):
                 else cls._text(event.payload.get("normalized_session_type"))
             ),
             session_phase=(
-                state.current_phase
+                cls._text(event.payload.get("session_phase"))
+                if event.event_type in {RaceEventType.PERSONAL_BEST, RaceEventType.FASTEST_LAP}
+                else state.current_phase
                 if state is not None and state.current_phase
                 else cls._text(event.payload.get("session_phase"))
             ),
@@ -279,12 +296,6 @@ class AgentEventEnvelope(BaseModel):
         assert state is not None
         driver = state.drivers[str(number)]
         compound = cls._text(driver.stint.get("compound") or driver.stint.get("tyre_compound"))
-        start = cls._integer(driver.stint.get("lap_start") or driver.stint.get("start_lap"))
-        tyre_age = (
-            state.current_lap - start + 1
-            if start is not None and state.current_lap is not None and state.current_lap >= start
-            else None
-        )
         return AgentDriverFact(
             driver_number=number,
             full_name=driver.full_name or driver.broadcast_name,
@@ -297,7 +308,7 @@ class AgentEventEnvelope(BaseModel):
             latest_lap_duration=driver.latest_lap_duration,
             best_lap_duration=driver.best_lap_duration,
             compound=compound,
-            tyre_age_laps=tyre_age,
+            tyre_age_laps=driver.tyre_age_laps,
         )
 
     @staticmethod

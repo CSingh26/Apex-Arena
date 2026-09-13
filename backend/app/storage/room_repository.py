@@ -8,8 +8,8 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import and_, case, delete, func, or_, select, text, update
-from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy import and_, case, delete, func, literal, or_, select, text, update
+from sqlalchemy.dialects.postgresql import JSONB, insert
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -38,7 +38,27 @@ from app.storage.models import (
     RaceRoomRecord,
     RoomMessageRecord,
     RoomPlaybackStateRecord,
+    SessionIntelligenceProgressRecord,
 )
+
+
+@dataclass(frozen=True)
+class HistoryRoomFence:
+    room_id: UUID
+    session_key: str | None
+    mode: str
+    discussion_generation: int
+    current_event_sequence: int | None
+
+    def delivery_key(self) -> tuple:
+        return (
+            self.room_id,
+            self.session_key,
+            self.mode,
+            self.discussion_generation,
+            self.current_event_sequence if self.mode != "live" else None,
+        )
+
 
 # The manual batch backfill repairs every completed weekend session, practice included,
 # so operators and bounded recent-session recovery can repair every weekend session.
@@ -77,6 +97,64 @@ class SqlRaceRoomRepository:
     def __init__(self, database: Database) -> None:
         self.database = database
 
+    async def confirmed_terminal_sessions(
+        self, session_keys: list[str], *, algorithm_version: str
+    ) -> set[str]:
+        """Read committed observed terminals, never a selected replay/cache view.
+
+        Legacy terminal families alone are not enough: older normalization used
+        schedule/phase messages as whole-session finishes. Only the explicit
+        observed control contract and compatible verified progress certify this.
+        """
+        return await self._confirmed_capture_observations(
+            session_keys, algorithm_version=algorithm_version
+        )
+
+    async def confirmed_cancelled_sessions(
+        self, session_keys: list[str], *, algorithm_version: str
+    ) -> set[str]:
+        """Cancellation is sticky; absent/false metadata cannot reinstate a session."""
+        return await self._confirmed_capture_observations(
+            session_keys, algorithm_version=algorithm_version, cancelled=True
+        )
+
+    async def _confirmed_capture_observations(
+        self, session_keys: list[str], *, algorithm_version: str, cancelled: bool = False
+    ) -> set[str]:
+        if len(session_keys) > 500:
+            raise ValueError("Terminal lookup is limited to 500 session identities")
+        if not session_keys:
+            return set()
+        fact = NormalizedRaceEventRecord
+        progress = SessionIntelligenceProgressRecord
+        terminal = (
+            select(fact.id)
+            .where(
+                fact.session_key == progress.session_key,
+                fact.sequence_number <= progress.completed_through_sequence,
+                fact.event_origin == "SOURCE_FACT",
+                fact.payload["control_schema"].as_string() == "observed-v1",
+                fact.payload["is_cancelled"] == literal(True, type_=JSONB)
+                if cancelled
+                else fact.payload["control"]["lifecycle"].as_string() == "finished",
+            )
+            .exists()
+        )
+        async with self.database.session_factory() as session:
+            return set(
+                await session.scalars(
+                    select(progress.session_key)
+                    .where(
+                        progress.session_key.in_(session_keys),
+                        progress.algorithm_version == algorithm_version,
+                        progress.historical_effects_unverified.is_(False),
+                        progress.pending_source_id.is_(None),
+                        terminal,
+                    )
+                    .limit(500)
+                )
+            )
+
     async def seed_agents(self, agents: list[AgentProfile]) -> None:
         await self.database.require_ingestion_schema()
         async with self.database.session_factory() as session:
@@ -90,9 +168,24 @@ class SqlRaceRoomRepository:
                 )
             await session.commit()
 
+    async def observe_catalog_cancellation(self, room_id: UUID, session_key: str) -> bool:
+        """Retain same-identity metadata without granting room/navigation rights."""
+        await self.database.require_ingestion_schema()
+        async with self.database.session_factory() as session:
+            result = await session.execute(
+                update(RaceRoomRecord)
+                .where(RaceRoomRecord.id == room_id, RaceRoomRecord.session_key == session_key)
+                .values(provider_cancelled=True)
+                .returning(RaceRoomRecord.id)
+            )
+            observed = result.scalar_one_or_none() is not None
+            await session.commit()
+            return observed
+
     async def upsert_room(self, room: RaceRoom, agent_ids: list[str]) -> RaceRoom:
         await self.database.require_ingestion_schema()
         values = room.model_dump(exclude={"created_at", "updated_at"})
+        values["capture_anchor_start"] = room.capture_anchor_start or room.scheduled_start
         values["event_slug"] = room.event_slug or room.slug.rsplit("-", 1)[0]
         values["session_type"] = room.session_type.value
         values["status"] = room.status.value
@@ -118,8 +211,24 @@ class SqlRaceRoomRepository:
             "updated_at",
         }
         update_values = {key: value for key, value in values.items() if key not in dynamic_fields}
+        update_values["capture_anchor_start"] = func.coalesce(
+            RaceRoomRecord.capture_anchor_start, RaceRoomRecord.scheduled_start
+        )
         update_values["session_key"] = func.coalesce(
             values.get("session_key"), RaceRoomRecord.session_key
+        )
+        # Preserve cancellation only for this provider identity. A separately
+        # identified replacement session must not inherit its predecessor's flag.
+        update_values["provider_cancelled"] = case(
+            (
+                and_(
+                    RaceRoomRecord.session_key.is_not(None),
+                    values.get("session_key") is not None,
+                    RaceRoomRecord.session_key != values.get("session_key"),
+                ),
+                values["provider_cancelled"],
+            ),
+            else_=or_(RaceRoomRecord.provider_cancelled, values["provider_cancelled"]),
         )
         preserve_provider_state = or_(
             RaceRoomRecord.message_count > 0,
@@ -1055,6 +1164,32 @@ class SqlRaceRoomRepository:
             return RoomPlaybackState.model_validate(record, from_attributes=True).model_copy(
                 update={"discussion_generation": int(generation)}
             )
+
+    async def get_history_fence(self, slug: str) -> HistoryRoomFence | None:
+        """One SQL statement, no playback creation or catalog/provider side effects.
+
+        Playback generation is projected from the room's single durable generation
+        column (as in get_playback), not a separately stored independent counter.
+        """
+        async with self.database.session_factory() as session:
+            await session.execute(text("SET LOCAL statement_timeout = '500ms'"))
+            row = (
+                await session.execute(
+                    select(
+                        RaceRoomRecord.id,
+                        RaceRoomRecord.session_key,
+                        RaceRoomRecord.mode,
+                        RaceRoomRecord.discussion_generation,
+                        RoomPlaybackStateRecord.current_event_sequence,
+                    )
+                    .outerjoin(
+                        RoomPlaybackStateRecord,
+                        RoomPlaybackStateRecord.room_id == RaceRoomRecord.id,
+                    )
+                    .where(RaceRoomRecord.slug == slug)
+                )
+            ).one_or_none()
+            return HistoryRoomFence(*row) if row is not None else None
 
     async def update_playback(
         self,

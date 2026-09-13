@@ -1,8 +1,8 @@
-# ApexArena Five-Checkpoint Completion Implementation Plan
+# ApexArena Completion Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to implement reviewed work units within each checkpoint. Do not commit individual work units.
 
-**Goal:** Complete the remaining master product requirements in five substantive, verified commits and five separate pushes.
+**Goal:** Complete the remaining master product requirements without changing the already-pushed foundation commit, using no more than three additional substantive, verified commits and separate pushes.
 
 **Architecture:** Preserve the normalized factual event pipeline and durable replay ownership. Add bounded deterministic race intelligence before optional language generation; expose the same evidence-aware contracts to web and future native clients. Extend existing working components instead of building parallel pipelines.
 
@@ -12,13 +12,14 @@
 
 ## Global constraints and accounting
 
-- The old 150-commit/push target is superseded. Start after `975380967a5321900761f3002dd4b78061c69ef8`; new checkpoint count is 0/5.
+- The old 150-commit/push and five-push targets are superseded. Start after `975380967a5321900761f3002dd4b78061c69ef8`; foundation checkpoint 1 is committed and separately pushed as `066a36edb7d9b62686c48f5d1bde3275b5cbad12`. Do not amend, rewrite or force-push it.
+- The user's September13 packaging direction permits **two or three more pushes**. Use three because the remaining work naturally separates into: (2) deterministic race intelligence; (3) grounded conversation plus integrated product surfaces; (4) final adversarial acceptance and release stabilization. The old checkpoint3 and checkpoint4 sections below are implementation work units inside new delivery checkpoint3, not separate commits or pushes.
 - Use the existing `sprints` checkout and push each completed checkpoint separately to `origin/sprints`. No force pushes, history rewriting, empty commits, or extra plan-only commits.
 - Each checkpoint can contain several independently tested/reviewed work units. Only the integration owner commits after the complete checkpoint passes its gates.
 - Preserve public reads, independent operator authorization, lease fencing, source provenance and replay ordering. Never read real environment secrets or test against user databases.
 - Production deployment, main promotion, credential rotation, production migrations and paid provider usage are separate authorization boundaries. Code completion is not production deployment approval.
 - Unknown provider facts remain unknown. Estimates include evidence and uncertainty; optional AI cannot mutate facts or block factual ingestion.
-- Maintain one implementation-agent owner at a time; independent read-only review can proceed concurrently. Tests precede behavior changes. Review findings are corrected inside the current checkpoint.
+- Maintain one implementation owner per source copy. Independent units may proceed in isolated source copies; the integration owner merges their reviewed changes and verifies the combined candidate before each delivery commit. Tests precede behavior changes. Review findings are corrected inside the current checkpoint.
 
 ## Remaining-work audit at the starting revision
 
@@ -46,8 +47,31 @@ Missing or partial master scope includes strategy/tyre histories and estimates, 
 
 **Existing boundaries:** domain models/intelligence, normalization, race state/coordinator/rebuild, snapshots and API schemas. New focused modules should own factual history, strategy estimates and weather/control transitions rather than enlarge the coordinator indiscriminately.
 
+### Implementation order and recovery decisions
+
+1. Establish atomic critical-projection progress before adding derived strategy families: source facts remain durable first; derived rows, resolved summaries, coherent snapshot and completion watermark commit as one guarded unit. Retry pending work before subsequent intake, including periodic recovery of a final failed source. Optional notifications and generation remain outside this guarantee.
+2. Existing history without progress markers is explicitly `historical_effects_unverified`, reconstructed without external effects. Do not silently certify or rewrite legacy history. Algorithm/config changes require explicit handling. A guarded offline rebuild can repair historical projections, but is never invoked automatically by live recovery.
+3. Apply common writer exclusion to live, debug, backfill and offline rebuild. Maintenance refuses an active conflicting writer. Whole rebuild replacement must be transactional or safely refused; runtime recovery never renumbers source history.
+4. Stored append order is authoritative for live/restart/replay. Align deterministic rebuild with that order and test late facts explicitly; do not claim parity between different orderings. Bound reconstruction bookkeeping separately from domain-history bounds.
+5. Add independent typed history/strategy modules with evidence-addressable corrections, conservative estimates, explicit missing capabilities and bounded collections; integrate them into the reviewed projection seam only after recovery passes review.
+6. Add lifecycle/control/weather and battle context, then verify source-to-API/replay parity, independent review and full checkpoint gates before commit 2.
+
+Detailed retained history stays private to the deterministic projection, not in every hot timing/SSE state payload. Publish compact summaries and a revision reference; persist/reuse immutable detail checkpoints atomically with critical snapshots/progress and serve exact cursor-bounded details through a bounded reader. Preserve detached public isolation. Measure relevant-event cost and full-prefix restart separately; a compact payload is not proof of constant-time recovery.
+
+These are development-only decisions. No production data rewrite, external deployment, historic chat regeneration or end-to-end exactly-once guarantee is authorized or claimed.
+
+### Approved integration policies (verification still pending)
+
+- Operational capture uses a configurable 12-hour window anchored to a separately persisted initial schedule. Later display-schedule corrections do not extend the window. Expiry is not sporting finish; compatible committed finish evidence remains valid after capture expires.
+- Cancellation is sticky for a session identity. Missing, false or older catalog metadata cannot automatically reopen it. A mistaken provider cancellation requires an explicitly reviewed correction workflow; cancellation is not relabeled as finish.
+- Detailed history uses immutable base checkpoint B, last relevant source H and consumed public cursor C. Checkpoint on a relevant input after 64 relevant inputs or a 2,048-sequence gap; unrelated telemetry does not serialize history. Exact selected reads are bounded and may report unavailable, never substitute latest history for an older cursor. Validate actual storage amplification and responsiveness before acceptance.
+- Analysis time is the maximum accepted source-fact timestamp through C, separate from the playback display clock. Derived rows, wall time and future session data cannot advance historical analysis. Provider lap-start timing remains explicitly approximate.
+- Coordinate a semantic-manifest `race-v2` identity across persistence, readers and writers. Older non-empty projections remain factually readable but explicitly incompatible/unverified; no automatic rewrite or adoption is authorized. Refuse incompatible intake before provider work and document the old-runtime or future migration rollout choice.
+- Post-terminal results settlement is a separate, newly explicit opt-in, disabled by default. When enabled, use the existing live owner and processor with a fixed six-hour / 72-attempt window, five-minute cadence, one concurrent request, and bounded response sizes. Later corrections append new facts; they neither reopen high-frequency capture nor rewrite old replay facts. This is a finite acquisition policy, not proof that results can never change afterward.
+
 - [ ] Add typed capability/provenance envelopes and authoritative lifecycle transitions, including delayed, neutralized, suspended, resumed and terminal states.
 - [ ] Normalize sector/control semantics and preserve unknown DRS/geometry facts; distinguish deployment from end messages.
+- [ ] Exclude active/unconfirmed capture from historical-finalization shortcuts and add bounded, explicitly enabled terminal-result settlement through the existing live owner, preserving later corrections as new cursor-bound facts.
 - [ ] Maintain bounded evidence-addressable lap/stint/weather histories, corrections, tyre starting age and replay-safe snapshots/reconstruction.
 - [ ] Compute representative pace with pit/neutralized/deleted/outlier exclusions, tyre degradation uncertainty and observed pit-loss baselines.
 - [ ] Derive traffic/rejoin, tyre offset, undercut/overcut, pit windows, neutralization opportunities and strategy divergence only where evidence supports estimates.
@@ -55,18 +79,19 @@ Missing or partial master scope includes strategy/tyre histories and estimates, 
 - [ ] Integrate all derived families into one deterministic rebuild and replay contract; test live/restart/rebuild/seek parity and missing evidence.
 - [ ] Independently review, verify and make checkpoint commit/push 2.
 
-## Checkpoint 3 — Grounded conversations and optional generation
+## Delivery checkpoint 3, work unit A — Grounded conversations and optional generation
 
 **Existing boundaries:** discussion service, room message/evidence storage, agent profiles and settings. New focused modules own structured claims and generation policy.
 
 - [ ] Persist bounded claims, evidence, confidence, predictions, outcomes and revisions scoped to room and discussion generation.
 - [ ] Build deterministic agent reasoning from checkpoint-2 facts; enforce cursor-bounded recall and no future leakage after seek/restart.
 - [ ] Add an optional provider adapter downstream of factual ingestion with validated output, timeout/cancellation, concurrency, cache, token/cost budgets and kill switch.
+  - Newly functional paid generation requires a separate explicit opt-in, disabled by default. Existing placeholder `ai_enabled` settings or a preexisting API key must not silently activate paid calls after upgrade. Development verification uses fake providers only.
 - [ ] Keep deterministic fallback explicit and available for missing credentials, unsupported claims, provider failures and exhausted budgets.
 - [ ] Test fake-provider success/failure and claim contradiction/revision behavior without real paid calls; expose actual component health.
-- [ ] Independently review, verify and make checkpoint commit/push 3.
+- [ ] Independently review and verify this work unit; do not commit or push until the checkpoint4 product-surface work unit is also complete.
 
-## Checkpoint 4 — Integrated Fan, Analyst, telemetry and native contracts
+## Delivery checkpoint 3, work unit B — Integrated Fan, Analyst, telemetry and native contracts
 
 **Existing boundaries:** room experience, command center, timing/map components, API client/types, location storage and session routes.
 
@@ -77,20 +102,20 @@ Missing or partial master scope includes strategy/tyre histories and estimates, 
 - [ ] Add only supported map layers and reduced-motion-aware animation; preserve selection, keyboard navigation and bounded interpolation.
 - [ ] Surface recoverable pagination/provider errors and freshness consistently; verify new screens at existing six viewport widths.
 - [ ] Publish versioned native bootstrap/SSE/auth/error/deprecation guidance and contract tests. No separate native app is required.
-- [ ] Independently review, verify and make checkpoint commit/push 4.
+- [ ] Independently review, run the combined conversation/product gates, then make one delivery-checkpoint3 commit and separate push.
 
-## Checkpoint 5 — Master acceptance and release stabilization
+## Delivery checkpoint 4 — Master acceptance and release stabilization
 
 - [ ] Extend isolated synthetic fixtures into advancing live and outage scenarios without production mock fallbacks.
 - [ ] Exercise normal/sprint weekends, weather transition, pits/strategy, SC/VSC end, red flag/resume, incidents/penalties, missing capabilities, schema drift, provider outage, AI timeout/budget/kill, restart/rebuild, reconnect, seek and bounded large replay across backend and browser paths.
 - [ ] Run measured latency/memory/query/load checks, accessibility/keyboard/contrast/reduced-motion checks and a fresh visual product review. Correct regressions, not just document them.
 - [ ] Run final independent architecture/security review, dependency audits, clean-install builds, migrations, full tests and isolated browser acceptance at the actual final candidate.
 - [ ] Update README, setup, provider, engine, replay, AI, native, retention and deployment documentation to implemented behavior; remove stale claims/dead configuration.
-- [ ] Record exact evidence, remaining external rollout actions and final commit/push receipts. Commit and push checkpoint 5 only when its acceptance is satisfied.
+- [ ] Record exact evidence, remaining external rollout actions and final commit/push receipts. Commit and push delivery checkpoint4 only when its acceptance is satisfied.
 
 ## Completion rule
 
-Five pushes are a packaging constraint, not evidence of completion. Do not label unchecked requirements complete, reuse old test results as fresh runs, or claim real-provider/hosted/production verification from synthetic local evidence.
+Three remaining pushes are a ceiling and packaging constraint, not evidence of completion. Do not label unchecked requirements complete, reuse old test results as fresh runs, or claim real-provider/hosted/production verification from synthetic local evidence. Final accounting is the untouched foundation push plus exactly three additional delivery pushes unless all remaining work genuinely fits in two without weakening review or acceptance.
 
 ## Original §54 adversarial acceptance matrix
 

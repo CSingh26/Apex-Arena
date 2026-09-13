@@ -27,6 +27,8 @@ import type {
   EventImportance,
   EventOrigin,
   RaceEventCategory,
+  HistoryDetailResponse,
+  HistoryFamily,
 } from "@/lib/types";
 import { apiPath } from "@/lib/app-paths";
 
@@ -39,6 +41,23 @@ async function request<T>(path: string, signal?: AbortSignal): Promise<T> {
     throw await responseError(response);
   }
   return response.json() as Promise<T>;
+}
+
+function historySelection(drivers: number[], families: HistoryFamily[]): URLSearchParams {
+  const query = new URLSearchParams();
+  drivers.forEach((driver) => query.append("driver", String(driver)));
+  families.forEach((family) => query.append("family", family));
+  return query;
+}
+
+export function getRoomHistoryDetail(slug: string, drivers: number[], families: HistoryFamily[], signal?: AbortSignal): Promise<HistoryDetailResponse> {
+  return request(`/rooms/${encodeURIComponent(slug)}/intelligence-detail?${historySelection(drivers, families)}`, signal);
+}
+
+export function getSessionHistoryDetail(key: string, drivers: number[], families: HistoryFamily[], cursor?: number, signal?: AbortSignal): Promise<HistoryDetailResponse> {
+  const query = historySelection(drivers, families);
+  if (cursor !== undefined) query.set("cursor", String(cursor));
+  return request(`/sessions/${encodeURIComponent(key)}/intelligence-detail?${query}`, signal);
 }
 
 export class ApiError extends Error {

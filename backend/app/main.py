@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.history_routes import router as history_router
 from app.api.proxy import REPLAY_OPERATOR_HEADER, ProxyContextMiddleware, replay_operator_password
 from app.api.rate_limits import RateLimitMiddleware
 from app.api.room_routes import router as room_router
@@ -42,6 +43,7 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
                 # Combined instances share the dedicated ingestor's singleton lease.
                 if not await services.database.acquire_ingestor_lease():
                     raise RuntimeError("Another Apex Arena ingestor owns the singleton lease")
+                await services.start_intelligence_recovery()
             if settings.app_process_role in {"api", "combined", "all"}:
                 await services.reconcile_interrupted_ingestion_runs()
                 await services.start_replay_recovery()
@@ -77,6 +79,7 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
     )
     application.include_router(router)
     application.include_router(room_router)
+    application.include_router(history_router)
     return application
 
 

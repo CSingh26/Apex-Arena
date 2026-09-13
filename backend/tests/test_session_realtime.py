@@ -46,16 +46,17 @@ def state() -> RaceState:
     )
 
 
-def test_timing_state_derives_sorted_race_rows_and_tyre_age() -> None:
+def test_timing_state_sorts_rows_and_keeps_legacy_tyre_age_unknown() -> None:
     timing = timing_state(state())
 
     assert timing.mode == "race"
-    assert timing.track_status == "GREEN"
+    # Running lifecycle alone cannot establish an observed green track.
+    assert timing.track_status == "UNKNOWN"
     assert [row.driver_number for row in timing.drivers] == [4, 1]
     leader, second = timing.drivers
     assert leader.abbreviation == "NOR"
     assert leader.tyre_compound == "SOFT"
-    assert leader.tyre_age_laps == 5
+    assert leader.tyre_age_laps is None
     assert leader.is_fastest is True
     assert leader.is_personal_best is True
     assert second.gap_to_leader == 1.75

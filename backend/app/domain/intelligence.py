@@ -3,8 +3,11 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
+from typing import Literal
 
 from pydantic import BaseModel, Field
+
+from app.domain.strategy_situations import BattleContext
 
 
 class PositionChangeCause(StrEnum):
@@ -141,6 +144,7 @@ class BattleState(BaseModel):
     close_samples: int = Field(default=1, exclude=True)
     end_samples: int = Field(default=0, exclude=True)
     resolution_reason: str | None = None
+    strategy_context: BattleContext | None = None
 
 
 class BattleUpdate(BaseModel):
@@ -155,6 +159,8 @@ class QualifyingState(BaseModel):
     cutoff_position: int | None = None
     positions: dict[int, int] = Field(default_factory=dict)
     best_laps: dict[int, float] = Field(default_factory=dict)
+    best_laps_by_phase: dict[str, dict[int, float]] = Field(default_factory=dict)
+    best_lap_availability: Literal["unknown", "available", "partial"] = "unknown"
     session_best: float | None = None
     provisional_pole_driver: int | None = None
     eliminated_drivers: set[int] = Field(default_factory=set)

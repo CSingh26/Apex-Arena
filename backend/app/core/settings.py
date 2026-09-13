@@ -110,6 +110,7 @@ class Settings(BaseSettings):
     live_mode_enabled: bool = True
     live_stale_after_seconds: int = 15
     live_degraded_after_seconds: int = 45
+    live_session_capture_window_seconds: int = Field(default=43200, ge=3600, le=172800)
     event_dedup_ttl_seconds: int = 3600
     event_ordering_buffer_ms: int = 1500
     event_importance_min_for_ai: float = Field(default=0.55, ge=0, le=1)
@@ -199,6 +200,12 @@ class Settings(BaseSettings):
     rate_limit_sse_burst: int = Field(default=20, ge=1, le=1000)
     rate_limit_stream_capacity: int = Field(default=200, ge=1, le=10000)
     rate_limit_stream_ttl_seconds: int = Field(default=30, ge=3, le=120)
+    intelligence_recovery_interval_seconds: float = Field(
+        default=5, ge=1, le=300, allow_inf_nan=False
+    )
+    intelligence_recovery_timeout_seconds: float = Field(
+        default=15, ge=1, le=60, allow_inf_nan=False
+    )
     sentry_dsn: SecretStr | None = None
     next_public_sentry_dsn: str | None = None
 

@@ -21,6 +21,55 @@ from tests.test_event_pipeline import Consumer, NormalizedRepository, RawReposit
 from tests.test_race_intelligence import BattleSummaries, Snapshots, consume, source_event
 
 
+async def test_restart_scratch_dedup_does_not_accumulate_the_durable_prefix(monkeypatch):
+    import app.services.race_intelligence as intelligence_module
+
+    retained = []
+    original_apply = RaceStateEngine.apply
+
+    async def observed_apply(self, event, **kwargs):
+        result = await original_apply(self, event, **kwargs)
+        retained.append(len(self._applied_dedup_keys.get(event.session_key, ())))
+        return result
+
+    monkeypatch.setattr(RaceStateEngine, "apply", observed_apply)
+    repository = NormalizedRepository()
+    for sequence in range(1, 10_002):
+        await repository.insert(
+            source_event(
+                RaceEventType.INTERVAL_SAMPLE,
+                driver=4,
+                interval=2,
+                second=sequence,
+                sequence=sequence,
+            )
+        )
+    restored = RaceStateEngine(Snapshots())
+    coordinator = intelligence_module.RaceIntelligenceCoordinator(restored)
+    await coordinator.restore_session("race", repository)
+    assert (await restored.get_state("race")).sequence_number == 10_001
+    assert max(retained) <= 1000
+
+
+async def test_restart_can_stop_at_completed_prefix_before_a_pending_source():
+    repository = NormalizedRepository()
+    for sequence, gap in [(1, 2), (2, 1)]:
+        await repository.insert(
+            source_event(
+                RaceEventType.INTERVAL_SAMPLE,
+                driver=4,
+                interval=gap,
+                second=sequence,
+                sequence=sequence,
+            )
+        )
+    restored = RaceStateEngine(Snapshots())
+    coordinator = RaceIntelligenceCoordinator(restored)
+    await coordinator.restore_session("race", repository, through_sequence=1)
+    state = await restored.get_state("race")
+    assert state.sequence_number == 1 and state.drivers["4"].interval == 2
+
+
 def race_prefix():
     return [
         source_event(RaceEventType.POSITION_SAMPLE, driver=16, position=4, second=0, sequence=1),

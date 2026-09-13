@@ -125,17 +125,31 @@ def test_provisional_pole_and_lap_bests_are_deterministic() -> None:
     )
     assert pole[0].event_type is RaceEventType.PROVISIONAL_POLE
 
-    first_lap = service.apply(
-        event(
-            RaceEventType.LAP_COMPLETED,
-            driver=4,
-            second=60,
-            sequence=3,
-            lap_number=4,
-            lap_duration=82.5,
-        ),
-        race,
+    # The consumer receives the already-reduced retained-fact best authority.
+    race.drivers["4"].best_lap_duration = 82.5
+    race.drivers["4"].best_lap_availability = "available"
+    race.drivers["4"].best_laps_by_phase = {"Q3": 82.5}
+    from app.domain.strategy import FactReference, LapObservation
+
+    source = event(
+        RaceEventType.LAP_COMPLETED,
+        driver=4,
+        second=60,
+        sequence=3,
+        lap_number=4,
+        lap_duration=82.5,
     )
+    witness = LapObservation(
+        lap_number=4,
+        duration_seconds=82.5,
+        evidence=FactReference(
+            event_id=source.id,
+            sequence=source.sequence_number,
+            observed_at=source.event_time,
+            source=source.source,
+        ),
+    )
+    first_lap = service.apply(source, race, lap_witness=witness)
     assert {item.event_type for item in first_lap} == {
         RaceEventType.PERSONAL_BEST,
         RaceEventType.FASTEST_LAP,

@@ -31,6 +31,7 @@ from app.services.provider_matching import OpenF1SessionMatcher
 from app.services.room_agents import active_agent_profiles
 from app.services.room_eligibility import RoomEligibilityService
 from app.services.season import SeasonService
+from app.services.session_capture import capture_policy
 from app.storage.room_repository import SqlRaceRoomRepository
 
 logger = logging.getLogger(__name__)
@@ -56,12 +57,15 @@ class RaceRoomService:
         season_year: int,
         openf1: OpenF1RestClient | None = None,
         eligibility: RoomEligibilityService | None = None,
+        capture_window_seconds: int = 43200,
     ) -> None:
         self.repository = repository
         self.season = season
         self.season_year = season_year
         self.openf1 = openf1
         self.eligibility = eligibility or RoomEligibilityService()
+        self.capture_window_seconds = capture_window_seconds
+        self.intelligence_algorithm_version: str | None = None
         self.session_matcher = OpenF1SessionMatcher()
         self._catalog_ready = False
         self._retry_after = 0.0
@@ -179,17 +183,21 @@ class RaceRoomService:
         )
         public_rooms = {(room.round_number, room.session_type): room for room in rooms}
         observed_at = self._aware(now or datetime.now(UTC))
+        terminals = await self._confirmed_terminals(rooms, observed_at)
+        cancellations = await self.confirmed_cancellations(rooms)
         events = [
             self._event_weekend(
                 meeting,
                 provider_sessions,
                 public_rooms,
                 observed_at,
+                terminals,
+                cancellations,
             )
             for meeting in meetings
         ]
         if not events and rooms:
-            events = self._events_from_rooms(rooms, observed_at)
+            events = self._events_from_rooms(rooms, observed_at, terminals, cancellations)
         if status is not None:
             events = [event for event in events if event.weekend_status is status]
         if session_type is not None:
@@ -265,15 +273,47 @@ class RaceRoomService:
             )
             for session_type, scheduled in session_specs:
                 provider_session = matched_by_type[session_type]
-                public_status = self._session_status(
-                    meeting, session_type, scheduled.starts_at, provider_session, observed_at
-                )
-                availability = self._availability(session_type, public_status, provider_session)
-                results_available = False
-                replay_available = False
                 event_slug = self._event_slug(meeting)
                 slug = self._room_slug(event_slug, session_type)
                 existing = await self._existing_room(slug)
+                anchor = (
+                    (existing.capture_anchor_start or existing.scheduled_start)
+                    if existing
+                    else scheduled.starts_at
+                )
+                public_status = self._session_status(
+                    meeting, session_type, anchor, provider_session, observed_at
+                )
+                if existing and existing.session_key in await self._confirmed_terminals(
+                    [existing], observed_at
+                ):
+                    public_status = PublicSessionStatus.COMPLETED
+                same_identity = existing is not None and (
+                    not provider_session
+                    or provider_session.get("session_key") is None
+                    or str(provider_session["session_key"]) == existing.session_key
+                )
+                if (
+                    same_identity
+                    and existing.session_key is not None
+                    and (provider_session or {}).get("is_cancelled") is True
+                    and not existing.provider_cancelled
+                ):
+                    # Observations are independent of navigation eligibility.
+                    # The narrow SQL update rechecks identity and changes no
+                    # availability, mode, schedule or generation fields.
+                    existing.provider_cancelled = (
+                        await self.repository.observe_catalog_cancellation(
+                            existing.id, existing.session_key
+                        )
+                    )
+                if same_identity and existing.session_key in await self.confirmed_cancellations(
+                    [existing]
+                ):
+                    public_status = PublicSessionStatus.CANCELLED
+                availability = self._availability(session_type, public_status, provider_session)
+                results_available = False
+                replay_available = False
                 decision = self.eligibility.evaluate(
                     scheduled_start=scheduled.starts_at,
                     actual_status=public_status.value,
@@ -316,9 +356,38 @@ class RaceRoomService:
                     replay_available=replay_available,
                     results_available=results_available,
                 )
+                # This column is catalog provenance only. Acknowledged source
+                # cancellation remains fenced by its durable progress query.
+                room.provider_cancelled = bool(
+                    (provider_session or {}).get("is_cancelled") is True
+                    or (same_identity and existing.provider_cancelled)
+                )
                 await self.repository.upsert_room(room, agent_ids)
                 synchronized += 1
         return synchronized
+
+    async def _confirmed_terminals(self, rooms: list[RaceRoom], now: datetime) -> set[str]:
+        if self.intelligence_algorithm_version is None:
+            return set()
+        # Collection expires; compatible committed sporting knowledge does not.
+        # The caller's returned-room set remains bounded, not the whole archive.
+        keys = list(dict.fromkeys(room.session_key for room in rooms if room.session_key))
+        if not keys:
+            return set()
+        return await self.repository.confirmed_terminal_sessions(
+            keys, algorithm_version=self.intelligence_algorithm_version
+        )
+
+    async def confirmed_cancellations(self, rooms: list[RaceRoom]) -> set[str]:
+        keys = list(dict.fromkeys(room.session_key for room in rooms if room.session_key))
+        cancelled = {
+            room.session_key for room in rooms if room.session_key and room.provider_cancelled
+        }
+        if keys and self.intelligence_algorithm_version is not None:
+            cancelled |= await self.repository.confirmed_cancelled_sessions(
+                keys, algorithm_version=self.intelligence_algorithm_version
+            )
+        return cancelled
 
     def _event_weekend(
         self,
@@ -326,6 +395,8 @@ class RaceRoomService:
         provider_sessions: list[dict[str, Any]],
         rooms: dict[tuple[int | None, SessionType], RaceRoom],
         now: datetime,
+        terminals: set[str] | None = None,
+        cancellations: set[str] | None = None,
     ) -> EventWeekend:
         session_specs = self._competitive_sessions(meeting)
         matched_by_type = {
@@ -342,9 +413,35 @@ class RaceRoomService:
             provider_session = matched_by_type[session_type]
             if provider_session is not None:
                 matched_sessions.append(provider_session)
-            public_status = self._session_status(
-                meeting, session_type, scheduled.starts_at, provider_session, now
+            existing = rooms.get((meeting.round_number, session_type))
+            anchor = (
+                (existing.capture_anchor_start or existing.scheduled_start)
+                if existing
+                else scheduled.starts_at
             )
+            public_status = self._session_status(
+                meeting, session_type, anchor, provider_session, now
+            )
+            existing = rooms.get((meeting.round_number, session_type))
+            key = (
+                existing.session_key
+                if existing
+                else str((provider_session or {}).get("session_key") or "")
+            )
+            capture = capture_policy(
+                anchor,
+                now,
+                confirmed_terminal=key in (terminals or set()),
+                cancelled=key in (cancellations or set())
+                or (provider_session or {}).get("is_cancelled") is True,
+                window_seconds=self.capture_window_seconds,
+            )
+            if capture.reason == "terminal":
+                public_status = PublicSessionStatus.COMPLETED
+            elif capture.reason == "cancelled":
+                public_status = PublicSessionStatus.CANCELLED
+            if capture.eligible:
+                weekend_status = WeekendStatus.LIVE
             availability = self._availability(session_type, public_status, provider_session)
             existing = rooms.get((meeting.round_number, session_type))
             results_available = bool(existing.results_available) if existing is not None else False
@@ -373,6 +470,18 @@ class RaceRoomService:
                         else self._session_start(provider_session)
                     ),
                     status=public_status,
+                    status_basis=(
+                        "consumed_terminal_control"
+                        if capture.reason == "terminal"
+                        else "provider_cancelled"
+                        if capture.reason == "cancelled"
+                        else "bounded_capture_window"
+                        if capture.eligible
+                        else "calendar_category"
+                    ),
+                    capture_state=capture.reason,
+                    capture_deadline=capture.deadline,
+                    sporting_status="finished" if capture.reason == "terminal" else "unknown",
                     room_slug=(
                         existing.slug if existing is not None and decision.can_open else None
                     ),
@@ -413,7 +522,13 @@ class RaceRoomService:
             sessions=summaries,
         )
 
-    def _events_from_rooms(self, rooms: list[RaceRoom], now: datetime) -> list[EventWeekend]:
+    def _events_from_rooms(
+        self,
+        rooms: list[RaceRoom],
+        now: datetime,
+        terminals: set[str] | None = None,
+        cancellations: set[str] | None = None,
+    ) -> list[EventWeekend]:
         grouped: dict[tuple[int, int], list[RaceRoom]] = {}
         for room in rooms:
             if room.round_number is None:
@@ -423,12 +538,46 @@ class RaceRoomService:
         for (_, round_number), event_rooms in grouped.items():
             event_rooms.sort(key=lambda item: item.scheduled_start)
             first = event_rooms[0]
+            captures = {
+                room.id: capture_policy(
+                    room.capture_anchor_start or room.scheduled_start,
+                    now,
+                    confirmed_terminal=room.session_key in (terminals or set()),
+                    cancelled=room.provider_cancelled
+                    or room.session_key in (cancellations or set()),
+                    window_seconds=self.capture_window_seconds,
+                )
+                for room in event_rooms
+            }
+            eligibility = {
+                room.id: self.eligibility.evaluate(
+                    scheduled_start=room.scheduled_start,
+                    actual_status=(
+                        "cancelled"
+                        if captures[room.id].reason == "cancelled"
+                        else "live"
+                        if captures[room.id].eligible
+                        else "upcoming"
+                        if captures[room.id].reason == "before_start"
+                        else "completed"
+                    ),
+                    provider_session_available=False,
+                    data_availability=room.source_availability,
+                    replay_available=room.replay_available,
+                    results_available=room.results_available,
+                    existing_room=room,
+                    now=now,
+                )
+                for room in event_rooms
+            }
             weekend_start = first.weekend_start or first.scheduled_start
             weekend_end = event_rooms[-1].weekend_end or (
                 event_rooms[-1].scheduled_start + SESSION_DURATION[event_rooms[-1].session_type]
             )
             weekend_status = (
-                WeekendStatus.UPCOMING
+                WeekendStatus.LIVE
+                if any(item.eligible for item in captures.values())
+                else WeekendStatus.UPCOMING
                 if now < weekend_start
                 else WeekendStatus.COMPLETED
                 if now >= weekend_end
@@ -457,14 +606,28 @@ class RaceRoomService:
                             actual_start=room.actual_start,
                             status=(
                                 PublicSessionStatus.UPCOMING
-                                if now < room.scheduled_start
-                                else PublicSessionStatus.COMPLETED
-                                if weekend_status is WeekendStatus.COMPLETED
+                                if captures[room.id].reason == "before_start"
+                                else PublicSessionStatus.CANCELLED
+                                if captures[room.id].reason == "cancelled"
                                 else PublicSessionStatus.LIVE
+                                if captures[room.id].eligible
+                                else PublicSessionStatus.COMPLETED
                             ),
-                            room_slug=room.slug,
-                            room_eligible=True,
-                            eligibility=RoomEligibilityStatus.ALREADY_EXISTS,
+                            status_basis="consumed_terminal_control"
+                            if captures[room.id].reason == "terminal"
+                            else "provider_cancelled"
+                            if captures[room.id].reason == "cancelled"
+                            else "bounded_capture_window"
+                            if captures[room.id].eligible
+                            else "calendar_category",
+                            capture_state=captures[room.id].reason,
+                            capture_deadline=captures[room.id].deadline,
+                            sporting_status="finished"
+                            if captures[room.id].reason == "terminal"
+                            else "unknown",
+                            room_slug=room.slug if eligibility[room.id].can_open else None,
+                            room_eligible=eligibility[room.id].can_open,
+                            eligibility=eligibility[room.id].status,
                             data_availability=room.source_availability,
                             provider_status=self._provider_status(room, None),
                             replay_available=room.replay_available,
@@ -765,19 +928,17 @@ class RaceRoomService:
         provider_session: dict[str, Any] | None,
         now: datetime,
     ) -> PublicSessionStatus:
-        start = self._session_start(provider_session) or self._aware(scheduled_start)
-        provider_end = self._session_end(provider_session)
-        end = provider_end or start + SESSION_DURATION[session_type]
-        provider_finished = str((provider_session or {}).get("status") or "").casefold() in {
-            "finished",
-            "completed",
-            "ended",
-        }
-        if provider_finished or meeting.status is MeetingLifecycleStatus.COMPLETED or now >= end:
-            return PublicSessionStatus.COMPLETED
-        if now < start:
+        decision = capture_policy(
+            scheduled_start,
+            now,
+            cancelled=(provider_session or {}).get("is_cancelled") is True,
+            window_seconds=self.capture_window_seconds,
+        )
+        if decision.reason == "cancelled":
+            return PublicSessionStatus.CANCELLED
+        if decision.reason == "before_start":
             return PublicSessionStatus.UPCOMING
-        return PublicSessionStatus.LIVE
+        return PublicSessionStatus.LIVE if decision.eligible else PublicSessionStatus.COMPLETED
 
     @staticmethod
     def _availability(

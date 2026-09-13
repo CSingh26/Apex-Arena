@@ -256,6 +256,25 @@ def test_historical_ingestion_requires_internal_key(settings: Settings) -> None:
     assert "safe-internal-key" not in unauthorized.text
 
 
+def test_historical_writer_conflict_returns_actionable_409(settings: Settings) -> None:
+    from pydantic import SecretStr
+
+    from app.storage.intelligence_progress import IntelligenceWriterConflictError
+
+    configured = settings.model_copy(update={"internal_api_key": SecretStr("synthetic")})
+    with TestClient(create_app(configured), raise_server_exceptions=False) as client:
+        client.app.state.services.historical.ingest_session = AsyncMock(
+            side_effect=IntelligenceWriterConflictError("synthetic conflict"),
+        )
+        response = client.post(
+            "/api/v1/debug/ingest-historical-session",
+            headers={"X-Internal-API-Key": "synthetic"},
+            json={"session_key": "race", "endpoints": ["laps"]},
+        )
+    assert response.status_code == 409
+    assert "retry" in response.json()["detail"].lower()
+
+
 def test_historical_ingestion_returns_pipeline_counts(settings: Settings) -> None:
     protected = Settings.model_validate(
         {**settings.model_dump(), "internal_api_key": "safe-internal-key"}

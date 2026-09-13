@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from math import ceil
+from typing import TYPE_CHECKING
 
 from app.domain.intelligence import QualifyingState
 from app.domain.models import (
@@ -13,9 +14,34 @@ from app.domain.models import (
     NormalizedRaceEvent,
     RaceEventType,
 )
-from app.services.race_state import RaceState
+from app.domain.strategy import LapObservation
+from app.services.session_semantics import session_phases
+
+if TYPE_CHECKING:
+    from app.services.race_state import RaceState
 
 QUALIFYING_SESSIONS = {"QUALIFYING", "SPRINT_QUALIFYING"}
+
+
+def reconcile_qualifying_bests(state: QualifyingState, race: RaceState) -> None:
+    """Use the compact retained-fact authority for live and recorded views alike."""
+    partial = any(driver.best_lap_availability == "partial" for driver in race.drivers.values())
+    state.best_laps = {
+        driver.driver_number: driver.best_lap_duration
+        for driver in race.drivers.values()
+        if driver.driver_number is not None
+        and driver.best_lap_availability == "available"
+        and driver.best_lap_duration is not None
+    }
+    state.best_laps_by_phase = {}
+    for driver in race.drivers.values():
+        if driver.driver_number is not None and driver.best_lap_availability == "available":
+            for phase, duration in driver.best_laps_by_phase.items():
+                state.best_laps_by_phase.setdefault(phase, {})[driver.driver_number] = duration
+    state.best_lap_availability = (
+        "partial" if partial else "available" if state.best_laps else "unknown"
+    )
+    state.session_best = min(state.best_laps.values(), default=None) if not partial else None
 
 
 def qualifying_cutoff(field_size: int, phase: str | None) -> int | None:
@@ -43,6 +69,8 @@ class QualifyingEngine:
         self,
         event: NormalizedRaceEvent,
         race_state: RaceState,
+        *,
+        lap_witness: LapObservation | None = None,
     ) -> list[NormalizedRaceEvent]:
         if str(race_state.session_type or "").upper() not in QUALIFYING_SESSIONS:
             return []
@@ -52,7 +80,7 @@ class QualifyingEngine:
             self._states[event.session_key] = state
 
         events: list[NormalizedRaceEvent] = []
-        phase = str(event.payload.get("session_phase") or race_state.current_phase or "").upper()
+        phase = str(race_state.current_phase or "").upper()
         if phase and phase != state.phase:
             previous = state.phase
             state.phase = phase
@@ -69,7 +97,8 @@ class QualifyingEngine:
         if event.event_type is RaceEventType.POSITION_SAMPLE and event.driver_numbers:
             events.extend(self._position_events(event, state))
         elif event.event_type is RaceEventType.LAP_COMPLETED and event.driver_numbers:
-            events.extend(self._lap_events(event, state))
+            events.extend(self._lap_events(event, state, race_state, lap_witness))
+        reconcile_qualifying_bests(state, race_state)
         return events
 
     def _position_events(
@@ -145,11 +174,37 @@ class QualifyingEngine:
         self,
         event: NormalizedRaceEvent,
         state: QualifyingState,
+        race_state: RaceState,
+        lap: LapObservation | None,
     ) -> list[NormalizedRaceEvent]:
-        driver = event.driver_numbers[0]
-        duration = self._float(event.payload.get("lap_duration"))
-        if duration is None or duration <= 0:
+        driver = event.primary_driver_number or event.driver_numbers[0]
+        current = race_state.drivers.get(str(driver))
+        duration = current.best_lap_duration if current else None
+        if (
+            lap is None
+            or lap.deleted
+            or event.event_origin is not EventOrigin.SOURCE_FACT
+            or lap.lap_number
+            != (event.lap_number or self._positive_int(event.payload.get("lap_number")))
+            or lap.evidence.event_id != event.id
+            or lap.evidence.sequence != event.sequence_number
+            or lap.evidence.observed_at != event.event_time
+            or lap.evidence.source != event.source
+            or lap.duration_seconds != duration
+            or current is None
+            or current.best_lap_availability != "available"
+            or duration is None
+            or self._float(event.payload.get("lap_duration")) != duration
+        ):
             return []
+        # Phase inherited from an older observation has no separately retained
+        # phase-source witness. Do not substitute the current operational phase.
+        phase = (
+            lap.phase
+            if lap.phase in session_phases(race_state.session_type)
+            and lap.phase == event.payload.get("session_phase")
+            else None
+        )
         previous = state.best_laps.get(driver)
         if previous is not None and duration >= previous:
             return []
@@ -159,7 +214,12 @@ class QualifyingEngine:
                 event,
                 RaceEventType.PERSONAL_BEST,
                 driver=driver,
-                payload={"lap_duration": duration, "previous_best": previous},
+                lap_number=lap.lap_number,
+                payload={
+                    "lap_duration": duration,
+                    "previous_best": previous,
+                    "session_phase": phase,
+                },
             )
         ]
         if state.session_best is None or duration < state.session_best:
@@ -169,7 +229,8 @@ class QualifyingEngine:
                     event,
                     RaceEventType.FASTEST_LAP,
                     driver=driver,
-                    payload={"lap_duration": duration, "session_phase": state.phase},
+                    lap_number=lap.lap_number,
+                    payload={"lap_duration": duration, "session_phase": phase},
                 )
             )
         return events
@@ -205,6 +266,7 @@ class QualifyingEngine:
         event_type: RaceEventType,
         *,
         driver: int | None = None,
+        lap_number: int | None = None,
         payload: dict[str, object],
     ) -> NormalizedRaceEvent:
         primary = driver
@@ -220,7 +282,7 @@ class QualifyingEngine:
             received_at=source.received_at,
             event_type=event_type,
             primary_driver_number=primary,
-            lap_number=source.lap_number,
+            lap_number=lap_number if lap_number is not None else source.lap_number,
             importance=0.55,
             importance_level=EventImportance.NORMAL,
             confidence=0.95,

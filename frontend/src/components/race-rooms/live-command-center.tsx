@@ -133,11 +133,6 @@ function rowsFromState(state: RaceState): TimingRow[] {
       const number = driverNumber(key, driver);
       const name = driver.full_name ?? driver.broadcast_name ?? `Driver ${number}`;
       const surname = name.split(" ").at(-1) ?? String(number);
-      const stintStart = typeof driver.stint.lap_start === "number"
-        ? driver.stint.lap_start
-        : typeof driver.stint.start_lap === "number"
-          ? driver.stint.start_lap
-          : null;
       return {
         number,
         name,
@@ -149,9 +144,8 @@ function rowsFromState(state: RaceState): TimingRow[] {
         latest: driver.latest_lap_duration,
         best: driver.best_lap_duration,
         compound: typeof driver.stint.compound === "string" ? driver.stint.compound.toUpperCase() : "UNKNOWN",
-        tyreAge: stintStart != null && state.current_lap != null && state.current_lap >= stintStart
-          ? state.current_lap - stintStart + 1
-          : null,
+        tyreAge: typeof driver.tyre_age_laps === "number" && Number.isInteger(driver.tyre_age_laps) && driver.tyre_age_laps >= 0
+          ? driver.tyre_age_laps : null,
         pits: driver.pit_stops.length,
       };
     })
@@ -474,9 +468,19 @@ export function LiveCommandCenter({
     [events, replaySequence],
   );
   const sessionLabel = state?.current_phase ?? state?.session_type?.replaceAll("_", " ") ?? "SESSION";
-  const trackStatus = String(
-    state?.race_control_state.event_type ?? (state?.status === "finished" ? "COMPLETED" : "GREEN"),
-  ).replaceAll("_", " ");
+  const control = state?.control;
+  const lifecycle = control?.lifecycle?.value ?? "unknown";
+  const neutralization = control?.neutralization?.value ?? "unknown";
+  const flag = control?.track_flag?.value ?? "unknown";
+  const trackStatus = lifecycle === "finished"
+    ? "COMPLETED"
+    : ["safety_car", "safety_car_ending", "virtual_safety_car", "virtual_safety_car_ending", "red"].includes(neutralization)
+      ? neutralization.replaceAll("_", " ").toUpperCase()
+      : ["scheduled", "delayed", "suspended"].includes(lifecycle)
+        ? lifecycle.toUpperCase()
+        : ["yellow", "double_yellow", "red", "green"].includes(flag)
+          ? flag.replaceAll("_", " ").toUpperCase()
+          : neutralization === "green" ? "GREEN" : "UNKNOWN";
 
   const liveSamples = useMemo(() => liveLocationSamples(state), [state]);
   const locations = useDriverLocations({

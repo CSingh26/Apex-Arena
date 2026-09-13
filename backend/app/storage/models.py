@@ -36,6 +36,24 @@ class TimestampMixin:
     )
 
 
+class SessionIntelligenceProgressRecord(Base, TimestampMixin):
+    __tablename__ = "session_intelligence_progress"
+
+    session_key: Mapped[str] = mapped_column(String(80), primary_key=True)
+    algorithm_version: Mapped[str] = mapped_column(String(100))
+    completed_source_id: Mapped[uuid.UUID | None] = mapped_column(nullable=True)
+    completed_source_sequence: Mapped[int] = mapped_column(BigInteger, default=0)
+    completed_through_sequence: Mapped[int] = mapped_column(BigInteger, default=0)
+    pending_source_id: Mapped[uuid.UUID | None] = mapped_column(nullable=True, index=True)
+    pending_source_sequence: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    historical_effects_unverified: Mapped[bool] = mapped_column(Boolean, default=False)
+    failure_code: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    history_reference: Mapped[dict[str, Any] | None] = mapped_column(JSON_TYPE, nullable=True)
+    history_detail_status: Mapped[str] = mapped_column(
+        String(32), default="legacy_history_unverified", server_default="legacy_history_unverified"
+    )
+
+
 class SeasonRecord(Base, TimestampMixin):
     __tablename__ = "seasons"
 
@@ -195,6 +213,28 @@ class RaceStateSnapshotRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class SessionHistoryCheckpointRecord(Base):
+    __tablename__ = "session_history_checkpoints"
+    __table_args__ = (
+        UniqueConstraint(
+            "session_key",
+            "algorithm_version",
+            "schema_version",
+            "source_sequence",
+            name="uq_history_checkpoint_revision",
+        ),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    session_key: Mapped[str] = mapped_column(String(80), index=True)
+    algorithm_version: Mapped[str] = mapped_column(String(160))
+    schema_version: Mapped[int] = mapped_column(Integer)
+    source_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
+    source_sequence: Mapped[int] = mapped_column(Integer)
+    checksum: Mapped[str] = mapped_column(String(64))
+    encoded: Mapped[str] = mapped_column(Text)
+    encoded_bytes: Mapped[int] = mapped_column(Integer)
+
+
 class BattleSummaryRecord(Base):
     __tablename__ = "battle_summaries"
 
@@ -320,6 +360,10 @@ class RaceRoomRecord(Base, TimestampMixin):
     country_code: Mapped[str | None] = mapped_column(String(3), nullable=True)
     session_type: Mapped[str] = mapped_column(String(60), default="RACE")
     scheduled_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    capture_anchor_start: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    provider_cancelled: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     actual_start: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     weekend_start: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     weekend_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

@@ -52,6 +52,14 @@ class EventImportancePolicy:
             self._last_emitted.pop(key, None)
 
     def classify(self, event: NormalizedRaceEvent) -> tuple[EventImportance, float, bool]:
+        if event.event_type is RaceEventType.STRATEGY_SITUATION:
+            from app.services.strategy_events import validated_strategy
+
+            return (
+                (EventImportance.IMPORTANT, 0.7, True)
+                if validated_strategy(event)
+                else (EventImportance.LOW, 0.1, False)
+            )
         if event.event_origin.value == "DERIVED" and event.confidence_level is EventConfidence.LOW:
             return EventImportance.LOW, 0.2, False
         if event.event_type in CRITICAL_TYPES:
@@ -79,6 +87,10 @@ class EventImportancePolicy:
         return EventImportance.NORMAL, 0.4, False
 
     def should_emit(self, event: NormalizedRaceEvent) -> bool:
+        if event.event_type is RaceEventType.STRATEGY_SITUATION:
+            from app.services.strategy_events import validated_strategy
+
+            return validated_strategy(event) is not None
         if event.event_type in BYPASS_COOLDOWN_TYPES:
             return True
         key = (event.session_key, event.event_type, tuple(event.driver_numbers))

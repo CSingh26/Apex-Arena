@@ -3,12 +3,14 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from app.domain.control import CurrentControlProjection
 from app.domain.intelligence import BattleState, QualifyingState
 from app.domain.models import NormalizedRaceEvent, RaceMeeting
+from app.domain.strategy_situations import StrategyFrame
 from app.services.historical import HistoricalIngestionResult, IngestionRunSummary
 from app.services.race_state import RaceState
 from app.services.session_realtime import (
@@ -89,21 +91,44 @@ class RaceEventCategory(StrEnum):
     FAST_LAPS = "FAST_LAPS"
 
 
+class IntelligenceProjectionStatus(BaseModel):
+    status: Literal[
+        "unknown",
+        "current",
+        "pending",
+        "historical_effects_unverified",
+        "unavailable",
+        "stale",
+        "replay",
+    ] = "unknown"
+    completed_through_sequence: int = 0
+    completed_source_sequence: int = 0
+    pending_source_sequence: int | None = None
+    algorithm_version: str | None = None
+    historical_effects_unverified: bool = False
+    failure_code: str | None = None
+
+
 class SessionIntelligenceResponse(BaseModel):
     session_key: str
     sequence_number: int = 0
+    control: CurrentControlProjection | None = None
     current_battles: list[BattleState] = Field(default_factory=list)
     recent_events: list[NormalizedRaceEvent] = Field(default_factory=list, max_length=5)
     qualifying: QualifyingState | None = None
+    strategy_frame: StrategyFrame | None = None
+    projection: IntelligenceProjectionStatus = Field(default_factory=IntelligenceProjectionStatus)
 
     @classmethod
     def from_state(cls, state: RaceState) -> SessionIntelligenceResponse:
         return cls(
             session_key=state.session_key,
             sequence_number=state.sequence_number,
+            control=state.control,
             current_battles=state.current_battles,
             recent_events=state.recent_events[-5:],
             qualifying=state.qualifying_intelligence,
+            strategy_frame=state.strategy_frame,
         )
 
 

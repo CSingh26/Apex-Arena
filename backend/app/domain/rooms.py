@@ -139,6 +139,7 @@ class WeekendStatus(StrEnum):
 
 
 class PublicSessionStatus(StrEnum):
+    CANCELLED = "cancelled"
     LIVE = "live"
     COMPLETED = "completed"
     UPCOMING = "upcoming"
@@ -219,6 +220,8 @@ class AgentProfile(BaseModel):
 
 
 class RaceRoom(BaseModel):
+    capture_anchor_start: datetime | None = None
+    provider_cancelled: bool = False
     id: UUID = Field(default_factory=uuid4)
     slug: str
     event_slug: str | None = None
@@ -270,6 +273,10 @@ class SessionRoomSummary(BaseModel):
     scheduled_start: datetime
     actual_start: datetime | None = None
     status: PublicSessionStatus
+    status_basis: str = "calendar_category"
+    capture_state: str = "unknown"
+    capture_deadline: datetime | None = None
+    sporting_status: str = "unknown"
     room_slug: str | None = None
     room_eligible: bool = False
     eligibility: RoomEligibilityStatus
