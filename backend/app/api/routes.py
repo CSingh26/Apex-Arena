@@ -64,6 +64,7 @@ from app.services.session_realtime import (
     telemetry_state,
     timing_state,
 )
+from app.services.strategy_public import sanitize_strategy_frame
 from app.storage.intelligence_progress import IntelligenceWriterConflictError
 
 logger = logging.getLogger(__name__)
@@ -228,15 +229,13 @@ async def _session_intelligence(
     if not session_key or race_state is None:
         return SessionIntelligenceResponse(session_key=session_key or "")
     state = await race_state.get_state(session_key)
-    response = SessionIntelligenceResponse.from_state(state)
-    response.projection = await intelligence_projection_status(
+    projection = await intelligence_projection_status(
         services,
         session_key,
         view_sequence=state.sequence_number,
         is_replay=state.is_replay,
     )
-    from app.services.strategy_public import sanitize_strategy_frame
-
+    response = SessionIntelligenceResponse.from_state(state, projection)
     response.strategy_frame = sanitize_strategy_frame(response.strategy_frame, response.projection)
     if (
         response.strategy_frame is not None

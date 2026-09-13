@@ -16,6 +16,10 @@ def test_settings_exposes_only_safe_runtime_metadata(settings: Settings) -> None
     assert metadata["openf1_credentials_present"] is False
     assert "test-password" not in repr(settings)
     assert "database_url" not in metadata
+    # Reported generation state must follow the explicit opt-in, not the legacy
+    # ai_enabled default, or operators read the wrong thing from logs.
+    assert metadata["ai_generation_active"] is False
+    assert "ai_enabled" not in metadata
     assert settings.stream_backend == "sse"
     assert settings.race_state_snapshot_every_n_events == 10
     assert "v1/laps" in settings.openf1_topics
@@ -423,3 +427,31 @@ def test_production_rejects_api_auto_ingestion(settings: Settings) -> None:
 
     with pytest.raises(ValidationError, match="cannot auto-connect"):
         Settings.model_validate(values)
+
+
+def test_runtime_metadata_reports_generation_only_when_fully_enabled() -> None:
+    from pydantic import SecretStr
+
+    base = {
+        "app_env": "test",
+        "database_url": "postgresql://apex:local-password@postgres:5432/apex_arena",
+        "postgres_password": "local-password",
+        "redis_url": "redis://localhost:6379/15",
+    }
+    opted_in = Settings(
+        **base,
+        ai_generation_opt_in=True,
+        ai_enabled=True,
+        openai_api_key=SecretStr("synthetic-not-a-real-key"),
+    )
+    assert opted_in.safe_runtime_metadata["ai_generation_active"] is True
+
+    # Each gate alone is enough to keep generation off.
+    for override in (
+        {"ai_generation_opt_in": False},
+        {"ai_enabled": False},
+        {"ai_kill_switch": True},
+        {"openai_api_key": None},
+    ):
+        configured = opted_in.model_copy(update=override)
+        assert configured.safe_runtime_metadata["ai_generation_active"] is False

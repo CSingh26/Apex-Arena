@@ -84,6 +84,16 @@ function intelligence(sequence: number, events: NormalizedRaceEvent[]): SessionI
     current_battles: [],
     recent_events: events,
     qualifying: null,
+    strategy_frame: null,
+    projection: {
+      status: "unknown",
+      completed_through_sequence: 0,
+      completed_source_sequence: 0,
+      pending_source_sequence: null,
+      algorithm_version: null,
+      historical_effects_unverified: false,
+      failure_code: null,
+    },
   };
 }
 

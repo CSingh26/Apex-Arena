@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 
 import { CircuitMap, type CircuitMapDriver } from "@/components/race-rooms/circuit-map";
 import { CircuitOutline } from "@/components/race-rooms/circuit-outline";
@@ -8,6 +8,11 @@ import { BattleRail } from "@/components/race-rooms/battle-rail";
 import { RaceEventFeed, RecentChanges } from "@/components/race-rooms/race-event-feed";
 import { RaceRoomModeToggle, useRaceRoomMode } from "@/components/race-rooms/race-room-mode-toggle";
 import { SelectedDriverContext } from "@/components/race-rooms/selected-driver-context";
+import { StrategyPanel } from "@/components/race-rooms/strategy-panel";
+import {
+  TelemetryComparison,
+  type TelemetryDriverOption,
+} from "@/components/race-rooms/telemetry-comparison";
 import { getSessionEvents, getSessionState, sessionStreamUrl } from "@/lib/api";
 import { formatGap, formatLapTime } from "@/lib/timing";
 import { reconnectDelay } from "@/lib/retry-delay";
@@ -509,6 +514,21 @@ export function LiveCommandCenter({
   const nameForDriver = (number: number) => (
     rows.find((row) => row.number === number)?.name ?? `Car ${number}`
   );
+  // Stable across renders so the strategy narrative only recomputes on real
+  // data changes rather than on every stream tick.
+  const strategyDriverName = useCallback(
+    (number: number) => rows.find((row) => row.number === number)?.name ?? `Car ${number}`,
+    [rows],
+  );
+  // Rebuilt only when the classified field changes, so the analyst telemetry
+  // form keeps a stable option list across timing ticks.
+  const telemetryDrivers = useMemo<TelemetryDriverOption[]>(
+    () => rows.map((row) => ({ driverNumber: row.number, name: row.name })),
+    [rows],
+  );
+  const strategyFrame = state?.strategy_frame ?? initialIntelligence?.strategy_frame ?? null;
+  const strategyControl = control ?? initialIntelligence?.control ?? null;
+  const strategyProjection = initialIntelligence?.projection ?? null;
   const loadMoreEvents = async () => {
     if (!sessionKey || loadingMoreEvents) return;
     const requestedSession = sessionKey;
@@ -606,7 +626,24 @@ export function LiveCommandCenter({
       </section>
     </div>
     </section>
+    <StrategyPanel
+      mode={mode}
+      frame={strategyFrame}
+      projection={strategyProjection}
+      control={strategyControl}
+      battles={battles}
+      driverName={strategyDriverName}
+    />
     <BattleRail battles={battles} drivers={state?.drivers ?? {}} currentLap={state?.current_lap ?? null} selectedDriver={activeDriver} mode={mode} onSelectDriver={onSelectDriver} />
+    {mode === "ANALYST" && sessionKey ? (
+      <TelemetryComparison
+        key={sessionKey}
+        sessionKey={sessionKey}
+        drivers={telemetryDrivers}
+        currentLap={state?.current_lap ?? null}
+        viewSequence={state?.sequence_number ?? null}
+      />
+    ) : null}
     <RecentChanges events={displayedEvents.slice(-5)} driverName={nameForDriver} />
     <RaceEventFeed events={displayedEvents} selectedDriver={activeDriver} driverName={nameForDriver} onLoadMore={loadMoreEvents} hasMore={hasMoreEvents} loadingMore={loadingMoreEvents} />
   </>;

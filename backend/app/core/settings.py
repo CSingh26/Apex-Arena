@@ -498,7 +498,15 @@ class Settings(BaseSettings):
             "redis_port": redis.port,
             "live_mode_enabled": self.live_mode_enabled,
             "openf1_credentials_present": self.openf1_credentials_present,
-            "ai_enabled": self.ai_enabled and not self.ai_kill_switch,
+            # Reports whether generation can actually run. ai_enabled alone
+            # predates a working generation path, so reporting it here would
+            # tell an operator the rooms are doing something they are not.
+            "ai_generation_active": (
+                self.ai_generation_opt_in
+                and self.ai_enabled
+                and not self.ai_kill_switch
+                and self.openai_api_key is not None
+            ),
             "room_topic_cooldown_seconds": self.room_topic_cooldown_seconds,
         }
 

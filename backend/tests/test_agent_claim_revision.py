@@ -255,3 +255,105 @@ async def test_rooms_without_claim_memory_behave_exactly_as_before():
     )
     await engine.consume(situation_event(weather_transition(sequence=10)))
     assert repository.messages
+
+
+# --- Optional generation reaching real messages ------------------------------
+
+
+def opted_in_policy(provider, settings):
+    from app.services.generation_policy import GenerationPolicy
+
+    return GenerationPolicy(
+        settings.model_copy(
+            update={
+                "ai_generation_opt_in": True,
+                "ai_enabled": True,
+                "ai_kill_switch": False,
+            }
+        ),
+        provider,
+    )
+
+
+@pytest.mark.asyncio
+async def test_opted_in_generation_rephrases_the_published_message(settings):
+    from tests.test_generation_policy import FakeProvider
+
+    provider = FakeProvider(text="Rain's arrived, and that reopens the tyre question.")
+    repository = FakeRoomRepository()
+    engine = RaceRoomDiscussionEngine(
+        repository,
+        DiscussionTriggerEvaluator(topic_cooldown_seconds=0, agent_cooldown_seconds=0),
+        generation_policy=opted_in_policy(provider, settings),
+    )
+
+    await engine.consume(situation_event(weather_transition(sequence=10)))
+
+    assert repository.messages
+    # Each published message in the chain is phrased separately, and the shared
+    # per-event concurrency and budget ceilings bound how many that can be.
+    assert provider.calls == len(repository.messages)
+    assert all(message.content == provider.text for message in repository.messages)
+    assert all(message.generated_by == "language_model" for message in repository.messages)
+
+
+@pytest.mark.asyncio
+async def test_generation_only_ever_rephrases_a_grounded_conclusion(settings):
+    """The provider receives the decided sentence; it cannot originate one."""
+    from tests.test_generation_policy import FakeProvider
+
+    class CapturingProvider(FakeProvider):
+        def __init__(self):
+            super().__init__()
+            self.requests = []
+
+        async def compose(self, request, *, timeout_seconds):
+            self.requests.append(request)
+            return await super().compose(request, timeout_seconds=timeout_seconds)
+
+    provider = CapturingProvider()
+    repository = FakeRoomRepository()
+    engine = RaceRoomDiscussionEngine(
+        repository,
+        DiscussionTriggerEvaluator(topic_cooldown_seconds=0, agent_cooldown_seconds=0),
+        generation_policy=opted_in_policy(provider, settings),
+    )
+
+    await engine.consume(situation_event(weather_transition(sequence=10)))
+
+    assert provider.requests
+    request = provider.requests[0]
+    assert request.conclusion.strip(), "a decided conclusion must be supplied"
+    assert request.agent_voice != request.conclusion
+
+
+@pytest.mark.asyncio
+async def test_an_unavailable_provider_leaves_the_room_fully_functional(settings):
+    """Adversarial scenario 12: AI unavailable must not degrade the facts."""
+    from app.providers.language import LanguageUnavailable
+    from tests.test_generation_policy import FailingProvider
+
+    provider = FailingProvider(LanguageUnavailable("provider down"))
+    repository = FakeRoomRepository()
+    deterministic = FakeRoomRepository()
+
+    engine = RaceRoomDiscussionEngine(
+        repository,
+        DiscussionTriggerEvaluator(topic_cooldown_seconds=0, agent_cooldown_seconds=0),
+        generation_policy=opted_in_policy(provider, settings),
+    )
+    baseline = RaceRoomDiscussionEngine(
+        deterministic,
+        DiscussionTriggerEvaluator(topic_cooldown_seconds=0, agent_cooldown_seconds=0),
+    )
+
+    await engine.consume(situation_event(weather_transition(sequence=10)))
+    await baseline.consume(situation_event(weather_transition(sequence=10)))
+
+    assert provider.calls == 1
+    assert repository.messages, "a failed provider must not silence the room"
+    # Identical to the run with no provider configured at all.
+    assert [message.content for message in repository.messages] == [
+        message.content for message in deterministic.messages
+    ]
+    assert all(message.generated_by == "deterministic" for message in repository.messages)

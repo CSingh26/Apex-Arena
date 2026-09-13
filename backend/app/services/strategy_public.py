@@ -7,9 +7,11 @@ from app.domain.strategy_situations import StrategyFrame, capabilities
 def sanitize_strategy_frame(frame, projection):
     if frame is None:
         return None
+    # Reasoning is published only at a cursor the projection actually stands
+    # behind. A stale or pending view returns the frame's identity with no
+    # situations rather than reasoning the facts no longer support.
     status = getattr(projection, "status", projection)
-    allowed = getattr(projection, "reasoning_allowed", status in {"current", "replay"})
-    if allowed and status in {"current", "replay"}:
+    if status in {"current", "replay"}:
         return frame.model_copy(deep=True)
     return StrategyFrame(
         session_key=frame.session_key,

@@ -1,0 +1,385 @@
+.panel {
+  --telemetry-accent: var(--apex-cyan, #51e5d4);
+  --telemetry-warn: var(--apex-yellow, #ffd166);
+  --telemetry-alert: var(--apex-coral, #ff5d78);
+  --trace-a: var(--apex-cyan, #51e5d4);
+  --trace-b: var(--apex-violet, #a779ff);
+  margin: 20px 0 24px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+}
+
+.heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.heading span {
+  color: var(--telemetry-accent);
+  font: 700 .58rem var(--font-mono, ui-monospace), monospace;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.heading h2 {
+  margin: 4px 0 0;
+  font-size: 1.05rem;
+}
+
+.heading small {
+  color: var(--faint);
+  font: 650 .6rem var(--font-mono, ui-monospace), monospace;
+  text-transform: uppercase;
+}
+
+.form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: end;
+  gap: 12px;
+  margin-bottom: 14px;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 14px;
+}
+
+.fieldset {
+  min-width: 0;
+  margin: 0;
+  border: 0;
+  padding: 0;
+}
+
+.fieldset legend,
+.lap > label {
+  padding: 0;
+  color: var(--faint);
+  font: 750 .56rem var(--font-mono, ui-monospace), monospace;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+}
+
+.options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 7px;
+}
+
+.option {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 6px 9px;
+  color: var(--foreground);
+  cursor: pointer;
+  font-size: .73rem;
+  font-weight: 700;
+}
+
+.option:focus-within {
+  border-color: var(--telemetry-accent);
+  outline: 2px solid var(--telemetry-accent);
+  outline-offset: 2px;
+}
+
+.option:has(input:checked) {
+  border-color: var(--telemetry-accent);
+  background: color-mix(in srgb, var(--telemetry-accent) 12%, transparent);
+}
+
+.option:has(input:disabled) {
+  color: var(--faint);
+  cursor: not-allowed;
+  opacity: .6;
+}
+
+.lap {
+  display: grid;
+  gap: 6px;
+  justify-items: start;
+}
+
+.lap input {
+  width: 110px;
+  min-height: 36px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 7px 9px;
+  background: var(--panel-raised, var(--panel));
+  color: var(--foreground);
+  font: 700 .78rem var(--font-mono, ui-monospace), monospace;
+}
+
+.lap small {
+  color: var(--faint);
+  font-size: .6rem;
+}
+
+.submit {
+  min-height: 38px;
+  border: 1px solid var(--telemetry-accent);
+  border-radius: 6px;
+  padding: 9px 14px;
+  background: color-mix(in srgb, var(--telemetry-accent) 14%, transparent);
+  color: var(--foreground);
+  cursor: pointer;
+  font: 750 .7rem var(--font-mono, ui-monospace), monospace;
+  text-transform: uppercase;
+}
+
+.submit:disabled {
+  border-color: var(--line);
+  background: transparent;
+  color: var(--faint);
+  cursor: not-allowed;
+}
+
+.submit:focus-visible {
+  outline: 2px solid var(--telemetry-accent);
+  outline-offset: 2px;
+}
+
+.status {
+  margin: 0 0 10px;
+  color: var(--muted);
+  font: 700 .62rem var(--font-mono, ui-monospace), monospace;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+
+.status[data-availability="partial"] {
+  color: var(--telemetry-warn);
+}
+
+.status[data-availability="unavailable"] {
+  color: var(--telemetry-alert);
+}
+
+.notices {
+  display: grid;
+  gap: 6px;
+  margin: 0 0 12px;
+  border: 1px dashed var(--line-strong, var(--line));
+  border-radius: 8px;
+  padding: 10px 12px 10px 28px;
+}
+
+.notices li {
+  color: var(--muted);
+  font-size: .74rem;
+  line-height: 1.5;
+}
+
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  margin: 0 0 12px;
+  padding: 0;
+  list-style: none;
+}
+
+.legend li {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--muted);
+  font: 700 .66rem var(--font-mono, ui-monospace), monospace;
+}
+
+.legend i {
+  display: inline-block;
+  width: 18px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--trace-a);
+}
+
+.legend li[data-slot="1"] i {
+  background: var(--trace-b);
+}
+
+.charts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.chart {
+  min-width: 0;
+  margin: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 11px 12px;
+  background: var(--panel-raised, var(--panel));
+}
+
+.chartHeader {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.chart h4 {
+  margin: 0;
+  font: 800 .72rem var(--font-mono, ui-monospace), monospace;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+
+.unit {
+  color: var(--faint);
+  font: 650 .66rem var(--font-mono, ui-monospace), monospace;
+}
+
+.ranges {
+  display: grid;
+  gap: 3px;
+  margin: 6px 0 8px;
+  padding: 0;
+  list-style: none;
+}
+
+.ranges li {
+  border-left: 2px solid var(--trace-a);
+  padding-left: 7px;
+  color: var(--muted);
+  font: 650 .62rem var(--font-mono, ui-monospace), monospace;
+}
+
+.ranges li[data-slot="1"] {
+  border-left-color: var(--trace-b);
+}
+
+.plot {
+  display: block;
+  width: 100%;
+  height: 110px;
+  overflow: visible;
+}
+
+.grid {
+  stroke: var(--line);
+  stroke-width: 1;
+}
+
+.trace {
+  fill: none;
+  stroke: var(--trace-a);
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.6;
+}
+
+.trace[data-slot="1"] {
+  stroke: var(--trace-b);
+  stroke-dasharray: 5 3;
+}
+
+.axis {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 6px 0 0;
+  color: var(--faint);
+  font: 650 .58rem var(--font-mono, ui-monospace), monospace;
+}
+
+.axisNote,
+.missing {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: .71rem;
+  line-height: 1.5;
+}
+
+.missing {
+  color: var(--telemetry-warn);
+}
+
+.empty {
+  margin: 0;
+  color: var(--muted);
+  font-size: .76rem;
+  line-height: 1.55;
+}
+
+.error {
+  margin: 0;
+  color: var(--telemetry-alert);
+  font-size: .76rem;
+  line-height: 1.55;
+}
+
+/* Neon tokens do not carry enough contrast on a pale panel. */
+@media (prefers-color-scheme: light) {
+  .panel {
+    --telemetry-accent: #0d7d74;
+    --telemetry-warn: #8a5a00;
+    --telemetry-alert: #b8213b;
+    --trace-a: #0d7d74;
+    --trace-b: #6534c9;
+  }
+}
+
+:global([data-theme="light"]) .panel {
+  --telemetry-accent: #0d7d74;
+  --telemetry-warn: #8a5a00;
+  --telemetry-alert: #b8213b;
+  --trace-a: #0d7d74;
+  --trace-b: #6534c9;
+}
+
+:global([data-theme="dark"]) .panel {
+  --telemetry-accent: var(--apex-cyan, #51e5d4);
+  --telemetry-warn: var(--apex-yellow, #ffd166);
+  --telemetry-alert: var(--apex-coral, #ff5d78);
+  --trace-a: var(--apex-cyan, #51e5d4);
+  --trace-b: var(--apex-violet, #a779ff);
+}
+
+@media (max-width: 1040px) {
+  .charts {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/*
+ * On a phone the form re-prioritises: the car choice takes the full width and
+ * the lap and action sit beside each other rather than shrinking to nothing.
+ */
+@media (max-width: 720px) {
+  .form {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .fieldset {
+    grid-column: 1 / -1;
+  }
+
+  .panel {
+    padding: 13px;
+  }
+
+  .plot {
+    height: 130px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .option,
+  .submit,
+  .trace {
+    transition: none;
+    animation: none;
+  }
+}

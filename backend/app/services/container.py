@@ -46,6 +46,7 @@ from app.services.room_eligibility import RoomEligibilityService
 from app.services.room_replay import RoomReplayCoordinator
 from app.services.rooms import RaceRoomService
 from app.services.season import SeasonService
+from app.services.telemetry_history import TelemetryHistoryService
 from app.storage.backfill_repository import SqlOpenF1BackfillJobRepository
 from app.storage.database import Database
 from app.storage.intelligence_progress import SqlIntelligenceProgressRepository
@@ -129,6 +130,9 @@ class AppServices:
             settings.race_state_snapshot_every_n_events,
             live_state_reader=self.event_bus.latest_state,
         )
+        self.telemetry_history = TelemetryHistoryService(
+            self.normalized_event_repository, self.race_state
+        )
         intelligence_config = RaceIntelligenceConfig(
             overtake_confirmation_seconds=settings.overtake_confirmation_seconds,
             overtake_confirmation_samples=settings.overtake_confirmation_samples,
@@ -169,6 +173,7 @@ class AppServices:
             publisher=self.event_bus.publish_room_message,
             state_reader=self.race_state.get_state,
             claims=self.agent_claims,
+            generation_policy=self.generation_policy,
         )
         self.room_replay = RoomReplayCoordinator(
             self.room_repository,

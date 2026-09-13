@@ -238,7 +238,7 @@ async def test_neutralized_close_intervals_cannot_start_battle():
 
 @pytest.mark.asyncio
 async def test_neutralized_timing_and_intelligence_expose_control_not_stale_attack():
-    from app.api.schemas import SessionIntelligenceResponse
+    from app.api.schemas import IntelligenceProjectionStatus, SessionIntelligenceResponse
     from app.domain.intelligence import BattleState
     from app.services.session_realtime import timing_state
 
@@ -261,7 +261,8 @@ async def test_neutralized_timing_and_intelligence_expose_control_not_stale_atta
         )
     ]
     assert all(row.battle_context.status == "UNAVAILABLE" for row in timing_state(state).drivers)
-    assert SessionIntelligenceResponse.from_state(state).control == state.control
+    projection = IntelligenceProjectionStatus(status="current")
+    assert SessionIntelligenceResponse.from_state(state, projection).control == state.control
 
 
 @pytest.mark.asyncio

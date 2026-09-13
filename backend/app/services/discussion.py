@@ -23,17 +23,29 @@ from app.domain.rooms import (
     RaceRoom,
     RoomMessage,
 )
+from app.providers.language import MAX_PROMPT_FACTS, LanguageRequest
 from app.services.agent_claims import AgentClaimMemory
 from app.services.agent_grounding import AgentEventEnvelope
 from app.services.claim_reasoning import claim_for_situation, closes, revision_text
 from app.services.discussion_triggers import DiscussionTrigger, DiscussionTriggerEvaluator
 from app.services.driver_identity import DriverIdentityResolver
+from app.services.generation_policy import GenerationOutcome, GenerationPolicy
 from app.services.race_state import RaceState
 from app.services.session_semantics import is_qualifying_session
 from app.services.timing import format_lap_time, format_pit_stop
 from app.storage.room_repository import SqlRaceRoomRepository
 
 logger = logging.getLogger(__name__)
+
+# Voice hints for optional rephrasing. Keeping them here rather than in the
+# agent profile avoids a provider prompt depending on editable seed data.
+AGENT_VOICES = {
+    "mira-vale": "Strategy engineer; qualitative, uses a number only when it decides the point",
+    "theo-voss": "Telemetry analyst; precise and cautious about what a trace can prove",
+    "lena-cross": "Former racer; racecraft-first, direct and physical in description",
+    "arjun-reyes": "Historian; reaches for precedent and long-run context",
+    "nova": "Host; concise, keeps the room honest and moves it along",
+}
 
 RoomPublisher = Callable[[RoomMessage], Awaitable[object]]
 StateReader = Callable[[str], Awaitable[RaceState]]
@@ -771,12 +783,14 @@ class RaceRoomDiscussionEngine:
         state_reader: StateReader | None = None,
         generation_version: str = "rooms-v4-stat-debate",
         claims: AgentClaimMemory | None = None,
+        generation_policy: GenerationPolicy | None = None,
     ) -> None:
         self.repository = repository
         self.evaluator = evaluator
         self.publisher = publisher
         self.state_reader = state_reader
         self.claims = claims
+        self.generation_policy = generation_policy
         self.generator = DeterministicRoomGenerator()
         self.validator = GroundingValidator()
         self.context_builder = GroundingContextBuilder()
@@ -973,6 +987,36 @@ class RaceRoomDiscussionEngine:
                 result.add(await self._store(summary, event, context))
         return result
 
+    async def _phrase(
+        self,
+        generated: GeneratedRoomMessage,
+        event: NormalizedRaceEvent,
+        agent_id: str,
+    ) -> GenerationOutcome:
+        """Optionally restate an already-grounded conclusion in the agent's voice.
+
+        This runs after grounding validation, so generation can only change how
+        a supported claim reads, never what it asserts. Every refusal path
+        returns the deterministic wording unchanged.
+        """
+        policy = self.generation_policy
+        if policy is None or not policy.enabled:
+            return GenerationOutcome(
+                text=generated.content, generated=False, reason="not_configured"
+            )
+        try:
+            request = LanguageRequest(
+                purpose=generated.message_type.value,
+                agent_voice=AGENT_VOICES.get(agent_id, agent_id),
+                conclusion=generated.content,
+                facts=tuple(claim.claim for claim in generated.claims)[:MAX_PROMPT_FACTS],
+            )
+        except ValueError:
+            return GenerationOutcome(
+                text=generated.content, generated=False, reason="unsupported_claim"
+            )
+        return await policy.compose(request, session_key=event.session_key)
+
     async def _build_message(
         self,
         room_id: Any,
@@ -1010,6 +1054,7 @@ class RaceRoomDiscussionEngine:
                 grounded,
             )
             return None
+        phrasing = await self._phrase(generated, event, agent_id)
         message = RoomMessage(
             room_id=room_id,
             agent_id=agent_id,
@@ -1029,12 +1074,12 @@ class RaceRoomDiscussionEngine:
                 else trigger.topic
             ),
             message_type=generated.message_type,
-            content=generated.content,
+            content=phrasing.text,
             confidence=generated.confidence,
             evidence_status=generated.evidence_status,
             reply_to_message_id=reply_to.id if reply_to else None,
             trigger_event_id=event.id,
-            generated_by="deterministic",
+            generated_by=phrasing.mode,
             prompt_version=self.generation_version,
             generation_key=self._generation_key(
                 room_id=room_id,

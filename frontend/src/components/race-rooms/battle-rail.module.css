@@ -24,7 +24,8 @@
 .tags span { padding: 4px 6px; border: 1px solid var(--line); border-radius: 4px; color: var(--muted); font: 650 .54rem var(--font-mono, ui-monospace), monospace; text-transform: uppercase; }
 .evidence { margin-top: 10px; border-top: 1px solid var(--line); padding-top: 8px; }
 .evidence summary { color: var(--apex-cyan); cursor: pointer; font-size: .64rem; font-weight: 750; }
-.evidence p { margin: 7px 0 0; color: var(--muted); font: 600 .59rem/1.5 var(--font-mono, ui-monospace), monospace; }
+.summaryLine { margin: 7px 0 0; color: var(--muted); font: 600 .59rem/1.5 var(--font-mono, ui-monospace), monospace; }
+.noContext { margin: 8px 0 0; color: var(--muted); font-size: .71rem; line-height: 1.5; }
 .empty { min-height: 78px; margin: 0; padding: 22px; border-block: 1px solid var(--line); color: var(--muted); font-size: .76rem; }
 @media (max-width: 850px) { .cards { grid-template-columns: 1fr; } .card { min-height: 0; } }
 @media (prefers-reduced-motion: reduce) { .card, .matchup button { transition: none; } }

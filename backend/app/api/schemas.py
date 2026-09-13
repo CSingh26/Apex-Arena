@@ -120,7 +120,17 @@ class SessionIntelligenceResponse(BaseModel):
     projection: IntelligenceProjectionStatus = Field(default_factory=IntelligenceProjectionStatus)
 
     @classmethod
-    def from_state(cls, state: RaceState) -> SessionIntelligenceResponse:
+    def from_state(
+        cls,
+        state: RaceState,
+        projection: IntelligenceProjectionStatus,
+    ) -> SessionIntelligenceResponse:
+        """Project public intelligence at a known projection status.
+
+        The status is required rather than defaulted: every caller has to state
+        which cursor the view was read at, and a forgotten one would silently
+        publish "unknown" as though the projection had genuinely not reported.
+        """
         return cls(
             session_key=state.session_key,
             sequence_number=state.sequence_number,
@@ -129,6 +139,7 @@ class SessionIntelligenceResponse(BaseModel):
             recent_events=state.recent_events[-5:],
             qualifying=state.qualifying_intelligence,
             strategy_frame=state.strategy_frame,
+            projection=projection,
         )
 
 

@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { LiveCommandCenter } from "@/components/race-rooms/live-command-center";
 import type { NormalizedRaceEvent, RaceState } from "@/lib/types";
+import { controlProjection, intelligenceProjection, strategyFrame, strategySituation } from "@/test/strategy-fixtures";
 
 const api = vi.hoisted(() => ({
   getSessionState: vi.fn(),
@@ -12,6 +13,10 @@ const api = vi.hoisted(() => ({
   getSessionTrack: vi.fn(),
   getSessionLocationSamples: vi.fn(),
   getSessionEvents: vi.fn(),
+  // The analyst telemetry panel reads this only on an explicit submit; it is
+  // mocked so the module binding resolves, not because anything calls it here.
+  getSessionTelemetryHistory: vi.fn(),
+  ApiError: class ApiError extends Error {},
 }));
 
 vi.mock("@/lib/api", () => api);
@@ -286,6 +291,16 @@ describe("LiveCommandCenter", () => {
         current_battles: [],
         recent_events: [event("recent", 10)],
         qualifying: null,
+        strategy_frame: null,
+        projection: {
+          status: "unknown",
+          completed_through_sequence: 0,
+          completed_source_sequence: 0,
+          pending_source_sequence: null,
+          algorithm_version: null,
+          historical_effects_unverified: false,
+          failure_code: null,
+        },
       }}
     />);
 
@@ -708,6 +723,74 @@ describe("LiveCommandCenter", () => {
     await waitFor(() => expect(api.getSessionLocationSamples.mock.calls.some(
       (call) => call[1].since === "2026-09-06T13:31:00.000Z",
     )).toBe(true));
+  });
+
+
+  it("surfaces the strategy frame from live state and switches it with the mode toggle", async () => {
+    const snapshot = {
+      ...state(42, 1, 0),
+      control: controlProjection(),
+      strategy_frame: strategyFrame({
+        situations: [strategySituation({ participants: [63, 16] })],
+      }),
+    };
+    api.getSessionState.mockResolvedValue({ state: snapshot });
+    render(<LiveCommandCenter
+      sessionKey="race-1"
+      circuitName="Circuit"
+      eventName="Grand Prix"
+      playbackSequence={42}
+      sessionClock={null}
+      selectedDriver={null}
+      onSelectDriver={vi.fn()}
+      initialIntelligence={{
+        session_key: "race-1",
+        sequence_number: 42,
+        current_battles: [],
+        recent_events: [],
+        qualifying: null,
+        strategy_frame: null,
+        projection: intelligenceProjection(),
+      }}
+    />);
+
+    // Fan mode is the persisted default: plain language, resolved driver names.
+    expect(await screen.findByRole("heading", { name: "The strategy story" })).toBeInTheDocument();
+    expect(screen.getByText(/George Russell is in position to try an undercut/)).toBeInTheDocument();
+    expect(screen.queryAllByText("undercut_condition")).toHaveLength(0);
+
+    await userEvent.click(screen.getByRole("button", { name: "Analyst" }));
+
+    expect(screen.getByRole("heading", { name: "Strategy frame" })).toBeInTheDocument();
+    expect(screen.getAllByText("undercut_condition").length).toBeGreaterThan(0);
+    expect(screen.getByRole("heading", { name: "What the system can determine" })).toBeInTheDocument();
+  });
+
+  it("explains a missing strategy frame rather than rendering an empty panel", async () => {
+    api.getSessionState.mockResolvedValue({ state: state(10, 1, 0) });
+    render(<LiveCommandCenter
+      sessionKey="race-1"
+      circuitName="Circuit"
+      eventName="Grand Prix"
+      playbackSequence={10}
+      sessionClock={null}
+      selectedDriver={null}
+      onSelectDriver={vi.fn()}
+      initialIntelligence={{
+        session_key: "race-1",
+        sequence_number: 10,
+        current_battles: [],
+        recent_events: [],
+        qualifying: null,
+        strategy_frame: null,
+        projection: intelligenceProjection({ status: "pending" }),
+      }}
+    />);
+
+    expect(
+      await screen.findByText("Strategy analysis is not available for this view yet."),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/still being computed for this point/)).toBeInTheDocument();
   });
 
 });

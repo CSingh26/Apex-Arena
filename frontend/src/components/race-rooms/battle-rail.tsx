@@ -4,6 +4,7 @@
 import { rankBattleCards } from "@/lib/race-intelligence";
 import type { BattleState, DriverRaceState, RaceRoomMode } from "@/lib/types";
 
+import { AnalystBattleContext, FanBattleContext } from "./battle-strategy-context";
 import styles from "./battle-rail.module.css";
 
 type BattleRailProps = {
@@ -52,6 +53,135 @@ function trendText(battle: BattleState, chaser: string): string {
   return "The interval is stable";
 }
 
+function DriverButton({
+  position,
+  name,
+  tyre,
+  selected,
+  onSelect,
+}: {
+  position: number;
+  name: string;
+  tyre: string | null;
+  selected: boolean;
+  onSelect: () => void;
+}) {
+  return (
+    <button type="button" aria-pressed={selected} aria-label={`Select ${name}`} onClick={onSelect}>
+      <strong>P{position}</strong>
+      <span>{shortName(name)}</span>
+      {tyre ? <small>{tyre}</small> : null}
+    </button>
+  );
+}
+
+/**
+ * Analyst detail for one battle.
+ *
+ * The timing summary is always true of any battle. The engine's published
+ * context is added when it exists; when it does not, the card says the engine
+ * published none rather than leaving a blank drawer.
+ */
+function BattleEvidence({
+  battle,
+  resolveName,
+}: {
+  battle: BattleState;
+  resolveName: (driverNumber: number) => string;
+}) {
+  const context = battle.strategy_context;
+  return (
+    <details className={styles.evidence}>
+      <summary>Battle evidence</summary>
+      <p className={styles.summaryLine}>
+        Closest {battle.closest_interval_seconds.toFixed(2)}s ·{" "}
+        {battle.interval_history.length} timing samples ·{" "}
+        {battle.trend.toLowerCase().replace("_", " ")}
+      </p>
+      {context ? (
+        <AnalystBattleContext
+          context={context}
+          leadDriverNumber={battle.lead_driver_number}
+          chasingDriverNumber={battle.chasing_driver_number}
+          driverName={resolveName}
+        />
+      ) : (
+        <p className={styles.noContext}>
+          The Battle Engine published no strategy context at this cursor, so only the timing
+          summary above is available for this fight.
+        </p>
+      )}
+    </details>
+  );
+}
+
+function BattleCard({
+  battle,
+  drivers,
+  currentLap,
+  selectedDriver,
+  mode,
+  onSelectDriver,
+}: {
+  battle: BattleState;
+  drivers: Record<string, DriverRaceState>;
+  currentLap: number | null;
+  selectedDriver: number | null;
+  mode: RaceRoomMode;
+  onSelectDriver: (driverNumber: number) => void;
+}) {
+  const resolveName = (number: number) => driverName(drivers, number);
+  const leaderName = resolveName(battle.lead_driver_number);
+  const chaserName = resolveName(battle.chasing_driver_number);
+  const context = battle.strategy_context;
+
+  return (
+    <article
+      className={`${styles.card} ${styles[`intensity_${battle.intensity.toLowerCase()}`]}`}
+      aria-label={`Battle for position ${battle.lead_position}`}
+    >
+      <header>
+        <div>
+          <span>{battle.intensity}</span>
+          <h3>Battle for P{battle.lead_position}</h3>
+        </div>
+        <b>{battle.interval_seconds.toFixed(2)}s</b>
+      </header>
+      <div className={styles.matchup}>
+        <DriverButton
+          position={battle.lead_position}
+          name={leaderName}
+          tyre={tyreLabel(drivers[String(battle.lead_driver_number)], currentLap)}
+          selected={selectedDriver === battle.lead_driver_number}
+          onSelect={() => onSelectDriver(battle.lead_driver_number)}
+        />
+        <span className={styles.interval} aria-hidden>vs</span>
+        <DriverButton
+          position={battle.chasing_position}
+          name={chaserName}
+          tyre={tyreLabel(drivers[String(battle.chasing_driver_number)], currentLap)}
+          selected={selectedDriver === battle.chasing_driver_number}
+          onSelect={() => onSelectDriver(battle.chasing_driver_number)}
+        />
+      </div>
+      <p className={styles.meaning}>{trendText(battle, chaserName)}</p>
+      <div className={styles.tags}>
+        {battle.within_one_second ? <span>Within one second</span> : null}
+        {battle.train_size > 2 ? <span>{battle.train_size}-car train</span> : null}
+      </div>
+      {mode === "FAN" && context ? (
+        <FanBattleContext
+          context={context}
+          leadDriverNumber={battle.lead_driver_number}
+          chasingDriverNumber={battle.chasing_driver_number}
+          driverName={resolveName}
+        />
+      ) : null}
+      {mode === "ANALYST" ? <BattleEvidence battle={battle} resolveName={resolveName} /> : null}
+    </article>
+  );
+}
+
 export function BattleRail({
   battles,
   drivers,
@@ -72,63 +202,17 @@ export function BattleRail({
       </header>
       {ranked.length ? (
         <div className={styles.cards}>
-          {ranked.map((battle) => {
-            const leaderName = driverName(drivers, battle.lead_driver_number);
-            const chaserName = driverName(drivers, battle.chasing_driver_number);
-            const leaderTyre = tyreLabel(drivers[String(battle.lead_driver_number)], currentLap);
-            const chaserTyre = tyreLabel(drivers[String(battle.chasing_driver_number)], currentLap);
-            return (
-              <article
-                className={`${styles.card} ${styles[`intensity_${battle.intensity.toLowerCase()}`]}`}
-                key={battle.id}
-                aria-label={`Battle for position ${battle.lead_position}`}
-              >
-                <header>
-                  <div>
-                    <span>{battle.intensity}</span>
-                    <h3>Battle for P{battle.lead_position}</h3>
-                  </div>
-                  <b>{battle.interval_seconds.toFixed(2)}s</b>
-                </header>
-                <div className={styles.matchup}>
-                  <button
-                    type="button"
-                    aria-pressed={selectedDriver === battle.lead_driver_number}
-                    aria-label={`Select ${leaderName}`}
-                    onClick={() => onSelectDriver(battle.lead_driver_number)}
-                  >
-                    <strong>P{battle.lead_position}</strong>
-                    <span>{shortName(leaderName)}</span>
-                    {leaderTyre ? <small>{leaderTyre}</small> : null}
-                  </button>
-                  <span className={styles.interval} aria-hidden>vs</span>
-                  <button
-                    type="button"
-                    aria-pressed={selectedDriver === battle.chasing_driver_number}
-                    aria-label={`Select ${chaserName}`}
-                    onClick={() => onSelectDriver(battle.chasing_driver_number)}
-                  >
-                    <strong>P{battle.chasing_position}</strong>
-                    <span>{shortName(chaserName)}</span>
-                    {chaserTyre ? <small>{chaserTyre}</small> : null}
-                  </button>
-                </div>
-                <p className={styles.meaning}>{trendText(battle, chaserName)}</p>
-                <div className={styles.tags}>
-                  {battle.within_one_second ? <span>Within one second</span> : null}
-                  {battle.train_size > 2 ? <span>{battle.train_size}-car train</span> : null}
-                </div>
-                {mode === "ANALYST" ? (
-                  <details className={styles.evidence}>
-                    <summary>Battle evidence</summary>
-                    <p>
-                      Closest {battle.closest_interval_seconds.toFixed(2)}s · {battle.interval_history.length} timing samples · {battle.trend.toLowerCase().replace("_", " ")}
-                    </p>
-                  </details>
-                ) : null}
-              </article>
-            );
-          })}
+          {ranked.map((battle) => (
+            <BattleCard
+              key={battle.id}
+              battle={battle}
+              drivers={drivers}
+              currentLap={currentLap}
+              selectedDriver={selectedDriver}
+              mode={mode}
+              onSelectDriver={onSelectDriver}
+            />
+          ))}
         </div>
       ) : (
         <p className={styles.empty}>No sustained close fight is active right now.</p>

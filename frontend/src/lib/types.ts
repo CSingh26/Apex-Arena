@@ -367,6 +367,65 @@ export type BattleState = {
   lap_number: number | null;
   train_size: number;
   resolution_reason: string | null;
+  /**
+   * The Battle Engine's deterministic context for this fight, or `null` when
+   * the projection did not stand behind one at this cursor. A `null` here is
+   * "not published", never "nothing interesting"; the card degrades to the
+   * intensity-only presentation.
+   */
+  strategy_context?: StrategyBattleContext | null;
+};
+
+/**
+ * Why the engine ranked this battle where it did. Every component is a bounded
+ * integer contribution; `score` is their published total, not a recomputation.
+ */
+export type StrategyBattleProminence = {
+  interval: number;
+  persistence: number;
+  closing: number;
+  lead_position: number;
+  train: number;
+  remaining_distance: number;
+  team_relevance: number;
+  strategy_relevance: number;
+  score: number;
+  basis: "timing_pressure" | "green_timing_pressure" | "not_racing";
+};
+
+/**
+ * Context the Battle Engine publishes alongside a battle.
+ *
+ * Three fields are deliberately conservative and must never be read as facts
+ * about the racing:
+ *  - `attempt_evidence` and `championship_context` are pinned to the literal
+ *    `"unavailable"`. They mean the system cannot determine this, not that
+ *    there were no attempts or that the fight is championship-irrelevant.
+ *  - `observed_wing_open` is the only signal about DRS actually being used.
+ *    `within_one_second` is proximity and `drs_permission` is a track state;
+ *    neither is evidence that a driver used DRS.
+ */
+export type StrategyBattleContext = {
+  tyres: StrategyTyreContext[];
+  pace: StrategyRelativePaceContext | null;
+  duration_seconds: number | null;
+  closing: boolean;
+  train_members: number[];
+  same_reported_team: boolean | null;
+  remaining_laps: number | null;
+  /** Track state published by race control; `"unknown"` means undetermined. */
+  drs_permission: string;
+  /** Proximity only. Never evidence that DRS was used. */
+  within_one_second: boolean | null;
+  /** The only observed DRS-usage signal in this contract. */
+  observed_wing_open: boolean | null;
+  /** Pinned literal: the system cannot determine overtake attempts. */
+  attempt_evidence: "unavailable";
+  /** Pinned literal: the system cannot determine championship relevance. */
+  championship_context: "unavailable";
+  prominence: StrategyBattleProminence;
+  evidence: Record<string, StrategyEvidence>;
+  limitations: string[];
 };
 
 export type QualifyingIntelligence = {
@@ -399,6 +458,187 @@ export type ControlProjection = {
   history_truncated?: boolean;
 };
 
+/**
+ * Deterministic strategy contract mirrored from
+ * `backend/app/domain/strategy_situations.py`. Every field here is produced by
+ * the backend's bounded frame builder, so nullability is meaningful: a `null`
+ * means the system could not determine the value, never that it was omitted
+ * for brevity.
+ */
+export type StrategySituationKind =
+  | "stint_divergence"
+  | "relative_pace"
+  | "pit_window"
+  | "undercut_condition"
+  | "overcut_condition"
+  | "neutralized_pit_context"
+  | "extra_stop_consequence"
+  | "weather_change";
+
+export type StrategyCapabilityAvailability = "available" | "partial" | "unavailable" | "omitted";
+export type StrategySituationAvailability = "available" | "partial" | "unavailable";
+
+export type StrategyCapability = {
+  availability: StrategyCapabilityAvailability;
+  reason: string;
+};
+
+export type StrategyEvidenceRole =
+  | "weather"
+  | "stint"
+  | "lap"
+  | "pit"
+  | "position"
+  | "interval"
+  | "team"
+  | "control"
+  | "drs"
+  | "distance"
+  | "deletion";
+
+export type StrategyEvidenceBasis = "observed" | "approximate_lap_interval" | "inferred";
+
+export type StrategyEvidence = {
+  event_id: string;
+  sequence: number;
+  observed_at: string;
+  source: string;
+  session_key: string;
+  role: StrategyEvidenceRole;
+  family: string;
+  driver_number: number | null;
+  lap_number: number | null;
+  stint_number: number | null;
+  basis: StrategyEvidenceBasis;
+};
+
+export type StrategyTyreContext = {
+  driver_number: number;
+  compound: string | null;
+  stint_number: number | null;
+  age_laps: number | null;
+  age_basis: string;
+  stop_count: number;
+  stop_count_basis: "complete" | "retained_lower_bound";
+};
+
+export type StrategyPaceWindow = {
+  driver_number: number;
+  stint_number: number;
+  median_seconds: number;
+  range_seconds: [number, number];
+  sample_laps: number[];
+};
+
+export type StrategyRelativePaceContext = {
+  first: StrategyPaceWindow;
+  second: StrategyPaceWindow;
+  difference_seconds: number;
+  range_seconds: [number, number];
+  shared_conditions: "overlapping_green_samples";
+};
+
+export type StrategyPitWindowContext = {
+  loss_seconds: number;
+  loss_range_seconds: [number, number];
+  projected_gap_seconds: [number, number];
+  traffic: number[];
+  rank_range: [number, number] | null;
+  timing_basis: "observed" | "approximate_lap_interval";
+};
+
+export type StrategySituationPayload = {
+  tyres: StrategyTyreContext[];
+  age_offset_laps: number | null;
+  same_reported_team: boolean | null;
+  /** The backend never infers a plan; the literal records that fact. */
+  plan: "unknown";
+  pace: StrategyRelativePaceContext | null;
+  pit_window: StrategyPitWindowContext | null;
+  gap_seconds: number | null;
+  required_gain_seconds: number | null;
+  required_gain_range_seconds: [number, number] | null;
+  required_average_gain_seconds: [number, number] | null;
+  remaining_laps: number | null;
+  pit_anchor: string | null;
+  clean_laps_since_pit: number | null;
+  neutralization: string | null;
+  numeric_saving: null;
+  rainfall_before: boolean | null;
+  rainfall_now: boolean | null;
+  track_temperature_change: number | null;
+  air_temperature_change: number | null;
+  wind_speed_change: number | null;
+  wind_direction_change: number | null;
+  outcome: "unknown";
+  new_tyre_pace: "unknown";
+  warmup: "unknown";
+  rival_stop_timing: "unknown";
+};
+
+export type StrategySituation = {
+  situation_id: string;
+  revision_id: string;
+  kind: StrategySituationKind;
+  status: "active" | "withdrawn";
+  transition: "opened" | "revised" | "withdrawn";
+  superseded_revision_id: string | null;
+  participants: number[];
+  source_anchor: string;
+  source_sequence: number;
+  session_key: string;
+  sequence: number;
+  history_sequence: number;
+  analysis_time: string;
+  semantic_identity: string;
+  availability: StrategySituationAvailability;
+  payload: StrategySituationPayload;
+  evidence_keys: string[];
+  assumptions: string[];
+  limitations: string[];
+  observation_confidence: "observed" | "qualified";
+  implication_uncertainty: "unknown";
+};
+
+export type StrategyFrame = {
+  session_key: string;
+  sequence: number;
+  history_sequence: number;
+  history_event_id: string | null;
+  analysis_time: string;
+  semantic_identity: string;
+  clock_basis: "monotonic_consumed_source";
+  projection_status: "acknowledged_at_cursor" | "unavailable";
+  /** Always the eight `StrategySituationKind` keys. */
+  capabilities: Record<string, StrategyCapability>;
+  situations: StrategySituation[];
+  /** Keyed by `${event_id}:${role}`, closed over every situation evidence key. */
+  evidence: Record<string, StrategyEvidence>;
+  situations_truncated: boolean;
+  omitted_situations: number;
+  suppressed_events: number;
+  limitations: string[];
+};
+
+export type IntelligenceProjectionStatusValue =
+  | "unknown"
+  | "current"
+  | "pending"
+  | "historical_effects_unverified"
+  | "unavailable"
+  | "stale"
+  | "replay";
+
+export type IntelligenceProjection = {
+  status: IntelligenceProjectionStatusValue;
+  completed_through_sequence: number;
+  completed_source_sequence: number;
+  pending_source_sequence: number | null;
+  algorithm_version: string | null;
+  historical_effects_unverified: boolean;
+  failure_code: string | null;
+};
+
 export type SessionIntelligenceState = {
   control?: ControlProjection | null;
   session_key: string;
@@ -406,6 +646,8 @@ export type SessionIntelligenceState = {
   current_battles: BattleState[];
   recent_events: NormalizedRaceEvent[];
   qualifying: QualifyingIntelligence | null;
+  strategy_frame: StrategyFrame | null;
+  projection: IntelligenceProjection;
 };
 
 export type DriverRaceState = {
@@ -451,6 +693,8 @@ export type RaceState = {
   current_battles: BattleState[];
   recent_events: NormalizedRaceEvent[];
   qualifying_intelligence: QualifyingIntelligence | null;
+  /** Present once the strategy projection has acknowledged this cursor. */
+  strategy_frame?: StrategyFrame | null;
   last_updated_at: string | null;
   sequence_number: number;
   is_replay: boolean;
@@ -581,6 +825,56 @@ export type SessionTelemetryResponse = { telemetry: DriverTelemetryState };
 export type SessionLocationsResponse = { locations: SessionLocationState };
 export type SessionLocationSamplesResponse = { locations: SessionLocationSamplesState };
 export type SessionTrackResponse = { track: SessionTrackState };
+
+/**
+ * Retained historical car telemetry, mirroring `app/domain/telemetry.py`.
+ *
+ * Every channel on a sample is nullable and a missing channel stays missing.
+ * A chart must never substitute zero for an absent value — a flat zero brake
+ * trace is a fabricated fact, not an observation.
+ */
+export type TelemetryChannel = "speed" | "throttle" | "brake" | "rpm" | "gear" | "drs";
+
+export type TelemetryAvailability = "available" | "partial" | "unavailable";
+
+/** Published whenever availability is not `"available"`. */
+export type TelemetryReason =
+  | "no_telemetry_retained"
+  | "no_telemetry_for_lap"
+  | "telemetry_missing_for_some_drivers"
+  | "scan_limit_reached";
+
+export type TelemetrySample = {
+  sequence: number;
+  observed_at: string;
+  lap_number: number | null;
+  speed: number | null;
+  throttle: number | null;
+  brake: number | null;
+  rpm: number | null;
+  gear: number | null;
+  drs: boolean | null;
+};
+
+export type DriverTelemetrySeries = {
+  driver_number: number;
+  samples: TelemetrySample[];
+  /** Authoritative: only channels this driver actually published a value for. */
+  channels: string[];
+  samples_truncated: boolean;
+};
+
+export type TelemetryWindow = {
+  session_key: string;
+  availability: TelemetryAvailability;
+  /** Never `null` when availability is not `"available"`. */
+  reason: string | null;
+  lap_number: number | null;
+  drivers: DriverTelemetrySeries[];
+  units: Record<string, string>;
+  view_sequence: number;
+  scan_limited: boolean;
+};
 
 export type RoomStatus = "pending" | "ingesting" | "ready" | "live" | "replaying" | "paused" | "completed" | "failed" | "unavailable";
 export type RoomMode = "live" | "replay" | "archived";

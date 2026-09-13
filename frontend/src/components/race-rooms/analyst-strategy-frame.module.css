@@ -1,0 +1,139 @@
+.analyst {
+  display: grid;
+  gap: 16px;
+}
+
+.identitySection {
+  min-width: 0;
+}
+
+.visuallyHidden {
+  position: absolute;
+  overflow: hidden;
+  width: 1px;
+  height: 1px;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.identity {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px 16px;
+  margin: 0;
+  padding: 13px 16px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+}
+
+.identity > div {
+  min-width: 0;
+}
+
+.identity dt {
+  color: var(--faint);
+  font: 700 .55rem var(--font-mono, ui-monospace), monospace;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+}
+
+.identity dd {
+  margin: 4px 0 0;
+  color: var(--foreground);
+  font: 700 .74rem var(--font-mono, ui-monospace), monospace;
+}
+
+.identity dd span {
+  margin-left: 6px;
+  color: var(--muted);
+  font-weight: 650;
+}
+
+.wrap {
+  overflow-wrap: anywhere;
+}
+
+.heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.heading h3 {
+  margin: 0;
+  font: 800 .72rem var(--font-mono, ui-monospace), monospace;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+}
+
+.heading small {
+  color: var(--faint);
+  font: 700 .6rem var(--font-mono, ui-monospace), monospace;
+  text-transform: uppercase;
+}
+
+.cards {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  align-items: start;
+}
+
+.empty {
+  margin: 0;
+  padding: 18px;
+  border: 1px dashed var(--line-strong, var(--line));
+  border-radius: 8px;
+  color: var(--muted);
+  font-size: .78rem;
+  line-height: 1.55;
+}
+
+.quality {
+  padding: 13px 16px;
+  border: 1px dashed var(--line-strong, var(--line));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--apex-violet) 6%, var(--panel));
+}
+
+.quality h3 {
+  margin: 0 0 8px;
+  font: 800 .65rem var(--font-mono, ui-monospace), monospace;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+}
+
+.quality ul {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding-left: 18px;
+}
+
+.quality li {
+  color: var(--muted);
+  font-size: .74rem;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 1040px) {
+  .identity {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .cards {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 620px) {
+  .identity {
+    grid-template-columns: minmax(0, 1fr);
+    padding: 12px 13px;
+  }
+}

@@ -224,9 +224,7 @@ async def race_room_detail(room_slug: str, services: Services) -> RaceRoomDetail
         playback=await services.room_replay.with_session_clock(room.session_key, playback),
         circuit=circuit,
         weather=weather,
-        intelligence=SessionIntelligenceResponse.from_state(state).model_copy(
-            update={"projection": projection},
-        ),
+        intelligence=SessionIntelligenceResponse.from_state(state, projection),
         data_notice=notices[room.source_availability],
         diagnostics_available=(
             services.settings.app_env != "production" or services.settings.room_diagnostics_enabled

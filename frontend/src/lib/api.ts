@@ -29,6 +29,7 @@ import type {
   RaceEventCategory,
   HistoryDetailResponse,
   HistoryFamily,
+  TelemetryWindow,
 } from "@/lib/types";
 import { apiPath } from "@/lib/app-paths";
 
@@ -199,6 +200,29 @@ export function getSessionTelemetry(
 ): Promise<SessionTelemetryResponse> {
   return request<SessionTelemetryResponse>(
     `/sessions/${encodeURIComponent(sessionKey)}/drivers/${driverNumber}/telemetry`,
+    signal,
+  );
+}
+
+/**
+ * Retained historical car telemetry for one or two drivers.
+ *
+ * The backend bounds this read hard, so the caller decides when to spend it:
+ * pass a cursor to pin the window to the view sequence being rendered, and an
+ * `AbortSignal` so a superseded selection never resolves over a newer one.
+ */
+export function getSessionTelemetryHistory(
+  sessionKey: string,
+  drivers: number[],
+  options: { lapNumber?: number | null; cursor?: number | null } = {},
+  signal?: AbortSignal,
+): Promise<TelemetryWindow> {
+  const params = new URLSearchParams();
+  drivers.forEach((driver) => params.append("driver", String(driver)));
+  if (options.lapNumber != null) params.set("lap", String(options.lapNumber));
+  if (options.cursor != null) params.set("cursor", String(options.cursor));
+  return request<TelemetryWindow>(
+    `/sessions/${encodeURIComponent(sessionKey)}/telemetry-history?${params}`,
     signal,
   );
 }

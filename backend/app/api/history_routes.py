@@ -14,6 +14,7 @@ from app.services.history_details import (
     DetailSelectionError,
     DetailViewChangedError,
 )
+from app.services.telemetry_history import TelemetrySelectionError
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Factual history"])
@@ -115,3 +116,34 @@ async def room_history_detail(
             progress=services.intelligence_progress,
         ),
     )
+
+
+@router.get("/api/v1/sessions/{session_key}/telemetry-history")
+async def session_telemetry_history(
+    session_key: str,
+    request: Request,
+    services: Annotated[object, Depends(get_services)],
+    driver: Annotated[list[int], Query(min_length=1, max_length=2)],
+    lap: Annotated[int | None, Query(ge=0)] = None,
+    cursor: Annotated[int | None, Query(ge=0)] = None,
+):
+    """Bounded retained car telemetry for one or two drivers."""
+    try:
+        window = await _request_operation(
+            request,
+            services.telemetry_history.read(
+                session_key, drivers=driver, lap_number=lap, cursor=cursor
+            ),
+        )
+    except TelemetrySelectionError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except Exception as exc:
+        logger.warning("Telemetry read unavailable error=%s", type(exc).__name__)
+        raise HTTPException(
+            503,
+            "Telemetry is temporarily unavailable; retry shortly",
+            headers={"Retry-After": "1"},
+        ) from exc
+    if window is None:
+        return Response(status_code=204)
+    return JSONResponse(window.model_dump(mode="json"))

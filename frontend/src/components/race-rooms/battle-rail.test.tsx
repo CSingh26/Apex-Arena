@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
 import { BattleRail } from "./battle-rail";
+import { battleContext } from "@/test/strategy-fixtures";
 import type { BattleState, DriverRaceState } from "@/lib/types";
 
 const battle: BattleState = {
@@ -97,5 +98,61 @@ describe("BattleRail", () => {
   it("has a calm empty state when no battle is active", () => {
     render(<BattleRail battles={[]} drivers={drivers} currentLap={22} selectedDriver={null} mode="FAN" onSelectDriver={vi.fn()} />);
     expect(screen.getByText(/No sustained close fight/i)).toBeVisible();
+  });
+
+  it("surfaces the engine's context in plain words in fan mode", () => {
+    const withContext: BattleState = {
+      ...battle,
+      strategy_context: battleContext({
+        closing: true,
+        within_one_second: true,
+        same_reported_team: false,
+        duration_seconds: 240,
+        remaining_laps: 9,
+      }),
+    };
+    render(<BattleRail battles={[withContext]} drivers={drivers} currentLap={22} selectedDriver={null} mode="FAN" onSelectDriver={vi.fn()} />);
+
+    const reasons = screen.getByRole("list", { name: "Why this battle matters" });
+    expect(within(reasons).getByText(/taking time out of the car ahead/)).toBeVisible();
+    expect(within(reasons).getByText(/inside a second of each other/)).toBeVisible();
+    expect(within(reasons).getByText("This fight has been running for 4 minutes.")).toBeVisible();
+    expect(screen.getByText(/We cannot tell whether a move has been attempted/)).toBeVisible();
+  });
+
+  it("keeps the full published context behind the analyst evidence drawer", async () => {
+    const withContext: BattleState = {
+      ...battle,
+      strategy_context: battleContext({ closing: true, observed_wing_open: true }),
+    };
+    render(<BattleRail battles={[withContext]} drivers={drivers} currentLap={22} selectedDriver={null} mode="ANALYST" onSelectDriver={vi.fn()} />);
+
+    await userEvent.click(screen.getByText("Battle evidence"));
+    expect(screen.getByRole("heading", { name: /^Prominence/ })).toBeVisible();
+    expect(screen.getByText("Overtake attempts")).toBeVisible();
+    expect(screen.getByText("Championship relevance")).toBeVisible();
+    // An observed open wing is the only real DRS-usage signal, and it reads
+    // as an observation rather than as the driver attacking with DRS.
+    expect(screen.getByText("Rear wing observed open")).toBeVisible();
+    expect(screen.getByText("Yes")).toBeVisible();
+    expect(screen.queryByText(/DRS attack/i)).not.toBeInTheDocument();
+  });
+
+  it("does not show context reasons to fans when the engine published none", () => {
+    render(<BattleRail battles={[battle]} drivers={drivers} currentLap={22} selectedDriver={null} mode="FAN" onSelectDriver={vi.fn()} />);
+
+    expect(screen.queryByRole("list", { name: "Why this battle matters" })).not.toBeInTheDocument();
+    expect(screen.queryByText(/We cannot tell/)).not.toBeInTheDocument();
+    // The intensity-only card is intact rather than blank or errored.
+    expect(screen.getByRole("heading", { name: "Battle for P4" })).toBeVisible();
+    expect(screen.getByText("0.72s")).toBeVisible();
+  });
+
+  it("says the engine published no context rather than showing an empty drawer", async () => {
+    render(<BattleRail battles={[battle]} drivers={drivers} currentLap={22} selectedDriver={null} mode="ANALYST" onSelectDriver={vi.fn()} />);
+
+    await userEvent.click(screen.getByText("Battle evidence"));
+    expect(screen.getByText(/published no strategy context at this cursor/)).toBeVisible();
+    expect(screen.queryByRole("heading", { name: /^Prominence/ })).not.toBeInTheDocument();
   });
 });

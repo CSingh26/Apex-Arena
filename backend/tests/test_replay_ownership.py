@@ -491,8 +491,14 @@ async def test_room_contention_does_not_hold_playback_or_starve_healthy_owner(
 ):
     repository, room = sql_replay
     token = uuid4()
+    # The holder below keeps a row lock for the whole block, so a contended
+    # operation that actually blocked would never return inside it. Any finite
+    # deadline proves non-blocking; this one clears real SQL latency so a busy
+    # machine cannot report starvation that did not happen.
+    contended_deadline = 2
+    healthy_lease = 5
     if healthy:
-        assert await repository.claim_replay(room.id, token, lease_seconds=0.5)
+        assert await repository.claim_replay(room.id, token, lease_seconds=healthy_lease)
     async with repository.database.session_factory() as holder:
         await holder.execute(
             select(RaceRoomRecord).where(RaceRoomRecord.id == room.id).with_for_update()
@@ -502,11 +508,12 @@ async def test_room_contention_does_not_hold_playback_or_starve_healthy_owner(
             if operation == "claim"
             else repository.pause_orphaned_running_rows()
         )
-        result = await asyncio.wait_for(action, 0.2)
+        result = await asyncio.wait_for(action, contended_deadline)
         assert result == 0
         if healthy:
             assert await asyncio.wait_for(
-                repository.renew_replay(room.id, token, lease_seconds=0.5), 0.2
+                repository.renew_replay(room.id, token, lease_seconds=healthy_lease),
+                contended_deadline,
             )
         await holder.rollback()
     playback, stored_room = await records(repository, room)
