@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
 import sys
 
 from app.cli.safe_errors import format_safe_cli_error
@@ -13,6 +14,8 @@ from app.core.logging import configure_logging
 from app.core.settings import Settings
 from app.services.container import AppServices
 from app.services.locations import LocationUnavailableError
+
+logger = logging.getLogger(__name__)
 
 
 def parser() -> argparse.ArgumentParser:
@@ -32,13 +35,27 @@ def parser() -> argparse.ArgumentParser:
         help="Override the per-driver downsample interval (default from settings).",
     )
     command.add_argument("--rebuild-geometry-only", action="store_true")
+    command.add_argument(
+        "--all-sessions",
+        action="store_true",
+        help="Rebuild geometry for every session with stored samples.",
+    )
     command.add_argument("--reset", action="store_true", help="Drop stored samples first.")
     command.add_argument("--json-summary", action="store_true")
     return command
 
 
 def validate_args(args: argparse.Namespace) -> None:
-    if sum(bool(value) for value in (args.session_key, args.room_slug)) != 1:
+    if args.all_sessions:
+        if args.session_key or args.room_slug:
+            raise ValueError("--all-sessions cannot be combined with a single session selector")
+        if not args.rebuild_geometry_only:
+            # Refetching every session's whole series is a very different and
+            # far more expensive operation than re-deriving stored geometry.
+            raise ValueError("--all-sessions is only supported with --rebuild-geometry-only")
+        if args.reset:
+            raise ValueError("--all-sessions refuses --reset; it never drops stored samples")
+    elif sum(bool(value) for value in (args.session_key, args.room_slug)) != 1:
         raise ValueError("Specify exactly one of --session-key or --room-slug")
     if args.max_minutes is not None and args.max_minutes <= 0:
         raise ValueError("--max-minutes must be positive")
@@ -55,6 +72,38 @@ async def resolve_session_key(services: AppServices, args: argparse.Namespace) -
     return str(room.session_key)
 
 
+async def rebuild_all_geometry(services, *, json_summary: bool) -> int:
+    """Re-derive every stored session's outline, reporting each result.
+
+    One session failing must not abandon the rest: a circuit whose samples
+    cannot support an outline is a fact about that session, not a reason to
+    leave every other one stale.
+    """
+    ingestion = services.location_ingestion
+    keys = await services.location_repository.session_keys()
+    results: list[dict[str, object]] = []
+    for session_key in keys:
+        try:
+            start, end = await ingestion.resolve_window(session_key, None, None)
+            geometry = await ingestion.rebuild_geometry(session_key, start, end)
+            points = len(geometry.path) if geometry else 0
+            results.append({"session_key": session_key, "track_points": points})
+        except Exception as exc:
+            logger.warning(
+                "location_geometry_rebuild_failed session_key=%s error=%s",
+                session_key,
+                type(exc).__name__,
+            )
+            results.append({"session_key": session_key, "error": type(exc).__name__})
+    if json_summary:
+        print(json.dumps({"sessions": results}, sort_keys=True, default=str))
+    else:
+        for row in results:
+            detail = row.get("error") or f"track_points={row['track_points']}"
+            print(f"Location geometry session={row['session_key']} {detail}")
+    return 0
+
+
 async def run(args: argparse.Namespace) -> int:
     validate_args(args)
     settings = Settings(app_process_role="ingestor")  # type: ignore[call-arg]
@@ -64,6 +113,8 @@ async def run(args: argparse.Namespace) -> int:
     # have nothing to do here and must not fan archived rows into Redis.
     services.processor.consumers = []
     try:
+        if args.all_sessions:
+            return await rebuild_all_geometry(services, json_summary=args.json_summary)
         session_key = await resolve_session_key(services, args)
         ingestion = services.location_ingestion
         if args.sample_interval_ms is not None:

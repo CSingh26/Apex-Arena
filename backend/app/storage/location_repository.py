@@ -73,6 +73,22 @@ class SqlSessionLocationRepository:
                 ).scalar_one()
             )
 
+    async def session_keys(self, limit: int = 500) -> list[str]:
+        """Every session with stored samples, so a rebuild needs no race key.
+
+        Naming a session in a deployment command hard-codes one Grand Prix into
+        the environment and leaves every other circuit on whatever outline it
+        was last written with.
+        """
+        statement = (
+            select(SessionLocationSampleRecord.session_key)
+            .distinct()
+            .order_by(SessionLocationSampleRecord.session_key)
+            .limit(limit)
+        )
+        async with self.database.session_factory() as session:
+            return [str(row[0]) for row in (await session.execute(statement)).all()]
+
     async def counts_for_sessions(self, session_keys: list[str]) -> dict[str, int]:
         if not session_keys:
             return {}

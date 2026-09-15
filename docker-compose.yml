@@ -64,6 +64,45 @@ services:
       postgres:
         condition: service_healthy
 
+  # Re-derives every stored circuit outline from its GPS samples after
+  # migrations. Deliberately not tied to one session key, and deliberately not a
+  # dependency of the backend: it can call OpenF1 once per session, and a slow or
+  # failed rebuild must never hold the API back from starting. A session whose
+  # samples cannot support an outline is reported and skipped, not fatal.
+  track-geometry:
+    image: apex-arena-backend:local
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: "no"
+    env_file:
+      - .env
+    environment:
+      APP_ENV: local
+      APP_PROCESS_ROLE: ingestor
+      OPENF1_INGESTION_MODE: rest
+      OPENF1_LIVE_AUTO_CONNECT: "false"
+      RECENT_SESSION_RECONCILIATION_ENABLED: "false"
+      RECENT_SESSION_AUTO_BACKFILL_ENABLED: "false"
+      DATABASE_URL: postgresql://${POSTGRES_USER:-apex}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-apex_arena}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      REDIS_URL: redis://redis:6379/0
+      REDIS_PORT: 6379
+    command:
+      [
+        "python",
+        "-m",
+        "app.cli.backfill_locations",
+        "--all-sessions",
+        "--rebuild-geometry-only",
+      ]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+
   backend:
     image: apex-arena-backend:local
     build:
