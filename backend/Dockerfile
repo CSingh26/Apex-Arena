@@ -7,6 +7,13 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
+# The slim base lags Debian security updates between image rebuilds, and the
+# release scan fails on any fixed CRITICAL package. Apply pending OS security
+# fixes at build time rather than waiting for the upstream tag to be refreshed.
+RUN apt-get update \
+    && apt-get upgrade -y --no-install-recommends \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN addgroup --system apex && adduser --system --ingroup apex apex
 
 COPY pyproject.toml ./
