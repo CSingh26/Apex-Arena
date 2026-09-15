@@ -93,3 +93,115 @@ async def test_an_empty_database_is_a_quiet_success(capsys):
     services, ingestion = services_for([])
     assert await rebuild_all_geometry(services, json_summary=False) == 0
     assert ingestion.rebuilt == []
+
+
+# --- Every started room gets its GPS series --------------------------------
+
+from datetime import UTC, datetime, timedelta  # noqa: E402
+
+from app.cli.backfill_locations import backfill_all_rooms, room_session_keys  # noqa: E402
+from app.services.locations import LocationUnavailableError  # noqa: E402
+
+NOW = datetime.now(UTC)
+
+
+def test_all_rooms_needs_no_session_key():
+    validate_args(args("--all-rooms"))
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ("--all-rooms", "--session-key", "11361"),
+        ("--all-rooms", "--all-sessions"),
+        ("--all-rooms", "--rebuild-geometry-only"),
+        ("--all-rooms", "--reset"),
+        # A partial series would look loaded and never be completed later.
+        ("--all-rooms", "--max-minutes", "5"),
+    ],
+)
+def test_unsafe_or_ambiguous_all_rooms_requests_are_refused(argv):
+    with pytest.raises(ValueError):
+        validate_args(args(*argv))
+
+
+def room(key, *, started=True):
+    return SimpleNamespace(
+        session_key=key,
+        scheduled_start=NOW - timedelta(days=1) if started else NOW + timedelta(days=3),
+    )
+
+
+class RoomRepository:
+    def __init__(self, rooms, page_size_seen):
+        self.rooms = rooms
+        self.page_size_seen = page_size_seen
+
+    async def list_rooms(self, *, sort, limit, offset):
+        self.page_size_seen.append(limit)
+        return self.rooms[offset : offset + limit], len(self.rooms)
+
+
+class LoadingIngestion:
+    def __init__(self, unavailable=(), failing=()):
+        self.unavailable = set(unavailable)
+        self.failing = set(failing)
+        self.loaded = []
+
+    async def ingest_session(self, session_key):
+        if session_key in self.unavailable:
+            raise LocationUnavailableError("no data")
+        if session_key in self.failing:
+            raise RuntimeError("synthetic outage")
+        self.loaded.append(session_key)
+        return SimpleNamespace(total_samples=50_000, track_points=940)
+
+
+def room_services(rooms, *, loaded=(), unavailable=(), failing=()):
+    ingestion = LoadingIngestion(unavailable, failing)
+    stored = set(loaded)
+
+    async def count(key):
+        return 10 if key in stored else 0
+
+    services = SimpleNamespace(
+        room_repository=RoomRepository(rooms, []),
+        location_repository=SimpleNamespace(count=count),
+        location_ingestion=ingestion,
+    )
+    return services, ingestion
+
+
+async def test_every_page_of_rooms_is_visited_not_just_the_first():
+    rooms = [room(str(index)) for index in range(250)]
+    services, _ = room_services(rooms)
+    keys = await room_session_keys(services, now=NOW)
+    assert len(keys) == 250
+
+
+async def test_rooms_that_have_not_started_are_not_requested():
+    services, _ = room_services([room("past"), room("future", started=False)])
+    assert await room_session_keys(services, now=NOW) == ["past"]
+
+
+async def test_rooms_sharing_a_session_are_loaded_once():
+    services, ingestion = room_services([room("11361"), room("11361")])
+    await backfill_all_rooms(services, json_summary=False)
+    assert ingestion.loaded == ["11361"]
+
+
+async def test_only_rooms_missing_gps_are_loaded_so_reruns_resume(capsys):
+    services, ingestion = room_services(
+        [room("done"), room("missing"), room("empty"), room("broken")],
+        loaded={"done"},
+        unavailable={"empty"},
+        failing={"broken"},
+    )
+    assert await backfill_all_rooms(services, json_summary=False) == 0
+
+    assert ingestion.loaded == ["missing"]
+    output = capsys.readouterr().out
+    assert "session=done status=already_loaded" in output
+    assert "session=missing status=loaded samples=50000 track_points=940" in output
+    assert "session=empty status=no_provider_data" in output
+    assert "session=broken status=failed error=RuntimeError" in output

@@ -8,6 +8,7 @@ import asyncio
 import json
 import logging
 import sys
+from datetime import UTC, datetime
 
 from app.cli.safe_errors import format_safe_cli_error
 from app.core.logging import configure_logging
@@ -40,12 +41,32 @@ def parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Rebuild geometry for every session with stored samples.",
     )
+    command.add_argument(
+        "--all-rooms",
+        action="store_true",
+        help=(
+            "Load the full GPS series and trace the track for every started race room "
+            "that has no stored samples yet."
+        ),
+    )
     command.add_argument("--reset", action="store_true", help="Drop stored samples first.")
     command.add_argument("--json-summary", action="store_true")
     return command
 
 
 def validate_args(args: argparse.Namespace) -> None:
+    if args.all_rooms:
+        if args.session_key or args.room_slug or args.all_sessions:
+            raise ValueError("--all-rooms cannot be combined with another session selector")
+        if args.rebuild_geometry_only:
+            raise ValueError("--all-rooms loads samples; use --all-sessions to re-derive geometry")
+        if args.reset:
+            raise ValueError("--all-rooms refuses --reset; it only fills rooms with no samples")
+        if args.max_minutes is not None:
+            # A partial series would count as "already has samples" and never be
+            # completed by a later run.
+            raise ValueError("--all-rooms refuses --max-minutes; it stores whole sessions only")
+        return
     if args.all_sessions:
         if args.session_key or args.room_slug:
             raise ValueError("--all-sessions cannot be combined with a single session selector")
@@ -70,6 +91,81 @@ async def resolve_session_key(services: AppServices, args: argparse.Namespace) -
     if room is None or room.session_key is None:
         raise ValueError(f"No provider session is bound to room {args.room_slug}")
     return str(room.session_key)
+
+
+ROOM_PAGE_SIZE = 100
+
+
+async def room_session_keys(services, *, now: datetime) -> list[str]:
+    """Distinct provider sessions behind every room that has already started.
+
+    A room that has not started cannot have GPS yet, so asking the provider for
+    it only spends requests and records a misleading failure.
+    """
+    keys: list[str] = []
+    offset = 0
+    while True:
+        rooms, total = await services.room_repository.list_rooms(
+            sort="race_date_asc", limit=ROOM_PAGE_SIZE, offset=offset
+        )
+        for room in rooms:
+            if room.session_key and room.scheduled_start and room.scheduled_start <= now:
+                keys.append(str(room.session_key))
+        offset += len(rooms)
+        if not rooms or offset >= total:
+            break
+    return list(dict.fromkeys(keys))
+
+
+async def backfill_all_rooms(services, *, json_summary: bool) -> int:
+    """Give every started room its GPS series and traced track.
+
+    The completed-room backfill keeps only the latest fix per driver, so without
+    this only rooms loaded by hand get a map. Rooms that already have samples are
+    skipped, which makes repeated runs cheap and lets an interrupted run resume.
+    A session the provider has no location data for is reported, not fatal.
+    """
+    ingestion = services.location_ingestion
+    keys = await room_session_keys(services, now=datetime.now(UTC))
+    results: list[dict[str, object]] = []
+    for session_key in keys:
+        if await services.location_repository.count(session_key) > 0:
+            results.append({"session_key": session_key, "status": "already_loaded"})
+            continue
+        try:
+            summary = await ingestion.ingest_session(session_key)
+            results.append(
+                {
+                    "session_key": session_key,
+                    "status": "loaded",
+                    "samples": summary.total_samples,
+                    "track_points": summary.track_points,
+                }
+            )
+        except LocationUnavailableError:
+            results.append({"session_key": session_key, "status": "no_provider_data"})
+        except Exception as exc:
+            logger.warning(
+                "location_room_backfill_failed session_key=%s error=%s",
+                session_key,
+                type(exc).__name__,
+            )
+            results.append(
+                {"session_key": session_key, "status": "failed", "error": type(exc).__name__}
+            )
+    if json_summary:
+        print(json.dumps({"rooms": results}, sort_keys=True, default=str))
+    else:
+        for row in results:
+            extra = (
+                f" samples={row['samples']} track_points={row['track_points']}"
+                if row["status"] == "loaded"
+                else f" error={row['error']}"
+                if row["status"] == "failed"
+                else ""
+            )
+            print(f"Location room session={row['session_key']} status={row['status']}{extra}")
+    return 0
 
 
 async def rebuild_all_geometry(services, *, json_summary: bool) -> int:
@@ -113,6 +209,8 @@ async def run(args: argparse.Namespace) -> int:
     # have nothing to do here and must not fan archived rows into Redis.
     services.processor.consumers = []
     try:
+        if args.all_rooms:
+            return await backfill_all_rooms(services, json_summary=args.json_summary)
         if args.all_sessions:
             return await rebuild_all_geometry(services, json_summary=args.json_summary)
         session_key = await resolve_session_key(services, args)

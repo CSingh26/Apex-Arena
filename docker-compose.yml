@@ -64,7 +64,7 @@ services:
       postgres:
         condition: service_healthy
 
-  # Re-derives every stored circuit outline from its GPS samples after
+  # Loads missing GPS and re-derives every circuit outline after
   # migrations. Deliberately not tied to one session key, and deliberately not a
   # dependency of the backend: it can call OpenF1 once per session, and a slow or
   # failed rebuild must never hold the API back from starting. A session whose
@@ -89,13 +89,13 @@ services:
       POSTGRES_PORT: 5432
       REDIS_URL: redis://redis:6379/0
       REDIS_PORT: 6379
+    # Load GPS for any started room that has none, then re-derive every stored
+    # outline. Rooms already loaded are skipped, so later starts are cheap.
     command:
       [
-        "python",
-        "-m",
-        "app.cli.backfill_locations",
-        "--all-sessions",
-        "--rebuild-geometry-only",
+        "sh",
+        "-c",
+        "python -m app.cli.backfill_locations --all-rooms && python -m app.cli.backfill_locations --all-sessions --rebuild-geometry-only",
       ]
     depends_on:
       migrate:
