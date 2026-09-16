@@ -60,12 +60,19 @@ class WorkflowValidationError(ValueError):
 MANDATORY_JOBS = frozenset(
     {"backend", "frontend", "containers", "end-to-end", "deployment-validation"}
 )
+# `changes` is a fast, unconditional change-detection job (no quality gate of
+# its own) that publish's matrix reads via needs.changes.outputs.* - it must
+# be a dependency for that context to resolve, alongside every mandatory gate.
+PUBLISH_NEEDS = MANDATORY_JOBS | {"changes"}
 OPTIONAL_DEPLOYMENT_JOB = "deploy-vercel-frontend"
 PUBLISH_REF_CONDITION = (
     "github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')"
 )
+# Every component publishes on a tag build; on main, only components whose
+# own matrix.changed evaluated true (backend/frontend are hardcoded "true",
+# postgres/redis derive from needs.changes.outputs.*) publish.
 COMPONENT_CONDITION = (
-    "startsWith(github.ref, 'refs/tags/v') || matrix.component == 'backend'"
+    "startsWith(github.ref, 'refs/tags/v') || matrix.changed == 'true'"
 )
 SYNTHETIC_PASSWORD = "task24-synthetic"
 CI_DATABASE = "apex_e2e_ci"
@@ -172,10 +179,10 @@ def validate_workflow(data: Mapping[str, Any], repo_root: pathlib.Path) -> None:
         raise WorkflowValidationError("publish needs contains duplicate job ids")
     if OPTIONAL_DEPLOYMENT_JOB in publish_needs:
         raise WorkflowValidationError("optional deployment must not gate publish")
-    if publish_needs != MANDATORY_JOBS:
+    if publish_needs != PUBLISH_NEEDS:
         raise WorkflowValidationError(
-            "publish must need exactly the mandatory jobs: "
-            f"expected {sorted(MANDATORY_JOBS)}, got {sorted(publish_needs)}"
+            "publish must need exactly the mandatory jobs plus changes: "
+            f"expected {sorted(PUBLISH_NEEDS)}, got {sorted(publish_needs)}"
         )
 
     for mandatory in MANDATORY_JOBS:
@@ -223,13 +230,16 @@ def validate_workflow(data: Mapping[str, Any], repo_root: pathlib.Path) -> None:
                 "publish matrix component must be a unique string"
             )
         components[component] = row
-    if components.keys() != {"backend", "frontend"}:
+    if components.keys() != {"backend", "frontend", "postgres", "redis"}:
         raise WorkflowValidationError(
-            f"publish matrix components must be backend/frontend, got {sorted(components)}"
+            "publish matrix components must be backend/frontend/postgres/redis, "
+            f"got {sorted(components)}"
         )
     expected_builds = {
         "backend": ("backend", "backend/Dockerfile"),
         "frontend": ("frontend", "frontend/Dockerfile"),
+        "postgres": ("deploy/docker/postgres", "deploy/docker/postgres/Dockerfile"),
+        "redis": ("deploy/docker/redis", "deploy/docker/redis/Dockerfile"),
     }
     for component, (expected_context, expected_dockerfile) in expected_builds.items():
         row = components[component]

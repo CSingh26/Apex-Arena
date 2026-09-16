@@ -46,3 +46,4 @@ tmp/
 .private/
 docs/day-2*.md
 docs/day-4*.md
+.migration-work
