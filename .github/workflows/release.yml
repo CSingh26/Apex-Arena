@@ -423,19 +423,25 @@ jobs:
     strategy:
       matrix:
         include:
+          # amd64 only: Railway (the only real deployment target for every
+          # one of these images) is amd64-only, and QEMU-emulated arm64
+          # builds under buildx are flaky - npm ci and Alpine's package
+          # tooling have both been seen crashing under emulation
+          # ("qemu: uncaught target signal 4, Illegal instruction, core
+          # dumped") without ever failing the run cleanly, just hanging it.
           - component: backend
             context: backend
             dockerfile: backend/Dockerfile
             image: ghcr.io/csingh26/apex-arena-backend
             changed: "true"
-            platforms: linux/amd64,linux/arm64
+            platforms: linux/amd64
             build_args: ""
           - component: frontend
             context: frontend
             dockerfile: frontend/Dockerfile
             image: ghcr.io/csingh26/apex-arena-frontend
             changed: "true"
-            platforms: linux/amd64,linux/arm64
+            platforms: linux/amd64
             build_args: |
               NEXT_PUBLIC_APP_NAME=Apex Arena
               NEXT_PUBLIC_APP_URL=http://localhost:3417
@@ -445,8 +451,7 @@ jobs:
             dockerfile: deploy/docker/postgres/Dockerfile
             image: ghcr.io/csingh26/apex-arena-postgres
             changed: ${{ needs.changes.outputs.postgres }}
-            # The Postgres image is pinned to the volume's glibc initdb; keep
-            # this single-arch so an arm64 build is never accidentally used.
+            # Also pinned to the volume's glibc initdb - never build arm64.
             platforms: linux/amd64
             build_args: ""
           - component: redis
@@ -454,12 +459,10 @@ jobs:
             dockerfile: deploy/docker/redis/Dockerfile
             image: ghcr.io/csingh26/apex-arena-redis
             changed: ${{ needs.changes.outputs.redis }}
-            platforms: linux/amd64,linux/arm64
+            platforms: linux/amd64
             build_args: ""
     steps:
       - uses: actions/checkout@v6
-        if: startsWith(github.ref, 'refs/tags/v') || matrix.changed == 'true'
-      - uses: docker/setup-qemu-action@v4
         if: startsWith(github.ref, 'refs/tags/v') || matrix.changed == 'true'
       - uses: docker/setup-buildx-action@v4
         if: startsWith(github.ref, 'refs/tags/v') || matrix.changed == 'true'
