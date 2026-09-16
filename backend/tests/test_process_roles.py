@@ -56,8 +56,12 @@ def test_combined_role_takes_the_singleton_lease_before_ingesting(
     start.assert_awaited_once()
 
 
-def test_combined_role_refuses_to_ingest_without_the_lease(settings: Settings) -> None:
-    """A second combined instance must not open a duplicate MQTT subscription."""
+def test_combined_role_serves_traffic_while_waiting_for_the_lease(settings: Settings) -> None:
+    """A second combined instance must still serve traffic and pass its health
+    check - refusing to start would deadlock a Railway rolling deploy, which
+    only retires the outgoing instance once the incoming one is healthy. It
+    must still never open a duplicate MQTT subscription before it actually
+    holds the lease."""
     combined = settings_with(
         settings,
         app_process_role="combined",
@@ -68,13 +72,13 @@ def test_combined_role_refuses_to_ingest_without_the_lease(settings: Settings) -
             "app.services.container.Database.acquire_ingestor_lease",
             new_callable=AsyncMock,
             return_value=False,
-        ),
+        ) as lease,
         patch("app.main.AppServices.start_live_services", new_callable=AsyncMock) as start,
-        pytest.raises(RuntimeError, match="singleton lease"),
     ):
-        with TestClient(create_app(combined)):
-            pass
+        with TestClient(create_app(combined)) as client:
+            assert client.get("/health/live").status_code == 200
 
+    lease.assert_awaited()
     start.assert_not_awaited()
 
 

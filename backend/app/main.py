@@ -39,18 +39,14 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
             settings.live_worker_enabled or settings.recent_session_reconciliation_enabled
         )
         try:
-            if worker_enabled:
-                # Combined instances share the dedicated ingestor's singleton lease.
-                if not await services.database.acquire_ingestor_lease():
-                    raise RuntimeError("Another Apex Arena ingestor owns the singleton lease")
-                await services.start_intelligence_recovery()
             if settings.app_process_role in {"api", "combined", "all"}:
                 await services.reconcile_interrupted_ingestion_runs()
                 await services.start_replay_recovery()
-            if settings.app_process_role in {"combined", "all"}:
-                if settings.live_worker_enabled:
-                    await services.start_live_services()
-                await services.start_recent_reconciliation()
+            if worker_enabled:
+                # Combined instances share the dedicated ingestor's singleton
+                # lease. Never fail startup on a busy lease - see
+                # start_worker_duties_when_leased for why.
+                await services.start_worker_duties_when_leased()
             yield
         finally:
             await services.close()

@@ -270,6 +270,47 @@ class AppServices:
         self._replay_reconciliation_task: asyncio.Task[None] | None = None
         self._intelligence_recovery_task: asyncio.Task[None] | None = None
         self._intelligence_recovery_cursor = ""
+        self._lease_retry_task: asyncio.Task[None] | None = None
+
+    async def start_worker_duties_when_leased(self) -> None:
+        """Acquire the singleton ingestor lease and start worker duties once held.
+
+        Never blocks or raises on a busy lease: during a Railway rolling
+        deploy, the incoming instance boots while the outgoing one still
+        holds the lease, and Railway only retires the outgoing instance once
+        the incoming one reports healthy. Raising here would deadlock that
+        handoff forever. Instead, worker duties start immediately when the
+        lease is free (the common case), or a background retry picks it up
+        once the outgoing instance releases it - this instance's own health
+        check and API traffic are never gated on holding it.
+        """
+        if await self.database.acquire_ingestor_lease():
+            await self._start_worker_duties()
+            return
+        if self._lease_retry_task is None or self._lease_retry_task.done():
+            self._lease_retry_task = asyncio.create_task(
+                self._await_lease_and_start_worker_duties(), name="ingestor-lease-retry"
+            )
+
+    async def _start_worker_duties(self) -> None:
+        await self.start_intelligence_recovery()
+        if self.settings.live_worker_enabled:
+            await self.start_live_services()
+        await self.start_recent_reconciliation()
+
+    async def _await_lease_and_start_worker_duties(self) -> None:
+        delay = 1.0
+        while True:
+            try:
+                if await self.database.acquire_ingestor_lease():
+                    await self._start_worker_duties()
+                    return
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning("Ingestor lease retry failed error=%s", type(exc).__name__)
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, 30.0)
 
     async def start_intelligence_recovery(self) -> None:
         """Only the existing singleton worker may sweep pending critical work."""
@@ -411,6 +452,11 @@ class AppServices:
 
     async def close(self) -> None:
         await self.history_details.close()
+        if self._lease_retry_task is not None:
+            self._lease_retry_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._lease_retry_task
+            self._lease_retry_task = None
         if self._intelligence_recovery_task is not None:
             self._intelligence_recovery_task.cancel()
             with suppress(asyncio.CancelledError):
