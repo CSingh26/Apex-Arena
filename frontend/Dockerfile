@@ -27,7 +27,20 @@ ENV NODE_ENV=production \
     PORT=3000
 
 WORKDIR /app
+
+# The base image lags Alpine security updates between rebuilds, same as the
+# backend's Debian base. Apply pending package fixes here rather than waiting
+# on the upstream tag to refresh.
+RUN apk update && apk upgrade --no-cache
+
 RUN addgroup --system --gid 1001 nodejs && adduser --system --uid 1001 nextjs
+
+# The runtime container only ever runs `node server.js`; npm is never invoked.
+# The base image's own bundled npm install carries its own dependency tree
+# (including a vendored tar release with a published CRITICAL advisory) that
+# the image scan flags regardless of whether it is reachable. Remove it here
+# rather than waiting on an upstream base-image rebuild.
+RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
 
 COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
