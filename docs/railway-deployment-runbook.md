@@ -250,6 +250,63 @@ queries are in [`neon-setup.md`](./neon-setup.md#safe-local-operator-flow).
 
 ---
 
+## 8a. Load GPS track data for race rooms
+
+The race-room circuit map and live driver positions need each session's **full GPS location
+series**. The completed-room backfill does not load it: it keeps only the latest location fix
+per driver, which is enough for a snapshot but not for a traced track or a replay. Without this
+step, only rooms someone loaded by hand show a map.
+
+Run these **after** migrations have exited `0`, as one-off commands on a service with the
+`ingestor` role and OpenF1 credentials configured. Never add them to a start command.
+
+**1. Load GPS for every race room that does not have it yet.** Use this on a first deploy, and
+again whenever new rooms have completed:
+
+```bash
+python -m app.cli.backfill_locations --all-rooms
+```
+
+Rooms that already have samples are skipped, so a rerun only fetches what is missing and an
+interrupted run resumes where it stopped. Rooms that have not started yet are never requested.
+Expect roughly one minute per session: about 30 OpenF1 requests each.
+
+**2. Re-derive every stored track outline.** Use this after a release that changes how outlines
+are traced. It reuses stored samples and does not refetch the GPS series:
+
+```bash
+python -m app.cli.backfill_locations --all-sessions --rebuild-geometry-only
+```
+
+**3. Rebuild one session only.** For a single room, name its OpenF1 session key. For example,
+to rebuild the 2026 Italian Grand Prix race (session `11361`):
+
+```bash
+python -m app.cli.backfill_locations --session-key 11361 --rebuild-geometry-only
+```
+
+Swap `--session-key <key>` for `--room-slug <slug>` to select by room instead. Leave out
+`--rebuild-geometry-only` to fetch that session's GPS series as well.
+
+**Reading the output.** Each room reports a status:
+
+| Status | Meaning |
+| --- | --- |
+| `loaded` | GPS series stored and track traced; shows sample and track-point counts |
+| `already_loaded` | Skipped; the room already had samples |
+| `no_provider_data` | OpenF1 has no location data for that session; the map shows as unavailable |
+| `failed` | Provider or network error; rerun `--all-rooms` to retry only the failures |
+
+A session whose samples cannot support a full outline keeps the single-lap trace, or none,
+rather than drawing a guessed shape.
+
+**Local development.** `docker compose up` runs both steps automatically through the one-shot
+`track-geometry` service after `migrate`. The backend does not wait for it, so the API is
+usable while GPS loads. The first run fetches every missing room; later runs only check what
+is already loaded.
+
+---
+
 ## 9. Replicas
 
 | Service | Replicas | Rule |
@@ -444,6 +501,8 @@ Run in this order. Do not proceed past a failing step.
 | Dockerfile path | `Dockerfile` (root dir `backend`) |
 | Start command | `python -m app.runtime` |
 | Migration command | `scripts/run-production-migrations.sh` (one-off, direct DSN) |
+| GPS load (after migrations) | `python -m app.cli.backfill_locations --all-rooms` (one-off, ingestor) |
+| Track rebuild | `python -m app.cli.backfill_locations --all-sessions --rebuild-geometry-only` |
 | Health check path | `/health/live` |
 | Health check timeout | 30s |
 | Restart policy | on failure, max 10 retries |
