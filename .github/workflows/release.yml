@@ -16,6 +16,23 @@ concurrency:
   cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 jobs:
+  changes:
+    name: Detect changed components
+    runs-on: ubuntu-latest
+    outputs:
+      postgres: ${{ steps.filter.outputs.postgres }}
+      redis: ${{ steps.filter.outputs.redis }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36 # v3.0.2
+        id: filter
+        with:
+          filters: |
+            postgres:
+              - 'deploy/docker/postgres/**'
+            redis:
+              - 'deploy/docker/redis/**'
+
   backend:
     name: Backend quality gate
     runs-on: ubuntu-latest
@@ -90,43 +107,55 @@ jobs:
 
   containers:
     name: Build and scan containers
-    needs: [backend, frontend]
+    needs: [backend, frontend, changes]
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - component: backend
+            context: backend
+            dockerfile: backend/Dockerfile
+            changed: "true"
+            build_args: ""
+          - component: frontend
+            context: frontend
+            dockerfile: frontend/Dockerfile
+            changed: "true"
+            build_args: |
+              NEXT_PUBLIC_APP_NAME=Apex Arena
+              NEXT_PUBLIC_APP_URL=http://localhost:3417
+              NEXT_PUBLIC_API_URL=http://localhost:8764
+          - component: postgres
+            context: deploy/docker/postgres
+            dockerfile: deploy/docker/postgres/Dockerfile
+            changed: ${{ needs.changes.outputs.postgres }}
+            build_args: ""
+          - component: redis
+            context: deploy/docker/redis
+            dockerfile: deploy/docker/redis/Dockerfile
+            changed: ${{ needs.changes.outputs.redis }}
+            build_args: ""
     steps:
       - uses: actions/checkout@v6
+        if: matrix.changed == 'true'
       - uses: docker/setup-buildx-action@v4
-      - name: Build backend verification image
+        if: matrix.changed == 'true'
+      - name: Build ${{ matrix.component }} verification image
+        if: matrix.changed == 'true'
         uses: docker/build-push-action@v7
         with:
-          context: backend
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
           load: true
-          tags: apex-arena-backend:verify
-          cache-from: type=gha,scope=backend
-          cache-to: type=gha,mode=max,scope=backend
-      - name: Build frontend verification image
-        uses: docker/build-push-action@v7
-        with:
-          context: frontend
-          load: true
-          tags: apex-arena-frontend:verify
-          build-args: |
-            NEXT_PUBLIC_APP_NAME=Apex Arena
-            NEXT_PUBLIC_APP_URL=http://localhost:3417
-            NEXT_PUBLIC_API_URL=http://localhost:8764
-          cache-from: type=gha,scope=frontend
-          cache-to: type=gha,mode=max,scope=frontend
-      - name: Scan backend image
+          tags: apex-arena-${{ matrix.component }}:verify
+          build-args: ${{ matrix.build_args }}
+          cache-from: type=gha,scope=${{ matrix.component }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.component }}
+      - name: Scan ${{ matrix.component }} image
+        if: matrix.changed == 'true'
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          image-ref: apex-arena-backend:verify
-          format: table
-          exit-code: "1"
-          ignore-unfixed: true
-          severity: CRITICAL
-      - name: Scan frontend image
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
-        with:
-          image-ref: apex-arena-frontend:verify
+          image-ref: apex-arena-${{ matrix.component }}:verify
           format: table
           exit-code: "1"
           ignore-unfixed: true
@@ -381,7 +410,7 @@ jobs:
   publish:
     name: Publish verified images to GHCR
     if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
-    needs: [backend, frontend, containers, end-to-end, deployment-validation]
+    needs: [backend, frontend, containers, end-to-end, deployment-validation, changes]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -393,35 +422,58 @@ jobs:
             context: backend
             dockerfile: backend/Dockerfile
             image: ghcr.io/csingh26/apex-arena-backend
+            changed: "true"
+            platforms: linux/amd64,linux/arm64
             build_args: ""
           - component: frontend
             context: frontend
             dockerfile: frontend/Dockerfile
             image: ghcr.io/csingh26/apex-arena-frontend
+            changed: "true"
+            platforms: linux/amd64,linux/arm64
             build_args: |
               NEXT_PUBLIC_APP_NAME=Apex Arena
               NEXT_PUBLIC_APP_URL=http://localhost:3417
               NEXT_PUBLIC_API_URL=http://localhost:8764
+          - component: postgres
+            context: deploy/docker/postgres
+            dockerfile: deploy/docker/postgres/Dockerfile
+            image: ghcr.io/csingh26/apex-arena-postgres
+            changed: ${{ needs.changes.outputs.postgres }}
+            # The Postgres image is pinned to the volume's glibc initdb; keep
+            # this single-arch so an arm64 build is never accidentally used.
+            platforms: linux/amd64
+            build_args: ""
+          - component: redis
+            context: deploy/docker/redis
+            dockerfile: deploy/docker/redis/Dockerfile
+            image: ghcr.io/csingh26/apex-arena-redis
+            changed: ${{ needs.changes.outputs.redis }}
+            platforms: linux/amd64,linux/arm64
+            build_args: ""
     steps:
       - uses: actions/checkout@v6
+        if: startsWith(github.ref, 'refs/tags/v') || matrix.changed == 'true'
       - uses: docker/setup-qemu-action@v4
+        if: startsWith(github.ref, 'refs/tags/v') || matrix.changed == 'true'
       - uses: docker/setup-buildx-action@v4
+        if: startsWith(github.ref, 'refs/tags/v') || matrix.changed == 'true'
       - name: Sign in to GitHub Container Registry
-        if: startsWith(github.ref, 'refs/tags/v') || matrix.component == 'backend'
+        if: startsWith(github.ref, 'refs/tags/v') || matrix.changed == 'true'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Generate container metadata
-        if: startsWith(github.ref, 'refs/tags/v') || matrix.component == 'backend'
+        if: startsWith(github.ref, 'refs/tags/v') || matrix.changed == 'true'
         id: meta
         uses: docker/metadata-action@v5
         with:
           images: ${{ matrix.image }}
           tags: |
-            type=raw,value=main,enable=${{ github.ref == 'refs/heads/main' && matrix.component == 'backend' }}
-            type=raw,value=${{ github.sha }},enable=${{ github.ref == 'refs/heads/main' && matrix.component == 'backend' }}
+            type=raw,value=main,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=${{ github.sha }},enable=${{ github.ref == 'refs/heads/main' }}
             type=semver,pattern={{version}},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
             type=semver,pattern={{major}}.{{minor}},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
             type=semver,pattern={{major}},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
@@ -431,15 +483,40 @@ jobs:
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
       - name: Publish ${{ matrix.component }} image
-        if: startsWith(github.ref, 'refs/tags/v') || matrix.component == 'backend'
+        if: startsWith(github.ref, 'refs/tags/v') || matrix.changed == 'true'
         uses: docker/build-push-action@v7
         with:
           context: ${{ matrix.context }}
           file: ${{ matrix.dockerfile }}
           push: true
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ matrix.platforms }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: ${{ matrix.build_args }}
           cache-from: type=gha,scope=${{ matrix.component }}
           cache-to: type=gha,mode=max,scope=${{ matrix.component }}
+
+  deploy:
+    name: Trigger Railway redeploy
+    # Only main pushes deploy: a tag build publishes versioned images for
+    # release but must never move what production is already running.
+    if: github.ref == 'refs/heads/main'
+    needs: [publish, changes]
+    runs-on: ubuntu-latest
+    environment: Production
+    env:
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+    steps:
+      - name: Redeploy backend (apex-arena-backend:main)
+        run: npx -y @railway/cli@latest redeploy --service apex-arena-backend --yes
+      - name: Redeploy frontend (apex-arena-frontend:main)
+        run: npx -y @railway/cli@latest redeploy --service apex-arena-frontend --yes
+      # Postgres and Redis only redeploy when their own image actually
+      # changed - bouncing a stateful datastore on an unrelated app commit
+      # would be pure risk for no benefit.
+      - name: Redeploy Postgres (apex-arena-postgres:main)
+        if: needs.changes.outputs.postgres == 'true'
+        run: npx -y @railway/cli@latest redeploy --service Postgres --yes
+      - name: Redeploy Redis (apex-arena-redis:main)
+        if: needs.changes.outputs.redis == 'true'
+        run: npx -y @railway/cli@latest redeploy --service Redis --yes
